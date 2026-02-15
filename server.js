@@ -15,20 +15,24 @@ app.use(express.json());
 
 // ---------- Firebase Admin ----------
 let serviceAccount;
+console.log("🔍 Checking for FIREBASE_SERVICE_ACCOUNT env var...");
 if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  console.log("✅ FIREBASE_SERVICE_ACCOUNT env var detected.");
   try {
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   } catch (err) {
-    console.error("❌ Failed to parse FIREBASE_SERVICE_ACCOUNT environment variable:", err.message);
+    console.error("❌ Failed to parse FIREBASE_SERVICE_ACCOUNT JSON:", err.message);
   }
+} else {
+  console.log("ℹ️ FIREBASE_SERVICE_ACCOUNT env var is not set.");
 }
 
 if (!serviceAccount) {
   try {
     serviceAccount = require("./serviceAccount.json");
+    console.log("✅ Loaded credentials from serviceAccount.json file.");
   } catch (err) {
-    console.error("❌ serviceAccount.json not found and FIREBASE_SERVICE_ACCOUNT env var is missing.");
-    // In production, we should probably exit or throw, but let's keep it running to see other logs
+    console.error("❌ No serviceAccount.json file found.");
   }
 }
 
@@ -37,8 +41,9 @@ if (serviceAccount) {
     credential: admin.credential.cert(serviceAccount),
     storageBucket: "mega-b891d.firebasestorage.app",
   });
+  console.log("🚀 Firebase Admin initialized successfully.");
 } else {
-  console.warn("⚠️ Firebase Admin not initialized: Missing credentials.");
+  console.error("💀 CRITICAL: Firebase Admin NOT initialized. The app will fail to communicate with the database.");
 }
 
 const db = admin.firestore();
