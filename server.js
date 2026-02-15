@@ -110,13 +110,10 @@ app.post("/api/members/upload", verifyAzureToken, upload.single("photo"), async 
     console.log("🔗 Signed URL generated:", signedUrl);
     res.json({ url: signedUrl });
   } catch (err) {
-    console.error("❌ Upload Error Detail:", {
-      message: err.message,
-      code: err.code,
-      stack: err.stack,
-      name: err.name
-    });
-    res.status(500).json({ error: "Upload failed: " + err.message });
+    console.error("❌ Upload Error Detail:", err);
+    let detailedError = err.message;
+    if (!admin.apps.length) detailedError = "Firebase Admin not initialized (Service Account missing)";
+    res.status(500).json({ error: "Upload failed: " + detailedError });
   }
 });
 
