@@ -371,11 +371,48 @@ app.delete("/api/courses/:id", verifyAzureToken, async (req, res) => {
 app.get("/public/courses", async (req, res) => {
   try {
     const snap = await db.collection("courses").get();
-    const courses = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const courses = await Promise.all(snap.docs.map(async doc => {
+      const data = doc.data();
+      const resSnap = await db.collection("reservations")
+        .where("sessionId", "==", doc.id)
+        .where("status", "==", "reserved")
+        .get();
+
+      return {
+        id: doc.id,
+        ...data,
+        reserved: resSnap.size
+      };
+    }));
     res.json(courses);
   } catch (err) {
     console.error("Public Courses Fetch Error:", err);
     res.status(500).json({ error: "Failed to fetch courses" });
+  }
+});
+
+// GET Reservations for a specific course (Admin only)
+app.get("/api/courses/:id/reservations", verifyAzureToken, async (req, res) => {
+  try {
+    const snap = await db.collection("reservations")
+      .where("sessionId", "==", req.params.id)
+      .where("status", "==", "reserved")
+      .get();
+
+    const reservations = snap.docs.map(doc => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        memberId: data.memberId,
+        fullName: data.fullName || "Unknown Member",
+        reservedAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : null
+      };
+    });
+
+    res.json(reservations);
+  } catch (err) {
+    console.error("Fetch Reservations Error:", err);
+    res.status(500).json({ error: "Failed to fetch reservations" });
   }
 });
 
