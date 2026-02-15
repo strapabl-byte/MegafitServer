@@ -356,6 +356,31 @@ app.post("/api/courses", verifyAzureToken, async (req, res) => {
   }
 });
 
+// UPDATE Course
+app.put("/api/courses/:id", verifyAzureToken, async (req, res) => {
+  try {
+    const { title, coach, days, time, capacity } = req.body;
+    const courseRef = db.collection("courses").doc(req.params.id);
+
+    const updateData = {};
+    if (title !== undefined) updateData.title = title;
+    if (coach !== undefined) updateData.coach = coach;
+    if (days !== undefined) updateData.days = days;
+    if (time !== undefined) updateData.time = time;
+    if (capacity !== undefined) updateData.capacity = Number(capacity);
+
+    updateData.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+
+    await courseRef.update(updateData);
+    const updatedSnap = await courseRef.get();
+
+    res.json({ id: updatedSnap.id, ...updatedSnap.data() });
+  } catch (err) {
+    console.error("Update Course Error:", err);
+    res.status(500).json({ error: "Failed to update course" });
+  }
+});
+
 // DELETE Course
 app.delete("/api/courses/:id", verifyAzureToken, async (req, res) => {
   try {
