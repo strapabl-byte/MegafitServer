@@ -81,16 +81,42 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 app.post("/api/members/upload", verifyAzureToken, upload.single("photo"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+    console.log("📸 Received upload request for member photo");
+    if (!req.file) {
+      console.warn("⚠️ No file in request");
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    console.log(`📂 File: ${req.file.originalname}, Size: ${req.file.size}, Mime: ${req.file.mimetype}`);
+
     const ext = (req.file.originalname && req.file.originalname.split(".").pop()) || "jpg";
     const fileName = `members/${Date.now()}-${crypto.randomUUID().slice(0, 8)}.${ext}`;
     const file = bucket.file(fileName);
-    await file.save(req.file.buffer, { metadata: { contentType: req.file.mimetype }, resumable: false });
-    const [signedUrl] = await file.getSignedUrl({ action: "read", expires: "2100-01-01" });
+
+    console.log(`☁️ Attempting to save to bucket: ${bucket.name}, path: ${fileName}`);
+
+    await file.save(req.file.buffer, {
+      metadata: { contentType: req.file.mimetype },
+      resumable: false
+    });
+
+    console.log("✅ File saved successfully. Generating signed URL...");
+
+    const [signedUrl] = await file.getSignedUrl({
+      action: "read",
+      expires: "2100-01-01"
+    });
+
+    console.log("🔗 Signed URL generated:", signedUrl);
     res.json({ url: signedUrl });
   } catch (err) {
-    console.error("Upload Error:", err);
-    res.status(500).json({ error: "Upload failed" });
+    console.error("❌ Upload Error Detail:", {
+      message: err.message,
+      code: err.code,
+      stack: err.stack,
+      name: err.name
+    });
+    res.status(500).json({ error: "Upload failed: " + err.message });
   }
 });
 
