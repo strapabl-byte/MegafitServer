@@ -14,12 +14,32 @@ app.use(cors());
 app.use(express.json());
 
 // ---------- Firebase Admin ----------
-const serviceAccount = require("./serviceAccount.json");
+let serviceAccount;
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  try {
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  } catch (err) {
+    console.error("❌ Failed to parse FIREBASE_SERVICE_ACCOUNT environment variable:", err.message);
+  }
+}
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  storageBucket: "mega-b891d.firebasestorage.app", // ✅ confirm bucket name
-});
+if (!serviceAccount) {
+  try {
+    serviceAccount = require("./serviceAccount.json");
+  } catch (err) {
+    console.error("❌ serviceAccount.json not found and FIREBASE_SERVICE_ACCOUNT env var is missing.");
+    // In production, we should probably exit or throw, but let's keep it running to see other logs
+  }
+}
+
+if (serviceAccount) {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+    storageBucket: "mega-b891d.firebasestorage.app",
+  });
+} else {
+  console.warn("⚠️ Firebase Admin not initialized: Missing credentials.");
+}
 
 const db = admin.firestore();
 const bucket = admin.storage().bucket();
