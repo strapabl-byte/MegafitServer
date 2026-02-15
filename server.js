@@ -203,10 +203,15 @@ app.post("/api/payments", verifyAzureToken, async (req, res) => {
 
 app.get("/api/courses", verifyAzureToken, async (req, res) => {
   try {
+    const weekday = req.query.weekday !== undefined ? parseInt(req.query.weekday) : new Date().getDay();
     const snap = await db.collection("courses").get();
     const courses = await Promise.all(snap.docs.map(async doc => {
       const data = doc.data();
-      const resSnap = await db.collection("reservations").where("sessionId", "==", doc.id).where("status", "==", "reserved").get();
+      const resSnap = await db.collection("reservations")
+        .where("sessionId", "==", doc.id)
+        .where("weekday", "==", weekday)
+        .where("status", "==", "reserved")
+        .get();
       return { id: doc.id, ...data, reserved: resSnap.size };
     }));
     res.json(courses);
@@ -261,7 +266,12 @@ app.delete("/api/courses/:id", verifyAzureToken, async (req, res) => {
 
 app.get("/api/courses/:id/reservations", verifyAzureToken, async (req, res) => {
   try {
-    const snap = await db.collection("reservations").where("sessionId", "==", req.params.id).where("status", "==", "reserved").get();
+    const weekday = req.query.weekday !== undefined ? parseInt(req.query.weekday) : new Date().getDay();
+    const snap = await db.collection("reservations")
+      .where("sessionId", "==", req.params.id)
+      .where("weekday", "==", weekday)
+      .where("status", "==", "reserved")
+      .get();
     res.json(snap.docs.map(doc => {
       const data = doc.data();
       return { id: doc.id, memberId: data.memberId, fullName: data.fullName || "Unknown", reservedAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : null };
@@ -273,10 +283,15 @@ app.get("/api/courses/:id/reservations", verifyAzureToken, async (req, res) => {
 
 app.get("/public/courses", async (req, res) => {
   try {
+    const weekday = req.query.weekday !== undefined ? parseInt(req.query.weekday) : new Date().getDay();
     const snap = await db.collection("courses").get();
     const courses = await Promise.all(snap.docs.map(async doc => {
       const data = doc.data();
-      const resSnap = await db.collection("reservations").where("sessionId", "==", doc.id).where("status", "==", "reserved").get();
+      const resSnap = await db.collection("reservations")
+        .where("sessionId", "==", doc.id)
+        .where("weekday", "==", weekday)
+        .where("status", "==", "reserved")
+        .get();
       return { id: doc.id, ...data, reserved: resSnap.size };
     }));
     res.json(courses);
