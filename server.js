@@ -323,6 +323,178 @@ app.get("/public/courses", async (req, res) => {
   }
 });
 
+// ---------- COACHES ----------
+
+app.get("/api/coaches", verifyAzureToken, async (req, res) => {
+  try {
+    const snap = await db.collection("coaches").orderBy("createdAt", "desc").get();
+    res.json(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+  } catch (err) {
+    console.error("Coaches Fetch Error:", err);
+    res.status(500).json({ error: "Failed to fetch coaches" });
+  }
+});
+
+app.post("/api/coaches", verifyAzureToken, async (req, res) => {
+  try {
+    const { name, surname, specialty, phone, email, hireDate, bio, photo } = req.body;
+    if (!name || !surname || !specialty) return res.status(400).json({ error: "name, surname and specialty are required" });
+    const qrToken = crypto.randomBytes(16).toString("hex");
+    const docRef = await db.collection("coaches").add({
+      name, surname, specialty,
+      phone: phone || null,
+      email: email || null,
+      hireDate: hireDate || null,
+      bio: bio || null,
+      photo: photo || null,
+      qrToken,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdBy: req.user?.preferred_username || req.user?.name || "Admin",
+    });
+    const snap = await docRef.get();
+    res.json({ id: docRef.id, ...snap.data() });
+  } catch (err) {
+    console.error("Create Coach Error:", err);
+    res.status(500).json({ error: "Failed to create coach" });
+  }
+});
+
+app.put("/api/coaches/:id", verifyAzureToken, async (req, res) => {
+  try {
+    const { name, surname, specialty, phone, email, hireDate, bio, photo } = req.body;
+    const ref = db.collection("coaches").doc(req.params.id);
+    const updateData = {};
+    if (name !== undefined) updateData.name = name;
+    if (surname !== undefined) updateData.surname = surname;
+    if (specialty !== undefined) updateData.specialty = specialty;
+    if (phone !== undefined) updateData.phone = phone;
+    if (email !== undefined) updateData.email = email;
+    if (hireDate !== undefined) updateData.hireDate = hireDate;
+    if (bio !== undefined) updateData.bio = bio;
+    if (photo !== undefined) updateData.photo = photo;
+    updateData.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+    await ref.update(updateData);
+    const snap = await ref.get();
+    res.json({ id: snap.id, ...snap.data() });
+  } catch (err) {
+    console.error("Update Coach Error:", err);
+    res.status(500).json({ error: "Failed to update coach" });
+  }
+});
+
+app.delete("/api/coaches/:id", verifyAzureToken, async (req, res) => {
+  try {
+    await db.collection("coaches").doc(req.params.id).delete();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Delete Coach Error:", err);
+    res.status(500).json({ error: "Failed to delete coach" });
+  }
+});
+
+// Public: validate coach QR → return Firebase custom token (one-time use)
+app.get("/public/coach-pass/:token", async (req, res) => {
+  try {
+    const token = req.params.token;
+    if (!token) return res.status(400).json({ error: "Missing token" });
+    const snap = await db.collection("coaches").where("qrToken", "==", token).limit(1).get();
+    if (snap.empty) return res.status(404).json({ error: "Coach pass not found" });
+    const docSnap = snap.docs[0];
+    const data = docSnap.data();
+    // Invalidate token after first use
+    await docSnap.ref.update({ qrToken: admin.firestore.FieldValue.delete() });
+    await db.collection("access_logs").add({
+      coachId: docSnap.id,
+      usedAt: admin.firestore.FieldValue.serverTimestamp(),
+      type: "coach_qr"
+    });
+    const firebaseCustomToken = await admin.auth().createCustomToken(`coach_${docSnap.id}`, { role: "coach" });
+    res.json({
+      ok: true,
+      firebaseCustomToken,
+      coach: {
+        id: docSnap.id,
+        name: data.name,
+        surname: data.surname,
+        specialty: data.specialty,
+      }
+    });
+  } catch (err) {
+    console.error("Coach Pass Error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Get all members enrolled in this coach's courses
+app.get("/api/coaches/:id/participants", verifyAzureToken, async (req, res) => {
+  try {
+    // 1. Get the coach to know their name (courses are matched by coach name)
+    const coachDoc = await db.collection("coaches").doc(req.params.id).get();
+    if (!coachDoc.exists) return res.status(404).json({ error: "Coach not found" });
+    const coachName = `${coachDoc.data().name} ${coachDoc.data().surname}`.trim();
+
+    // 2. Find all courses by this coach (match by full name OR first name for legacy data)
+    const coursesSnap = await db.collection("courses")
+      .where("coach", "==", coachName)
+      .get();
+
+    // Also try matching by first name only (legacy Courses.jsx used firstName)
+    const firstNameSnap = await db.collection("courses")
+      .where("coach", "==", coachDoc.data().name)
+      .get();
+
+    const courseIds = new Set([
+      ...coursesSnap.docs.map(d => d.id),
+      ...firstNameSnap.docs.map(d => d.id),
+    ]);
+
+    if (courseIds.size === 0) {
+      return res.json([]);
+    }
+
+    // 3. Get all active reservations for those courses
+    const courseIdArr = Array.from(courseIds);
+    // Firestore 'in' supports up to 30 items
+    const chunks = [];
+    for (let i = 0; i < courseIdArr.length; i += 30) chunks.push(courseIdArr.slice(i, i + 30));
+
+    const allReservations = [];
+    for (const chunk of chunks) {
+      const resSnap = await db.collection("reservations")
+        .where("sessionId", "in", chunk)
+        .where("status", "==", "reserved")
+        .get();
+      resSnap.docs.forEach(doc => {
+        const d = doc.data();
+        allReservations.push({
+          id: doc.id,
+          memberId: d.memberId,
+          fullName: d.fullName || "Unknown",
+          courseId: d.sessionId,
+          courseName: coursesSnap.docs.find(c => c.id === d.sessionId)?.data()?.title
+            || firstNameSnap.docs.find(c => c.id === d.sessionId)?.data()?.title
+            || "—",
+          weekday: d.weekday,
+          reservedAt: d.createdAt?.toDate ? d.createdAt.toDate().toISOString() : null,
+        });
+      });
+    }
+
+    // Deduplicate by memberId (same member could have multiple reservations)
+    const seen = new Set();
+    const unique = allReservations.filter(r => {
+      if (seen.has(r.memberId)) return false;
+      seen.add(r.memberId);
+      return true;
+    });
+
+    res.json(unique);
+  } catch (err) {
+    console.error("Coach Participants Error:", err);
+    res.status(500).json({ error: "Failed to fetch participants" });
+  }
+});
+
 // ---------- HELPERS ----------
 
 function daysLeft(expiresOn) {
