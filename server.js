@@ -27,9 +27,15 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
 
 if (!serviceAccount) {
   try {
-    serviceAccount = require("./serviceAccount.json");
+    // Check Render's native secret file path first, then fallback to local
+    const fs = require('fs');
+    if (fs.existsSync("/etc/secrets/serviceAccount.json")) {
+      serviceAccount = require("/etc/secrets/serviceAccount.json");
+    } else {
+      serviceAccount = require("./serviceAccount.json");
+    }
   } catch (err) {
-    console.error("❌ No serviceAccount.json file found and no FIREBASE_SERVICE_ACCOUNT env var set.");
+    console.error("❌ No serviceAccount.json file found (checked local and /etc/secrets/) and no FIREBASE_SERVICE_ACCOUNT env var set.");
   }
 }
 
