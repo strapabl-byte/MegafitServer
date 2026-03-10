@@ -10,6 +10,8 @@ const crypto = require("crypto");
 
 // ---------- App Setup ----------
 const app = express();
+const helmet = require("helmet");
+app.use(helmet()); // Basic security headers
 app.use(cors());
 app.use(express.json());
 
@@ -61,19 +63,48 @@ function verifyAzureToken(req, res, next) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
 
-  if (!token) return res.status(401).json({ error: "Missing token" });
-
-  if (token === "demo-token") {
-    req.user = { id: "demo-admin", name: "Demo Admin", role: "admin" };
-    return next();
+  if (!token) {
+    console.warn("⚠️ verifyAzureToken: Missing token in header");
+    return res.status(401).json({ error: "Missing token" });
   }
 
+  // DELETED: demo-token bypass for production security
+
   jwt.verify(token, getKey, { algorithms: ["RS256"] }, (err, decoded) => {
-    if (err) return res.status(401).json({ error: "Invalid token" });
-    if (decoded.tid && decoded.tid !== tenantId) return res.status(401).json({ error: "Invalid tenant" });
+    if (err) {
+      console.error("❌ verifyAzureToken: Invalid token", err.message);
+      return res.status(401).json({ error: "Invalid token" });
+    }
+    if (decoded.tid && decoded.tid !== tenantId) {
+      console.warn(`⚠️ verifyAzureToken: Invalid tenant ID: ${decoded.tid} vs ${tenantId}`);
+      return res.status(401).json({ error: "Invalid tenant" });
+    }
     req.user = decoded;
+
+    // Normalize role from Azure claims (Extension or App Role)
+    // Adjust these based on your specific Azure Ad setup
+    req.isAdmin = decoded.roles?.includes("Admin") || decoded.extension_Role === "admin";
+    req.isManager = decoded.roles?.includes("Manager") || decoded.extension_Role === "manager";
+
     next();
   });
+}
+
+function requireAdmin(req, res, next) {
+  if (!req.isAdmin) {
+    console.warn(`🚫 Access Denied: Admin role required for ${req.method} ${req.url} (User: ${req.user?.oid || 'Unknown'})`);
+    // Security Audit Log
+    db.collection("security_audit").add({
+      type: "403_FORBIDDEN",
+      path: req.url,
+      method: req.method,
+      userOid: req.user?.oid,
+      timestamp: admin.firestore.FieldValue.serverTimestamp()
+    }).catch(e => console.error("Audit log failed", e));
+
+    return res.status(403).json({ error: "Access Denied: Admin role required" });
+  }
+  next();
 }
 
 // ---------- File Upload ----------
@@ -122,7 +153,23 @@ app.post("/api/members/upload", verifyAzureToken, upload.single("photo"), async 
 app.get("/api/members", verifyAzureToken, async (req, res) => {
   try {
     const snap = await db.collection("members").get();
-    const members = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    let members = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    // Data Minimization for Managers
+    if (!req.isAdmin) {
+      members = members.map(m => ({
+        id: m.id,
+        fullName: m.fullName || `${m.name || ''} ${m.surname || ''}`.trim() || "Inconnu",
+        phone: m.phone || "",
+        birthday: m.birthday || "", // Fixed: Allow managers to see birthday for Age/Anniv persistence
+        expiresOn: m.expiresOn,
+        plan: m.plan,
+        qrToken: m.qrToken || "",
+        image: m.photo || m.image || null,
+        isRestricted: true // Flag for UI
+      }));
+    }
+
     res.json(members);
   } catch (err) {
     console.error("Members Fetch Error:", err);
@@ -135,14 +182,85 @@ app.post("/api/members", verifyAzureToken, async (req, res) => {
     const { fullName, phone, plan, birthday, expiresOn, photo } = req.body;
     const qrToken = crypto.randomBytes(16).toString("hex");
     const docRef = await db.collection("members").add({
-      fullName, phone, plan, birthday, expiresOn, photo: photo || null, qrToken,
+      fullName,
+      phone: phone || null,
+      plan: plan || "Monthly",
+      birthday: birthday || null,
+      expiresOn: expiresOn || new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0],
+      photo: photo || null,
+      qrToken,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+
     const snap = await docRef.get();
     res.json({ id: docRef.id, ...snap.data() });
   } catch (err) {
     console.error("Create Member Error:", err);
     res.status(500).json({ error: "Failed to create member" });
+  }
+});
+
+// ---------- INSCRIPTIONS (Pending Members) ----------
+
+// Public: Submit from inscription form
+app.post("/public/inscriptions", async (req, res) => {
+  try {
+    const data = req.body;
+    const docRef = await db.collection("pending_members").add({
+      ...data,
+      source: "web",
+      status: "pending",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    res.json({ id: docRef.id, ok: true });
+  } catch (err) {
+    console.error("Public Inscription Error:", err);
+    res.status(500).json({ error: "Failed to submit inscription" });
+  }
+});
+
+// Admin: List pending inscriptions (Web only)
+app.get("/api/inscriptions", verifyAzureToken, async (req, res) => {
+  try {
+    // Simple query to avoid complex indexing requirements in dev
+    const snap = await db.collection("pending_members")
+      .where("source", "==", "web")
+      .get();
+
+    const data = snap.docs
+      .map(doc => ({ id: doc.id, ...doc.data() }))
+      .filter(ins => ins.status === "pending" || ins.status === "converted"); // Fixed: Keep converted items for persistent notifications
+    // Sort in memory instead
+    data.sort((a, b) => (b.createdAt?._seconds || 0) - (a.createdAt?._seconds || 0));
+
+    res.json(data);
+  } catch (err) {
+    console.error("Pending Inscriptions Fetch Error:", err);
+    res.status(500).json({ error: "Failed to fetch pending inscriptions" });
+  }
+});
+
+// Admin: Update inscription (e.g., mark as converted)
+app.patch("/api/inscriptions/:id", verifyAzureToken, async (req, res) => {
+  try {
+    const updateData = {
+      ...req.body,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+    await db.collection("pending_members").doc(req.params.id).update(updateData);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update inscription" });
+  }
+});
+
+// Admin: Delete/Mark as processed
+app.delete("/api/inscriptions/:id", verifyAzureToken, async (req, res) => {
+  try {
+    await db.collection("pending_members").doc(req.params.id).delete();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete inscription" });
   }
 });
 
@@ -198,11 +316,12 @@ app.delete("/api/members/:id", verifyAzureToken, async (req, res) => {
 
 // ---------- PAYMENTS ----------
 
-app.get("/api/payments/:memberId", verifyAzureToken, async (req, res) => {
+app.get("/api/payments/:memberId", verifyAzureToken, requireAdmin, async (req, res) => {
   try {
     const snap = await db.collection("payments").where("memberId", "==", req.params.memberId).orderBy("date", "desc").get();
     res.json(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
   } catch (err) {
+    console.error("Payment History Fetch Error:", err);
     res.status(500).json({ error: "Failed to fetch payments" });
   }
 });
@@ -222,23 +341,101 @@ app.post("/api/payments", verifyAzureToken, async (req, res) => {
   }
 });
 
+// Atomic conversion of Web Inscription -> Active Member + First Payment
+app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res) => {
+  const { inscriptionId, amount, plan, method, expiresOn, fullName, phone, birthday, photo } = req.body;
+
+  try {
+    const inscriptionRef = db.collection("pending_members").doc(inscriptionId);
+    const insDoc = await inscriptionRef.get();
+
+    if (!insDoc.exists) {
+      return res.status(404).json({ error: "Inscription non trouvée" });
+    }
+
+    const insData = insDoc.data();
+    const qrToken = crypto.randomBytes(16).toString("hex");
+
+    // 1. Create the Member (allow overrides from dashboard form)
+    const memberData = {
+      fullName: fullName || `${insData.prenom || ''} ${insData.nom || ''}`.trim(),
+      phone: phone || insData.telephone || "",
+      plan: plan || "Monthly",
+      birthday: birthday || insData.dateNaissance || null,
+      expiresOn: expiresOn || new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0],
+      photo: photo || insData.profilePicture || null,
+      qrToken,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    const memberRef = await db.collection("members").add(memberData);
+
+    // 2. Record the Payment
+    const paymentData = {
+      memberId: memberRef.id,
+      amount: Number(amount),
+      plan: plan || "Monthly",
+      date: new Date().toISOString(),
+      method: method || "Espèces",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      recordedBy: req.user?.preferred_username || req.user?.name || "Admin"
+    };
+
+    await db.collection("payments").add(paymentData);
+
+    // 3. Delete the Inscription
+    await inscriptionRef.delete();
+
+    // 4. Audit Log
+    await db.collection("security_audit").add({
+      type: "INSCRIPTION_CONVERTED",
+      inscriptionId,
+      memberId: memberRef.id,
+      userOid: req.user?.oid,
+      timestamp: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    res.json({
+      ok: true,
+      member: { id: memberRef.id, ...memberData }
+    });
+
+  } catch (err) {
+    console.error("❌ Conversion Error:", err);
+    res.status(500).json({ error: "Échec de l'activation du membre" });
+  }
+});
+
 // ---------- COURSES ----------
 
 app.get("/api/courses", verifyAzureToken, async (req, res) => {
   try {
     const weekday = req.query.weekday !== undefined ? parseInt(req.query.weekday) : new Date().getDay();
     const snap = await db.collection("courses").get();
+
     const courses = await Promise.all(snap.docs.map(async doc => {
       const data = doc.data();
+      const courseRef = doc.ref;
+
+      // Calculate real-time count
       const resSnap = await db.collection("reservations")
         .where("sessionId", "==", doc.id)
         .where("weekday", "==", weekday)
         .where("status", "==", "reserved")
         .get();
-      return { id: doc.id, ...data, reserved: resSnap.size };
+
+      const realTimeCount = resSnap.size;
+
+      // Lazy Sync: Update Firestore if the count in the doc is wrong or missing
+      if (data.reserved !== realTimeCount) {
+        await courseRef.update({ reserved: realTimeCount, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+      }
+
+      return { id: doc.id, ...data, reserved: realTimeCount };
     }));
     res.json(courses);
   } catch (err) {
+    console.error("Failed to fetch courses:", err);
     res.status(500).json({ error: "Failed to fetch courses" });
   }
 });
@@ -315,11 +512,44 @@ app.get("/public/courses", async (req, res) => {
         .where("weekday", "==", weekday)
         .where("status", "==", "reserved")
         .get();
-      return { id: doc.id, ...data, reserved: resSnap.size };
+
+      const realTimeCount = resSnap.size;
+      if (data.reserved !== realTimeCount) {
+        await doc.ref.update({ reserved: realTimeCount, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+      }
+
+      return { id: doc.id, ...data, reserved: realTimeCount };
     }));
     res.json(courses);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch public courses" });
+  }
+});
+
+// Manual trigger to sync ALL courses at once
+app.post("/api/courses/sync-all", verifyAzureToken, async (req, res) => {
+  try {
+    const weekday = req.query.weekday !== undefined ? parseInt(req.query.weekday) : new Date().getDay();
+    const snap = await db.collection("courses").get();
+    let updatedCount = 0;
+
+    for (const doc of snap.docs) {
+      const resSnap = await db.collection("reservations")
+        .where("sessionId", "==", doc.id)
+        .where("weekday", "==", weekday)
+        .where("status", "==", "reserved")
+        .get();
+
+      await doc.ref.update({
+        reserved: resSnap.size,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      updatedCount++;
+    }
+    res.json({ ok: true, message: `Synced ${updatedCount} courses.` });
+  } catch (err) {
+    console.error("Global Sync Error:", err);
+    res.status(500).json({ error: "Sync failed" });
   }
 });
 
@@ -495,6 +725,105 @@ app.get("/api/coaches/:id/participants", verifyAzureToken, async (req, res) => {
   }
 });
 
+// Get all reservations across all courses
+app.get("/api/reservations-global", verifyAzureToken, async (req, res) => {
+  try {
+    const resSnap = await db.collection("reservations").orderBy("createdAt", "desc").limit(200).get();
+
+    const data = resSnap.docs.map(doc => {
+      const d = doc.data();
+      // Serialize Firestore Timestamp to ISO string
+      let createdAt = null;
+      if (d.createdAt?.toDate) {
+        createdAt = d.createdAt.toDate().toISOString();
+      } else if (d.createdAt?._seconds) {
+        createdAt = new Date(d.createdAt._seconds * 1000).toISOString();
+      } else if (doc.createTime) {
+        createdAt = doc.createTime.toDate().toISOString();
+      }
+      return {
+        id: doc.id,
+        memberId: d.memberId,
+        fullName: d.fullName || "Unknown",
+        courseTitle: d.courseTitle || "—",
+        coachName: d.coach || "—",
+        dayName: d.dayName || "—",
+        startTime: d.start_time || "—",
+        endTime: d.end_time || "—",
+        weekday: d.weekday,
+        status: d.status,
+        createdAt
+      };
+    });
+    res.json(data);
+  } catch (err) {
+    console.error("Global Reservations Error:", err);
+    res.status(500).json({ error: "Failed to fetch global reservations" });
+  }
+});
+
+// ---------- COACH BILANS (Assessments) ----------
+
+app.get("/api/coach-reservations", verifyAzureToken, async (req, res) => {
+  try {
+    const { status } = req.query;
+    let query = db.collection("coach_reservations");
+
+    if (status && status !== 'both') {
+      query = query.where("status", "==", status);
+    }
+
+    console.log(`🔍 Fetching bilans for status: ${status}`);
+    const snap = await query.get();
+    console.log(`📊 Found ${snap.size} documents in Firestore for bilans`);
+    const data = snap.docs.map(doc => {
+      const d = doc.data();
+      // Resolve the actual date — use createTime metadata as fallback
+      let resolvedDate = null;
+      const raw = d.createdAt;
+      if (raw && raw.toDate) {
+        resolvedDate = raw.toDate().toISOString(); // Real Firestore Timestamp
+      } else if (raw && raw._seconds) {
+        resolvedDate = new Date(raw._seconds * 1000).toISOString(); // Serialized timestamp
+      } else if (doc.createTime) {
+        resolvedDate = doc.createTime.toDate().toISOString(); // Firestore doc metadata fallback
+      }
+      return { id: doc.id, ...d, createdAt: resolvedDate };
+    });
+
+    // Sort by createdAt descending
+    data.sort((a, b) => {
+      const da = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const db2 = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return db2 - da;
+    });
+
+    res.json(data);
+  } catch (err) {
+    console.error("Fetch Bilans Error:", err);
+    res.status(500).json({ error: "Failed to fetch bilans" });
+  }
+});
+
+app.put("/api/coach-reservations/:id", verifyAzureToken, async (req, res) => {
+  try {
+    const { status, coachNotes } = req.body;
+    const ref = db.collection("coach_reservations").doc(req.params.id);
+
+    const updateData = {};
+    if (status) updateData.status = status;
+    if (coachNotes !== undefined) updateData.coachNotes = coachNotes;
+    updateData.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+
+    await ref.update(updateData);
+    const snap = await ref.get();
+    res.json({ id: snap.id, ...snap.data() });
+  } catch (err) {
+    console.error("Update Bilan Error:", err);
+    res.status(500).json({ error: "Failed to update bilan" });
+  }
+});
+
 // ---------- HELPERS ----------
 
 function daysLeft(expiresOn) {
@@ -540,7 +869,7 @@ app.get("/public/member-status/:memberId", async (req, res) => {
   }
 });
 
-app.post("/api/chat", async (req, res) => {
+app.post("/api/chat", verifyAzureToken, async (req, res) => {
   try {
     const { messages } = req.body;
     const GROQ_API_KEY = process.env.GROQ_API_KEY;
