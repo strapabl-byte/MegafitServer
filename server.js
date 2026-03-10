@@ -186,6 +186,19 @@ app.get("/api/members", verifyAzureToken, async (req, res) => {
 app.post("/api/members", verifyAzureToken, async (req, res) => {
   try {
     const { fullName, phone, plan, birthday, expiresOn, photo } = req.body;
+
+    // Check for existing member by phone to prevent duplicates
+    if (phone) {
+      const existing = await db.collection("members").where("phone", "==", phone).limit(1).get();
+      if (!existing.empty) {
+        const m = existing.docs[0].data();
+        return res.status(409).json({
+          error: "Ce numéro de téléphone est déjà associé à un membre.",
+          member: { id: existing.docs[0].id, ...m }
+        });
+      }
+    }
+
     const qrToken = crypto.randomBytes(16).toString("hex");
     const docRef = await db.collection("members").add({
       fullName,
@@ -228,15 +241,12 @@ app.post("/public/inscriptions", async (req, res) => {
 // Admin: List pending inscriptions (Web only)
 app.get("/api/inscriptions", verifyAzureToken, async (req, res) => {
   try {
-    // Simple query to avoid complex indexing requirements in dev
     const snap = await db.collection("pending_members")
       .where("source", "==", "web")
+      .where("status", "==", "pending") // Strictly pending
       .get();
 
-    const data = snap.docs
-      .map(doc => ({ id: doc.id, ...doc.data() }))
-      .filter(ins => ins.status === "pending" || ins.status === "converted"); // Fixed: Keep converted items for persistent notifications
-    // Sort in memory instead
+    const data = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     data.sort((a, b) => (b.createdAt?._seconds || 0) - (a.createdAt?._seconds || 0));
 
     res.json(data);
@@ -355,17 +365,43 @@ app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res
     const inscriptionRef = db.collection("pending_members").doc(inscriptionId);
     const insDoc = await inscriptionRef.get();
 
-    if (!insDoc.exists) {
-      return res.status(404).json({ error: "Inscription non trouvée" });
+    // 1. Basic check
+    const insData = insDoc.exists ? insDoc.data() : { telephone: phone };
+    const finalPhone = phone || insData.telephone;
+
+    // 2. Prevent duplication check
+    if (finalPhone) {
+      const existing = await db.collection("members").where("phone", "==", finalPhone).limit(1).get();
+      if (!existing.empty) {
+        // Option: Just link payment to existing member instead of failing
+        const mId = existing.docs[0].id;
+        console.log(`🔗 Member already exists (${mId}), recording payment only.`);
+
+        await db.collection("payments").add({
+          memberId: mId,
+          amount: Number(amount),
+          plan: plan || "Monthly",
+          date: new Date().toISOString(),
+          method: method || "Espèces",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          recordedBy: req.user?.preferred_username || req.user?.name || "Admin"
+        });
+
+        if (insDoc.exists) await inscriptionRef.delete();
+        return res.json({ ok: true, member: { id: mId, ...existing.docs[0].data() }, linked: true });
+      }
     }
 
-    const insData = insDoc.data();
+    if (!insDoc.exists && !fullName) {
+      return res.status(404).json({ error: "Inscription non trouvée et données manquantes" });
+    }
+
     const qrToken = crypto.randomBytes(16).toString("hex");
 
-    // 1. Create the Member (allow overrides from dashboard form)
+    // 3. Create Member
     const memberData = {
       fullName: fullName || `${insData.prenom || ''} ${insData.nom || ''}`.trim(),
-      phone: phone || insData.telephone || "",
+      phone: finalPhone || "",
       plan: plan || "Monthly",
       birthday: birthday || insData.dateNaissance || null,
       expiresOn: expiresOn || new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0],
@@ -376,8 +412,8 @@ app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res
 
     const memberRef = await db.collection("members").add(memberData);
 
-    // 2. Record the Payment
-    const paymentData = {
+    // 4. Record Payment
+    await db.collection("payments").add({
       memberId: memberRef.id,
       amount: Number(amount),
       plan: plan || "Monthly",
@@ -385,21 +421,10 @@ app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res
       method: method || "Espèces",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       recordedBy: req.user?.preferred_username || req.user?.name || "Admin"
-    };
-
-    await db.collection("payments").add(paymentData);
-
-    // 3. Delete the Inscription
-    await inscriptionRef.delete();
-
-    // 4. Audit Log
-    await db.collection("security_audit").add({
-      type: "INSCRIPTION_CONVERTED",
-      inscriptionId,
-      memberId: memberRef.id,
-      userOid: req.user?.oid,
-      timestamp: admin.firestore.FieldValue.serverTimestamp()
     });
+
+    // 5. Cleanup
+    if (insDoc.exists) await inscriptionRef.delete();
 
     res.json({
       ok: true,
@@ -408,7 +433,7 @@ app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res
 
   } catch (err) {
     console.error("❌ Conversion Error:", err);
-    res.status(500).json({ error: "Échec de l'activation du membre" });
+    res.status(500).json({ error: "Échec de l'activation" });
   }
 });
 
