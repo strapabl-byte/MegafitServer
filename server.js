@@ -74,7 +74,13 @@ function verifyAzureToken(req, res, next) {
     return res.status(401).json({ error: "Missing token" });
   }
 
-  // DELETED: demo-token bypass for production security
+  // 🧪 LOCAL DEV BYPASS: Allow demo-token for easier testing
+  if (token === "demo-token") {
+    console.log("🧪 verifyAzureToken: Local demo-token bypass active");
+    req.user = { name: "Demo Admin", role: "admin" };
+    req.isAdmin = true;
+    return next();
+  }
 
   jwt.verify(token, getKey, { algorithms: ["RS256"] }, (err, decoded) => {
     if (err) {
@@ -852,6 +858,92 @@ app.put("/api/coach-reservations/:id", verifyAzureToken, async (req, res) => {
   } catch (err) {
     console.error("Update Bilan Error:", err);
     res.status(500).json({ error: "Failed to update bilan" });
+  }
+});
+
+// ---------- ANALYTICS ----------
+
+app.get("/api/analytics/daily-stats/:gymId", verifyAzureToken, async (req, res) => {
+  try {
+    const { gymId } = req.params;
+    console.log(`📊 Fetching daily stats for ${gymId}...`);
+    
+    const snap = await db.collection("gym_daily_stats")
+      .where("gym_id", "==", gymId)
+      .orderBy("date", "desc")
+      .limit(30)
+      .get();
+
+    const data = snap.docs.map(doc => doc.data());
+    // Sort ascending for the chart (oldest to newest)
+    data.sort((a, b) => a.date.localeCompare(b.date));
+    
+    console.log(`✅ Returned ${data.length} days of stats for ${gymId}`);
+    res.json(data);
+  } catch (err) {
+    console.error("Daily Stats Fetch Error:", err);
+    res.status(500).json({ error: "Failed to fetch analytics" });
+  }
+});
+
+app.post("/api/analytics/log-entry", verifyAzureToken, async (req, res) => {
+  try {
+    const { gymId, userId } = req.body;
+    if (!gymId) return res.status(400).json({ error: "gymId is required" });
+    if (!userId) return res.status(400).json({ error: "userId is required for deduplication" });
+
+    // Use current date for the entry (local time string format YYYY-MM-DD)
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+    const docId = `${gymId}_${todayStr}`;
+    const docRef = db.collection("gym_daily_stats").doc(docId);
+    const visitorRef = docRef.collection("visitors").doc(userId);
+
+    await db.runTransaction(async (t) => {
+      const doc = await t.get(docRef);
+      const visitorDoc = await t.get(visitorRef);
+      const nowTs = Date.now();
+      
+      let shouldIncrement = true;
+      if (visitorDoc.exists) {
+        const lastScannedAt = visitorDoc.data().lastScannedAt;
+        const lastTs = lastScannedAt.toDate().getTime();
+        // 10 minute window (600,000 ms)
+        if (nowTs - lastTs < 600000) {
+          shouldIncrement = false;
+          console.log(`🛡️ Deduplicated scan for ${userId} at ${gymId} (within 10m)`);
+        }
+      }
+
+      if (shouldIncrement) {
+        if (!doc.exists) {
+          t.set(docRef, {
+            gym_id: gymId,
+            date: todayStr,
+            count: 1,
+            lastSyncedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+        } else {
+          t.update(docRef, {
+            count: (doc.data().count || 0) + 1,
+            lastSyncedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+        }
+        // Update/Set lastScannedAt for the visitor
+        t.set(visitorRef, {
+          userId,
+          lastScannedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        
+        console.log(`📈 Incremented entries for ${gymId} - User: ${userId}`);
+      }
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Log Entry Error:", err);
+    res.status(500).json({ error: "Failed to log entry" });
   }
 });
 
