@@ -27,15 +27,29 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
 
 if (!serviceAccount) {
   try {
-    // Check Render's native secret file path first, then fallback to local
     const fs = require('fs');
-    if (fs.existsSync("/etc/secrets/serviceAccount.json")) {
-      serviceAccount = require("/etc/secrets/serviceAccount.json");
+    const path = require('path');
+    
+    const secretPath = "/etc/secrets/serviceAccount.json";
+    const localPath = path.join(__dirname, "serviceAccount.json");
+
+    if (fs.existsSync(secretPath)) {
+      console.log("📂 Found serviceAccount.json in /etc/secrets/");
+      serviceAccount = JSON.parse(fs.readFileSync(secretPath, 'utf8'));
+    } else if (fs.existsSync(localPath)) {
+      console.log("📂 Found local serviceAccount.json");
+      serviceAccount = require(localPath);
     } else {
-      serviceAccount = require("./serviceAccount.json");
+      console.error(`❌ No serviceAccount.json found at ${secretPath} or ${localPath}`);
+      // Log available secrets for debugging
+      if (fs.existsSync("/etc/secrets")) {
+        console.log("📁 Files in /etc/secrets/:", fs.readdirSync("/etc/secrets"));
+      } else {
+        console.log("📁 /etc/secrets/ directory does not exist.");
+      }
     }
   } catch (err) {
-    console.error("❌ No serviceAccount.json file found (checked local and /etc/secrets/) and no FIREBASE_SERVICE_ACCOUNT env var set.");
+    console.error("❌ Error reading service account file:", err.message);
   }
 }
 
