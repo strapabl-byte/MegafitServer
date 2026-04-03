@@ -884,13 +884,17 @@ app.get("/api/analytics/daily-stats/:gymId", verifyAzureToken, async (req, res) 
     
     const snap = await db.collection("gym_daily_stats")
       .where("gym_id", "==", gymId)
-      .orderBy("date", "desc")
-      .limit(30)
+      .limit(60) // Get enough to cover 30 days
       .get();
 
-    const data = snap.docs.map(doc => doc.data());
-    // Sort ascending for the chart (oldest to newest)
-    data.sort((a, b) => a.date.localeCompare(b.date));
+    let data = snap.docs.map(doc => doc.data());
+    
+    // Sort descending by date to pick the last 30
+    data.sort((a, b) => b.date.localeCompare(a.date));
+    data = data.slice(0, 30);
+    
+    // Reverse for the chart (oldest to newest)
+    data.reverse();
     
     console.log(`✅ Returned ${data.length} days of stats for ${gymId}`);
     res.json(data);
