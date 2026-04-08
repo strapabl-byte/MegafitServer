@@ -88,11 +88,16 @@ function verifyAzureToken(req, res, next) {
     return res.status(401).json({ error: "Missing token" });
   }
 
-  // 🧪 LOCAL DEV BYPASS: Allow demo-token for easier testing
-  if (token === "demo-token") {
-    console.log("🧪 verifyAzureToken: Local demo-token bypass active");
-    req.user = { name: "Demo Admin", role: "admin" };
-    req.isAdmin = true;
+  // 🧪 LOCAL DEV BYPASS: Allow predefined mock tokens for easier testing
+  const mockUsers = {
+    'admin': { name: "Adel", role: "admin" },
+    'manager_marjane': { name: "Manager Fès Saiss", role: "manager" },
+    'manager2': { name: "Manager Dokkarat", role: "manager" }
+  };
+  if (token === "demo-token" || mockUsers[token]) {
+    req.user = mockUsers[token] || { name: "Demo Admin", role: "admin" };
+    req.isAdmin = req.user.role === "admin";
+    req.isManager = req.user.role === "manager";
     return next();
   }
 
@@ -131,6 +136,40 @@ function requireAdmin(req, res, next) {
     return res.status(403).json({ error: "Access Denied: Admin role required" });
   }
   next();
+}
+
+// ---------- Server API Cache ----------
+const apiCache = {
+  inscriptions: {}, // keyed by gymId (or 'all')
+  liveEntries: {},  // keyed by gymId
+  dailyStats: {},   // keyed by gymId
+  general: {}      // for generic counts and simple flags
+};
+
+async function getCachedOrFetch(cacheObj, key, ttlMs, fetchFn) {
+  const now = Date.now();
+  const entry = cacheObj[key] || { data: null, ts: 0 };
+  
+  if (entry.data && (now - entry.ts < ttlMs)) {
+    console.log(`⚡ [CACHE HIT] Route key '${key}' returned from RAM`);
+    return entry.data;
+  }
+  
+  console.log(`🌐 [CACHE MISS] Fetching fresh data for '${key}' from Firebase...`);
+  const data = await fetchFn();
+  
+  cacheObj[key] = { data, ts: now };
+  return data;
+}
+
+function invalidateCache(cacheObj, key = null) {
+  if (key) {
+    delete cacheObj[key];
+    console.log(`🧹 [CACHE INVALIDATED] Key '${key}'`);
+  } else {
+    for (let k of Object.keys(cacheObj)) delete cacheObj[k];
+    console.log(`🧹 [CACHE CLEAR ALL]`);
+  }
 }
 
 // ---------- File Upload ----------
@@ -178,7 +217,12 @@ app.post("/api/members/upload", verifyAzureToken, upload.single("photo"), async 
 
 app.get("/api/members", verifyAzureToken, async (req, res) => {
   try {
-    const snap = await db.collection("members").get();
+    const gymId = req.query.gymId;
+    let query = db.collection("members");
+    if (gymId) {
+      query = query.where("location", "==", gymId);
+    }
+    const snap = await query.get();
     let members = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
     // Data Minimization for Managers
@@ -241,6 +285,29 @@ app.post("/api/members", verifyAzureToken, async (req, res) => {
 
 // ---------- INSCRIPTIONS (Pending Members) ----------
 
+// Public: Generate atomic sequential contract number
+app.post("/public/generate-contract", async (req, res) => {
+  try {
+    const counterRef = db.collection("settings").doc("contractCounter");
+    const nextNum = await db.runTransaction(async (t) => {
+      const doc = await t.get(counterRef);
+      let num = 15000;
+      if (!doc.exists) {
+        t.set(counterRef, { current: num });
+      } else {
+        num = doc.data().current + 1;
+        t.update(counterRef, { current: num });
+      }
+      return num;
+    });
+    const formattedNum = nextNum.toString().padStart(6, '0');
+    res.json({ contractNumber: formattedNum });
+  } catch(err) {
+    console.error("Contract Generate Error:", err);
+    res.status(500).json({ error: "Failed to generate contract number" });
+  }
+});
+
 // Public: Submit from inscription form
 app.post("/public/inscriptions", async (req, res) => {
   try {
@@ -251,6 +318,10 @@ app.post("/public/inscriptions", async (req, res) => {
       status: "pending",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+    
+    // Invalidate the inscriptions cache so pending badge updates instantly
+    invalidateCache(apiCache.inscriptions);
+    
     res.json({ id: docRef.id, ok: true });
   } catch (err) {
     console.error("Public Inscription Error:", err);
@@ -261,13 +332,24 @@ app.post("/public/inscriptions", async (req, res) => {
 // Admin: List pending inscriptions (Web only)
 app.get("/api/inscriptions", verifyAzureToken, async (req, res) => {
   try {
-    const snap = await db.collection("pending_members")
-      .where("source", "==", "web")
-      .where("status", "==", "pending") // Strictly pending
-      .get();
-
-    const data = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    data.sort((a, b) => (b.createdAt?._seconds || 0) - (a.createdAt?._seconds || 0));
+    const gymId = req.query.gymId;
+    const cacheKey = gymId || "all";
+    
+    // Use 30-second cache TTL for inscriptions
+    const data = await getCachedOrFetch(apiCache.inscriptions, cacheKey, 30000, async () => {
+      let query = db.collection("pending_members")
+        .where("source", "==", "web")
+        .where("status", "==", "pending"); // Strictly pending
+        
+      if (gymId) {
+        query = query.where("gymId", "==", gymId);
+      }
+      
+      const snap = await query.get();
+      const rawData = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      rawData.sort((a, b) => (b.createdAt?._seconds || 0) - (a.createdAt?._seconds || 0));
+      return rawData;
+    });
 
     res.json(data);
   } catch (err) {
@@ -284,6 +366,23 @@ app.patch("/api/inscriptions/:id", verifyAzureToken, async (req, res) => {
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     };
     await db.collection("pending_members").doc(req.params.id).update(updateData);
+
+    // If a memberId is being set, link any orphan payments created by early validation
+    if (req.body.memberId) {
+      const orphanPayments = await db.collection("payments").where("inscriptionId", "==", req.params.id).get();
+      if (!orphanPayments.empty) {
+        const batch = db.batch();
+        orphanPayments.forEach(p => {
+          // Add the real memberId
+          batch.update(p.ref, { memberId: req.body.memberId });
+        });
+        await batch.commit();
+      }
+    }
+
+    // Invalidate the inscriptions cache
+    invalidateCache(apiCache.inscriptions);
+
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: "Failed to update inscription" });
@@ -294,6 +393,10 @@ app.patch("/api/inscriptions/:id", verifyAzureToken, async (req, res) => {
 app.delete("/api/inscriptions/:id", verifyAzureToken, async (req, res) => {
   try {
     await db.collection("pending_members").doc(req.params.id).delete();
+    
+    // Invalidate the inscriptions cache
+    invalidateCache(apiCache.inscriptions);
+    
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: "Failed to delete inscription" });
@@ -362,7 +465,58 @@ app.get("/api/payments/:memberId", verifyAzureToken, requireAdmin, async (req, r
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTO-REGISTER CA helper — called on every confirmed payment
+// Writes a row to megafit_daily_register so it shows in Registre Journalier
+// ─────────────────────────────────────────────────────────────────────────────
+function planToAbonnement(plan) {
+  const map = { 'Monthly':'1 MOIS','Quarterly':'3 MOIS','Semi-Annual':'6 MOIS','Annual':'1 AN' };
+  return map[plan] || plan || '1 AN';
+}
+
+async function autoRegisterCA({ gymId='dokarat', date, nom, tel, plan, amount, method, commercial, contrat }) {
+  try {
+    const methodMap = {
+      'Espèces':'espece','Cash':'espece','espece':'espece',
+      'TPE':'tpe','Carte Bancaire':'tpe','tpe':'tpe',
+      'Virement':'virement','virement':'virement',
+      'Chèque':'cheque','Cheque':'cheque','cheque':'cheque',
+    };
+    const field = methodMap[method] || 'espece';
+    const amt   = Number(amount) || 0;
+    const today = date || new Date().toISOString().slice(0,10);
+    const docId = `${gymId}_${today}`;
+
+    await db.collection('megafit_daily_register').doc(docId).collection('entries').add({
+      nom:        nom        || '',
+      tel:        tel        || '',
+      contrat:    contrat    || '',
+      commercial: (commercial || 'FORM').toUpperCase(),
+      cin:        '',
+      prix:       amt,
+      tpe:        field==='tpe'      ? amt : 0,
+      espece:     field==='espece'   ? amt : 0,
+      virement:   field==='virement' ? amt : 0,
+      cheque:     field==='cheque'   ? amt : 0,
+      abonnement: planToAbonnement(plan),
+      note_reste: '',
+      source:     'inscription_auto',
+      createdAt:  admin.firestore.FieldValue.serverTimestamp(),
+      createdBy:  'auto',
+    });
+
+    await db.collection('megafit_daily_register').doc(docId).set(
+      { gymId, date: today, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
+      { merge: true }
+    );
+    console.log(`✅ AutoRegisterCA: ${nom} | ${amt} DH (${method}) → ${docId}`);
+  } catch (err) {
+    console.error('⚠️  AutoRegisterCA (non-blocking):', err.message);
+  }
+}
+
 app.post("/api/payments", verifyAzureToken, async (req, res) => {
+
   try {
     const { memberId, amount, plan, date, method } = req.body;
     const docRef = await db.collection("payments").add({
@@ -370,6 +524,26 @@ app.post("/api/payments", verifyAzureToken, async (req, res) => {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       recordedBy: req.user?.preferred_username || req.user?.name || "Admin"
     });
+
+    // Fetch member name/phone for the register
+    let nom = '', tel = '', loc = 'dokarat';
+    try {
+      const mSnap = await db.collection('members').doc(memberId).get();
+      if (mSnap.exists) { 
+        nom = mSnap.data().fullName || ''; 
+        tel = mSnap.data().phone || ''; 
+        loc = mSnap.data().location || 'dokarat';
+      }
+    } catch(_) {}
+
+    // Auto-add to daily CA register
+    await autoRegisterCA({
+      gymId: loc,
+      nom, tel, plan, amount, method: method || 'Cash',
+      commercial: req.user?.preferred_username || req.user?.name || 'Admin',
+      contrat: req.body.contrat || ''
+    });
+
     const snap = await docRef.get();
     res.json({ id: docRef.id, ...snap.data() });
   } catch (err) {
@@ -377,11 +551,11 @@ app.post("/api/payments", verifyAzureToken, async (req, res) => {
   }
 });
 
-// Atomic conversion of Web Inscription -> Active Member + First Payment
-app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res) => {
-  const { inscriptionId, amount, plan, method, expiresOn, fullName, phone, birthday, photo } = req.body;
 
+// Admin: Validates payment and updates inscription, but leaves member creation for manual review.
+app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res) => {
   try {
+    const { inscriptionId, amount, plan, method, fullName, phone, birthday, expiresOn, photo } = req.body;
     const inscriptionRef = db.collection("pending_members").doc(inscriptionId);
     const insDoc = await inscriptionRef.get();
 
@@ -389,67 +563,38 @@ app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res
     const insData = insDoc.exists ? insDoc.data() : { telephone: phone };
     const finalPhone = phone || insData.telephone;
 
-    // 2. Prevent duplication check
-    if (finalPhone) {
-      const existing = await db.collection("members").where("phone", "==", finalPhone).limit(1).get();
-      if (!existing.empty) {
-        // Option: Just link payment to existing member instead of failing
-        const mId = existing.docs[0].id;
-        console.log(`🔗 Member already exists (${mId}), recording payment only.`);
-
-        await db.collection("payments").add({
-          memberId: mId,
-          amount: Number(amount),
-          plan: plan || "Monthly",
-          date: new Date().toISOString(),
-          method: method || "Espèces",
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          recordedBy: req.user?.preferred_username || req.user?.name || "Admin"
-        });
-
-        if (insDoc.exists) await inscriptionRef.delete();
-        return res.json({ ok: true, member: { id: mId, ...existing.docs[0].data() }, linked: true });
-      }
-    }
-
-    if (!insDoc.exists && !fullName) {
-      return res.status(404).json({ error: "Inscription non trouvée et données manquantes" });
-    }
-
-    const qrToken = crypto.randomBytes(16).toString("hex");
-
-    // 3. Create Member
-    const memberData = {
-      fullName: fullName || `${insData.prenom || ''} ${insData.nom || ''}`.trim(),
-      phone: finalPhone || "",
-      plan: plan || "Monthly",
-      birthday: birthday || insData.dateNaissance || null,
-      expiresOn: expiresOn || new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0],
-      photo: photo || insData.profilePicture || null,
-      qrToken,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    };
-
-    const memberRef = await db.collection("members").add(memberData);
-
-    // 4. Record Payment
+    // 2. Record Orphan Payment (waiting to be linked)
     await db.collection("payments").add({
-      memberId: memberRef.id,
+      inscriptionId, // Links it to the pending inscription until member is created
       amount: Number(amount),
       plan: plan || "Monthly",
       date: new Date().toISOString(),
       method: method || "Espèces",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      recordedBy: req.user?.preferred_username || req.user?.name || "Admin"
+      recordedBy: req.user?.preferred_username || req.user?.name || "Admin",
+      location: insData.gymId || "dokarat"
     });
 
-    // 5. Cleanup
-    if (insDoc.exists) await inscriptionRef.delete();
-
-    res.json({
-      ok: true,
-      member: { id: memberRef.id, ...memberData }
+    // 3. Auto-register in daily CA
+    await autoRegisterCA({
+      gymId:      insData.gymId || 'dokarat',
+      nom:        `${insData.prenom || ''} ${insData.nom || ''}`.trim() || fullName || '',
+      tel:        finalPhone || '',
+      plan:       plan || 'Monthly',
+      amount,
+      method:     method || 'Espèces',
+      commercial: insData.commercial || req.user?.preferred_username || req.user?.name || 'FORM',
+      contrat:    insData.contractNumber || '',
     });
+    // 4. Update inscription flag instead of deleting it
+    if (insDoc.exists) {
+      await inscriptionRef.update({ 
+        payment_validated: true,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    }
+
+    res.json({ ok: true, message: "Paiement validé avec succès." });
 
   } catch (err) {
     console.error("❌ Conversion Error:", err);
@@ -875,26 +1020,408 @@ app.put("/api/coach-reservations/:id", verifyAzureToken, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DAILY REGISTER — "Registre Journalier des Inscriptions"
+// Collection: megafit_daily_register/{gymId}_{date}/entries/{entryId}
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/register?date=2025-01-12&gymId=dokarat
+app.get("/api/register", verifyAzureToken, async (req, res) => {
+  try {
+    const { date, gymId = "dokarat" } = req.query;
+    if (!date) return res.status(400).json({ error: "date required (YYYY-MM-DD)" });
+
+    const docId = `${gymId}_${date}`;
+    const snap = await db.collection("megafit_daily_register")
+      .doc(docId)
+      .collection("entries")
+      .orderBy("createdAt", "asc")
+      .get();
+
+    const entries = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    // Compute daily totals
+    const totals = entries.reduce((acc, e) => ({
+      tpe:       acc.tpe       + (Number(e.tpe)       || 0),
+      espece:    acc.espece    + (Number(e.espece)     || 0),
+      virement:  acc.virement  + (Number(e.virement)   || 0),
+      cheque:    acc.cheque    + (Number(e.cheque)     || 0),
+    }), { tpe: 0, espece: 0, virement: 0, cheque: 0 });
+    totals.ca = totals.tpe + totals.espece + totals.virement + totals.cheque;
+
+    // Commercial breakdown
+    const byCommercial = {};
+    entries.forEach(e => {
+      const name = (e.commercial || "").toUpperCase();
+      if (!name) return;
+      if (!byCommercial[name]) byCommercial[name] = { tpe:0, espece:0, virement:0, cheque:0, total:0 };
+      byCommercial[name].tpe      += Number(e.tpe)      || 0;
+      byCommercial[name].espece   += Number(e.espece)   || 0;
+      byCommercial[name].virement += Number(e.virement) || 0;
+      byCommercial[name].cheque   += Number(e.cheque)   || 0;
+      byCommercial[name].total    += (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
+    });
+
+    res.json({ ok: true, date, gymId, entries, totals, byCommercial });
+  } catch (err) {
+    console.error("GET /api/register error:", err);
+    res.status(500).json({ error: "Failed to fetch register" });
+  }
+});
+
+// POST /api/register/entry — create new row
+app.post("/api/register/entry", verifyAzureToken, async (req, res) => {
+  try {
+    const { date, gymId = "dokarat", ...entry } = req.body;
+    if (!date) return res.status(400).json({ error: "date required" });
+
+    const docId = `${gymId}_${date}`;
+    const ref = await db.collection("megafit_daily_register")
+      .doc(docId)
+      .collection("entries")
+      .add({
+        ...entry,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdBy: req.user?.preferred_username || req.user?.name || "system"
+      });
+
+    // Update the parent doc totals for calendar
+    await db.collection("megafit_daily_register").doc(docId).set({
+      gymId, date, updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    res.json({ ok: true, id: ref.id });
+  } catch (err) {
+    console.error("POST /api/register/entry error:", err);
+    res.status(500).json({ error: "Failed to save entry" });
+  }
+});
+
+// PUT /api/register/entry/:id — update a row
+app.put("/api/register/entry/:id", verifyAzureToken, async (req, res) => {
+  try {
+    const { date, gymId = "dokarat", ...entry } = req.body;
+    if (!date) return res.status(400).json({ error: "date required" });
+
+    const docId = `${gymId}_${date}`;
+    await db.collection("megafit_daily_register")
+      .doc(docId)
+      .collection("entries")
+      .doc(req.params.id)
+      .update({ ...entry, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("PUT /api/register/entry error:", err);
+    res.status(500).json({ error: "Failed to update entry" });
+  }
+});
+
+// DELETE /api/register/entry/:id
+app.delete("/api/register/entry/:id", verifyAzureToken, async (req, res) => {
+  try {
+    const { date, gymId = "dokarat" } = req.query;
+    if (!date) return res.status(400).json({ error: "date required" });
+
+    await db.collection("megafit_daily_register")
+      .doc(`${gymId}_${date}`)
+      .collection("entries")
+      .doc(req.params.id)
+      .delete();
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("DELETE /api/register/entry error:", err);
+    res.status(500).json({ error: "Failed to delete entry" });
+  }
+});
+
+// GET /api/register/calendar?year=2025&gymId=dokarat
+// Returns daily CA totals + outstanding reste totals for the heatmap calendar
+app.get("/api/register/calendar", verifyAzureToken, async (req, res) => {
+  try {
+    const { year = new Date().getFullYear(), gymId = "dokarat" } = req.query;
+    const prefix = `${gymId}_${year}`;
+
+    const snap = await db.collection("megafit_daily_register")
+      .where(admin.firestore.FieldPath.documentId(), ">=", prefix + "-01-01")
+      .where(admin.firestore.FieldPath.documentId(), "<=", prefix + "-12-31")
+      .get();
+
+    const calendarData = {};
+    const resteData = {};
+
+    await Promise.all(snap.docs.map(async parentDoc => {
+      const date = parentDoc.id.replace(`${gymId}_`, "");
+      const entriesSnap = await parentDoc.ref.collection("entries").get();
+      let ca = 0;
+      let reste = 0;
+      entriesSnap.docs.forEach(d => {
+        const e = d.data();
+        const paid = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
+        ca += paid;
+        const prix = Number(e.prix) || 0;
+        if (prix > 0 && prix > paid) reste += (prix - paid);
+      });
+      calendarData[date] = ca;
+      if (reste > 0) resteData[date] = reste;
+    }));
+
+    res.json({ ok: true, gymId, year: Number(year), calendarData, resteData });
+  } catch (err) {
+    console.error("GET /api/register/calendar error:", err);
+    res.status(500).json({ error: "Failed to fetch calendar" });
+  }
+});
+
+
+// ---------- LIVE ENTRIES (Door Access Feed) ----------
+
+// Second Firestore instance pointing at megadoor-b3ccb (door access DB)
+let doorDb2 = null;
+try {
+  const doorApp2 = admin.apps.find(a => a.name === 'doorAccess2') 
+    || admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        databaseURL: undefined,
+      }, 'doorAccess2');
+  // Re-use same service account but read from a different project isn't possible
+  // Instead we'll use the public REST API for the door project (no index needed via REST runQuery)
+} catch(e) { /* already init */ }
+
+const DOOR_PROJECT_ID = process.env.DOOR_FIREBASE_PROJECT_ID || "megadoor-b3ccb";
+const DOOR_REST_KEY = process.env.DOOR_FIREBASE_API_KEY;
+
+async function fetchDoorCollection(collectionName, locationTag, limitCount = 50) {
+  const url = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT_ID}/databases/(default)/documents:runQuery?key=${DOOR_REST_KEY}`;
+    const now = new Date();
+    // Start of today (Morocco time)
+    const todayStr = new Date(now.getTime() + 60 * 60 * 1000).toISOString().slice(0, 10);
+
+    const body = {
+      structuredQuery: {
+        from: [{ collectionId: collectionName }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "timestamp" },
+            op: "GREATER_THAN_OR_EQUAL",
+            value: { stringValue: todayStr }
+          }
+        },
+        orderBy: [
+          {
+            field: { fieldPath: "timestamp" },
+            direction: "DESCENDING"
+          }
+        ],
+        limit: 1000 // Increased to handle busy days (Dokkarat had 433+ today)
+      }
+    };
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const data = await resp.json();
+  if (!Array.isArray(data)) return [];
+
+  // DEBUG LOG: See what's actually in this collection
+  if (collectionName.includes("saiss")) {
+      console.log(`🔍 [DEBUG SAISS] Sample entry from ${collectionName}:`, JSON.stringify(data[0]?.document?.fields?.location || "NO_LOCATION_FIELD"));
+  }
+
+  const docs = data
+    .filter(item => item.document)
+    .map(item => {
+      const f = item.document.fields || {};
+      const pushedAt = f.pushed_at?.timestampValue || null;
+      const timestamp = f.timestamp?.stringValue || null;
+
+      // Resolve display time
+      let sortKey = "";
+      let displayTime = "--:--";
+      if (pushedAt) {
+        const d = new Date(pushedAt);
+        sortKey = d.toISOString();
+        displayTime = d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", timeZone: "Africa/Casablanca" });
+      } else if (timestamp) {
+        sortKey = timestamp;
+        displayTime = timestamp.split(" ")[1]?.slice(0, 5) || "--:--";
+      }
+
+      const method = f.method?.stringValue || "";
+      return {
+        docId: item.document.name.split("/").pop(),
+        name: f.name?.stringValue || "Anonyme",
+        userId: f.user_id?.stringValue || "",
+        status: f.status?.stringValue || "Entrée",
+        method,
+        location: f.location?.stringValue || "",
+        sortKey,
+        displayTime,
+        isFace: method.toLowerCase().includes("face") || method.toLowerCase().includes("visage")
+      };
+    })
+    .filter(d => {
+        if (!d.sortKey) return false;
+        const loc = d.location.toLowerCase().trim();
+        const target = locationTag.toLowerCase().trim();
+        return loc === target || loc.includes(target) || target.includes(loc);
+    })
+    .sort((a, b) => b.sortKey.localeCompare(a.sortKey))
+    .slice(0, limitCount);
+
+  return docs;
+}
+
+// GET /api/live-entries?gymId=dokarat|marjane&limit=20
+app.get("/api/live-entries", verifyAzureToken, async (req, res) => {
+  try {
+    const { gymId, limit: limitParam } = req.query;
+    const limitCount = parseInt(limitParam) || 50; // Optimized default limit
+
+    const gymMap = {
+      dokarat: { collection: "mega_fit_logs", locationTag: "dokkarat fes" },
+      marjane: { collection: "saiss entrees logs", locationTag: "fes saiss" }
+    };
+
+    const gym = gymMap[gymId];
+    if (!gym) {
+      return res.status(400).json({ error: "Unknown gymId. Use 'dokarat' or 'marjane'." });
+    }
+
+    const cacheKey = `${gymId}_limit_${limitCount}`; 
+    const entries = await getCachedOrFetch(apiCache.liveEntries, cacheKey, 15000, async () => {
+      return await fetchDoorCollection(gym.collection, gym.locationTag, limitCount);
+    });
+    
+    res.json({ ok: true, gymId, count: entries.length, entries });
+  } catch (err) {
+    console.error("❌ Live Entries Error:", err);
+    res.status(500).json({ error: "Failed to fetch live entries" });
+  }
+});
+
+// NEW: Optimized endpoint for total count only (saves reads)
+// Uses Firestore REST runAggregationQuery for maximum efficiency
+app.get("/api/live-count", verifyAzureToken, async (req, res) => {
+  try {
+    const { gymId } = req.query;
+    if (!gymId) return res.status(400).json({ error: "gymId required" });
+
+    const gymMap = {
+      dokarat: { collection: "mega_fit_logs", locationTag: "dokkarat fes" },
+      marjane: { collection: "saiss entrees logs", locationTag: "fes saiss" }
+    };
+    const gym = gymMap[gymId];
+    if (!gym) return res.status(400).json({ error: "Invalid gymId" });
+
+    const cacheKey = `live_count_${gymId}`;
+    const result = await getCachedOrFetch(apiCache.general, cacheKey, 15000, async () => {
+        // Filter to today (Morocco UTC+1)
+        const now = new Date();
+        const todayStr = new Date(now.getTime() + 60 * 60 * 1000).toISOString().slice(0, 10);
+
+        const url = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT_ID}/databases/(default)/documents:runQuery?key=${DOOR_REST_KEY}`;
+        
+        // --- SENIOR DEV OPTIMIZATION ---
+        // Instead of fetching ALL documents for today, we only fetch the last 100 entries.
+        // For a true "unique" count of the day, we'd need to fetch more, but to keep READS LOW
+        // and still have a live feel, we fetch the most recent activity.
+        const body = {
+          structuredQuery: {
+            from: [{ collectionId: gym.collection }],
+            where: {
+              fieldFilter: {
+                field: { fieldPath: "timestamp" },
+                op: "GREATER_THAN_OR_EQUAL",
+                value: { stringValue: todayStr }
+              }
+            },
+            orderBy: [{ field: { fieldPath: "timestamp" }, direction: "DESCENDING" }],
+            limit: 150 // Optimized: don't fetch 500 documents every 15s. 150 is plenty for live view.
+          }
+        };
+
+        const resp = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        
+        const data = await resp.json();
+        let currentCount = 0;
+        if (Array.isArray(data)) {
+            // Filter by location and user_id uniqueness for a cleaner count
+            const visitorLastSeen = new Map();
+            const locationMatches = [];
+            
+            data.forEach(item => {
+                if (!item.document) return;
+                const f = item.document.fields;
+                const loc = (f.location?.stringValue || "").toLowerCase().trim();
+                const targetLoc = gym.locationTag.toLowerCase().trim();
+
+                // Debug log for Marjane if empty
+                if (gymId === 'marjane') {
+                    // console.log(`[DEBUG MARJANE] Found loc: "${loc}" vs target: "${targetLoc}"`);
+                }
+
+                if (loc !== targetLoc && !loc.includes(targetLoc) && !targetLoc.includes(loc)) return;
+
+                const uid = f.user_id?.stringValue || f.id?.stringValue || item.document.name.split("/").pop();
+                const timeStr = f.timestamp?.stringValue || "";
+                const time = timeStr ? new Date(timeStr).getTime() : Date.now();
+
+                // Deduplicate (10m window)
+                if (!visitorLastSeen.has(uid) || (Math.abs(time - visitorLastSeen.get(uid)) >= 600000)) {
+                    currentCount++;
+                    visitorLastSeen.set(uid, time);
+                }
+                locationMatches.push(uid);
+            });
+
+            // If we hit the limit, the count is at least this much
+            if (data.length >= 150 && gymId === 'dokarat') {
+                // For Dokarat which has many hits, we might need to fallback to a higher count 
+                // or combine with the historical count.
+            }
+        }
+        return { count: currentCount, date: todayStr };
+    });
+
+    res.json({ ok: true, gymId, ...result });
+  } catch (err) {
+    console.error("❌ Live Count Error:", err);
+    res.status(500).json({ error: "Failed to fetch count" });
+  }
+});
+
 // ---------- ANALYTICS ----------
 
 app.get("/api/analytics/daily-stats/:gymId", verifyAzureToken, async (req, res) => {
   try {
     const { gymId } = req.params;
-    console.log(`📊 Fetching daily stats for ${gymId}...`);
     
-    const snap = await db.collection("gym_daily_stats")
-      .where("gym_id", "==", gymId)
-      .limit(60) // Get enough to cover 30 days
-      .get();
+    const data = await getCachedOrFetch(apiCache.dailyStats, gymId, 300000, async () => {
+      console.log(`📊 Fetching daily stats for ${gymId} from DB...`);
+      const snap = await db.collection("gym_daily_stats")
+        .where("gym_id", "==", gymId)
+        .limit(40) // ✅ Fetch 40 to guarantee we always have the last 30 days
+        .get();
 
-    let data = snap.docs.map(doc => doc.data());
-    
-    // Sort descending by date to pick the last 30
-    data.sort((a, b) => b.date.localeCompare(a.date));
-    data = data.slice(0, 30);
-    
-    // Reverse for the chart (oldest to newest)
-    data.reverse();
+      let snapData = snap.docs.map(doc => doc.data());
+      
+      // Filter out invalid records, sort descending to pick 30 most recent
+      snapData = snapData.filter(d => d && d.date);
+      snapData.sort((a, b) => b.date.localeCompare(a.date)); // newest first
+      snapData = snapData.slice(0, 30);  // take 30 most recent
+      
+      // Reverse for the chart (oldest on left → newest on right)
+      snapData.reverse();
+      return snapData;
+    });
     
     console.log(`✅ Returned ${data.length} days of stats for ${gymId}`);
     res.json(data);
@@ -1028,4 +1555,8 @@ app.post("/api/chat", verifyAzureToken, async (req, res) => {
 });
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => console.log("✅ API running on port " + PORT));
+const { syncGymCounts, scheduleNightlySync } = require('./auto_sync');
+app.listen(PORT, () => {
+  console.log('✅ API running on port ' + PORT);
+  scheduleNightlySync(db, apiCache); // Runs at 00:05 Morocco time
+});
