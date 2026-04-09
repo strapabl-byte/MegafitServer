@@ -1353,21 +1353,16 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
         
         const data = await resp.json();
         let currentCount = 0;
+        const locationMatches = [];
+
         if (Array.isArray(data)) {
-            // Filter by location and user_id uniqueness for a cleaner count
             const visitorLastSeen = new Map();
-            const locationMatches = [];
             
             data.forEach(item => {
                 if (!item.document) return;
                 const f = item.document.fields;
                 const loc = (f.location?.stringValue || "").toLowerCase().trim();
                 const targetLoc = gym.locationTag.toLowerCase().trim();
-
-                // Debug log for Marjane if empty
-                if (gymId === 'marjane') {
-                    // console.log(`[DEBUG MARJANE] Found loc: "${loc}" vs target: "${targetLoc}"`);
-                }
 
                 if (loc !== targetLoc && !loc.includes(targetLoc) && !targetLoc.includes(loc)) return;
 
@@ -1379,10 +1374,10 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
                 if (!visitorLastSeen.has(uid) || (Math.abs(time - visitorLastSeen.get(uid)) >= 600000)) {
                     currentCount++;
                     visitorLastSeen.set(uid, time);
-            }
-            locationMatches.push(uid);
-        });
-
+                }
+                locationMatches.push(uid);
+            });
+        }
         return { count: currentCount, rawCount: locationMatches.length, date: todayStr };
     });
 
