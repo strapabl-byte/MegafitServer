@@ -7,6 +7,7 @@ const jwksClient = require("jwks-rsa");
 const admin = require("firebase-admin");
 const multer = require("multer");
 const crypto = require("crypto");
+const { syncGymCounts, scheduleNightlySync } = require('./auto_sync');
 
 // ---------- App Setup ----------
 const app = express();
@@ -1431,6 +1432,19 @@ app.get("/api/analytics/daily-stats/:gymId", verifyAzureToken, async (req, res) 
   }
 });
 
+// Admin-only: Manually trigger a stats sync (handles catching up missed days)
+app.post("/api/admin/sync-stats", verifyAzureToken, requireAdmin, async (req, res) => {
+  try {
+    const days = parseInt(req.query.days) || 7;
+    console.log(`📡 Manual sync requested for last ${days} days...`);
+    await syncGymCounts(db, apiCache, days);
+    res.json({ ok: true, message: `Sync completed for the last ${days} days.` });
+  } catch (err) {
+    console.error("Manual Sync Error:", err);
+    res.status(500).json({ error: "Sync failed: " + err.message });
+  }
+});
+
 app.post("/api/analytics/log-entry", verifyAzureToken, async (req, res) => {
   try {
     const { gymId, userId } = req.body;
@@ -1555,7 +1569,6 @@ app.post("/api/chat", verifyAzureToken, async (req, res) => {
 });
 
 const PORT = process.env.PORT || 4000;
-const { syncGymCounts, scheduleNightlySync } = require('./auto_sync');
 app.listen(PORT, () => {
   console.log('✅ API running on port ' + PORT);
   scheduleNightlySync(db, apiCache); // Runs at 00:05 Morocco time
