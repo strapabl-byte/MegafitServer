@@ -1337,7 +1337,8 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
             liveCountCache[gymId] = {
                 date: todayStr,
                 lastFullSync: 0,
-                uniqueUids: new Set(),
+                uniqueCount: 0,
+                lastSeenMap: new Map(), // UID -> last timestamp
                 rawCount: 0,
                 lastDocId: null
             };
@@ -1375,52 +1376,60 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
         const data = await resp.json();
         
         if (Array.isArray(data)) {
-            // If it's a full sync, clear the set
+            // If it's a full sync, clear the state
             if (needsFullSync) {
-                cache.uniqueUids = new Set();
+                cache.uniqueCount = 0;
+                cache.lastSeenMap = new Map();
                 cache.rawCount = 0;
                 cache.lastFullSync = now;
             }
 
-            const newDocs = [];
-            data.forEach(item => {
-                if (!item.document) return;
-                const docId = item.document.name.split("/").pop();
-                
-                // If we've seen this doc in an incremental poll, stop processing older docs
-                if (!needsFullSync && cache.lastDocId === docId) {
-                    // Optimized: we reached the "previously seen" frontier
-                    return; 
-                }
+            // Important: process chronologically (Ascending) for deduplication window logic
+            const validDocs = data
+                .filter(d => d.document)
+                .map(d => ({
+                    id: d.document.name.split("/").pop(),
+                    fields: d.document.fields,
+                    timestamp: new Date(d.document.fields.timestamp?.stringValue || 0).getTime()
+                }))
+                .filter(d => needsFullSync || d.id !== cache.lastDocId)
+                .sort((a, b) => a.timestamp - b.timestamp);
 
-                const f = item.document.fields;
+            const newDocs = [];
+            validDocs.forEach(doc => {
+                // If we've seen this doc in an incremental poll, stop processing older docs (handled by filter/sort above)
+                const docId = doc.id;
+                const f = doc.fields;
                 const loc = (f.location?.stringValue || "").toLowerCase().trim();
                 const targetLoc = gym.locationTag.toLowerCase().trim();
 
                 if (loc !== targetLoc && !loc.includes(targetLoc) && !targetLoc.includes(loc)) return;
 
                 const uid = f.user_id?.stringValue || f.id?.stringValue || docId;
-                
-                // Track in cache
-                if (!cache.uniqueUids.has(uid)) {
-                    cache.uniqueUids.add(uid);
+                const time = doc.timestamp;
+
+                // 10-minute window deduplication (Match auto_sync.js)
+                if (!cache.lastSeenMap.has(uid) || Math.abs(time - cache.lastSeenMap.get(uid)) >= 600000) {
+                    cache.uniqueCount++;
+                    cache.lastSeenMap.set(uid, time);
                 }
                 newDocs.push(docId);
             });
 
-            // Update raw count incrementally (estimate)
+            // Update raw count incrementally
             if (needsFullSync) {
-                cache.rawCount = data.filter(d => d.document).length;
+                cache.rawCount = validDocs.length;
             } else {
                 cache.rawCount += newDocs.length;
             }
 
             if (newDocs.length > 0) {
-                cache.lastDocId = newDocs[0]; // newest one
+                // newest one (since sorted ascending, it's the last one)
+                cache.lastDocId = newDocs[newDocs.length - 1]; 
             }
         }
 
-        return { count: cache.uniqueUids.size, rawCount: cache.rawCount, date: todayStr };
+        return { count: cache.uniqueCount, rawCount: cache.rawCount, date: todayStr };
     });
 
     res.json({ ok: true, gymId, ...result });
