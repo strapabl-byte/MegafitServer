@@ -1341,7 +1341,7 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
               }
             },
             orderBy: [{ field: { fieldPath: "timestamp" }, direction: "DESCENDING" }],
-            limit: 150 // Optimized: don't fetch 500 documents every 15s. 150 is plenty for live view.
+            limit: 1000 // senior dev fix: capture the full day for high-traffic gyms like Dokkarat
           }
         };
 
@@ -1379,17 +1379,11 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
                 if (!visitorLastSeen.has(uid) || (Math.abs(time - visitorLastSeen.get(uid)) >= 600000)) {
                     currentCount++;
                     visitorLastSeen.set(uid, time);
-                }
-                locationMatches.push(uid);
-            });
-
-            // If we hit the limit, the count is at least this much
-            if (data.length >= 150 && gymId === 'dokarat') {
-                // For Dokarat which has many hits, we might need to fallback to a higher count 
-                // or combine with the historical count.
             }
-        }
-        return { count: currentCount, date: todayStr };
+            locationMatches.push(uid);
+        });
+
+        return { count: currentCount, rawCount: locationMatches.length, date: todayStr };
     });
 
     res.json({ ok: true, gymId, ...result });
