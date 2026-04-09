@@ -603,7 +603,14 @@ app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res
   }
 });
 
-// ---------- COURSES ----------
+// 🧠 Senior Dev Cache for Firestore Cost Optimization (Spark Plan)
+const liveCountCache = {};
+
+function getMoroccanDateStr() {
+  const d = new Date();
+  d.setTime(d.getTime() + (60 * 60 * 1000)); // UTC+1
+  return d.toISOString().slice(0, 10);
+}
 
 app.get("/api/courses", verifyAzureToken, async (req, res) => {
   try {
@@ -1320,16 +1327,30 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
 
     const cacheKey = `live_count_${gymId}`;
     const result = await getCachedOrFetch(apiCache.general, cacheKey, 15000, async () => {
-        // Filter to today (Morocco UTC+1)
-        const now = new Date();
-        const todayStr = new Date(now.getTime() + 60 * 60 * 1000).toISOString().slice(0, 10);
-
         const url = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT_ID}/databases/(default)/documents:runQuery?key=${DOOR_REST_KEY}`;
         
         // --- SENIOR DEV OPTIMIZATION ---
-        // Instead of fetching ALL documents for today, we only fetch the last 100 entries.
-        // For a true "unique" count of the day, we'd need to fetch more, but to keep READS LOW
-        // and still have a live feel, we fetch the most recent activity.
+        const todayStr = getMoroccanDateStr();
+        
+        // 1. Initialize Cache for this gym
+        if (!liveCountCache[gymId] || liveCountCache[gymId].date !== todayStr) {
+            liveCountCache[gymId] = {
+                date: todayStr,
+                lastFullSync: 0,
+                uniqueUids: new Set(),
+                rawCount: 0,
+                lastDocId: null
+            };
+        }
+
+        const cache = liveCountCache[gymId];
+        const now = Date.now();
+        const needsFullSync = (now - cache.lastFullSync) > 900000; // 15 minutes
+
+        // 2. Determine Query Limit (Aggressive Cost Saving)
+        // If we have a fresh cache, we only check for the VERY LATEST 10 scans
+        const queryLimit = needsFullSync ? 1000 : 20;
+
         const body = {
           structuredQuery: {
             from: [{ collectionId: gym.collection }],
@@ -1341,7 +1362,7 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
               }
             },
             orderBy: [{ field: { fieldPath: "timestamp" }, direction: "DESCENDING" }],
-            limit: 1000 // senior dev fix: capture the full day for high-traffic gyms like Dokkarat
+            limit: queryLimit
           }
         };
 
@@ -1352,33 +1373,54 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
         });
         
         const data = await resp.json();
-        let currentCount = 0;
-        const locationMatches = [];
-
+        
         if (Array.isArray(data)) {
-            const visitorLastSeen = new Map();
-            
+            // If it's a full sync, clear the set
+            if (needsFullSync) {
+                cache.uniqueUids = new Set();
+                cache.rawCount = 0;
+                cache.lastFullSync = now;
+            }
+
+            const newDocs = [];
             data.forEach(item => {
                 if (!item.document) return;
+                const docId = item.document.name.split("/").pop();
+                
+                // If we've seen this doc in an incremental poll, stop processing older docs
+                if (!needsFullSync && cache.lastDocId === docId) {
+                    // Optimized: we reached the "previously seen" frontier
+                    return; 
+                }
+
                 const f = item.document.fields;
                 const loc = (f.location?.stringValue || "").toLowerCase().trim();
                 const targetLoc = gym.locationTag.toLowerCase().trim();
 
                 if (loc !== targetLoc && !loc.includes(targetLoc) && !targetLoc.includes(loc)) return;
 
-                const uid = f.user_id?.stringValue || f.id?.stringValue || item.document.name.split("/").pop();
-                const timeStr = f.timestamp?.stringValue || "";
-                const time = timeStr ? new Date(timeStr).getTime() : Date.now();
-
-                // Deduplicate (10m window)
-                if (!visitorLastSeen.has(uid) || (Math.abs(time - visitorLastSeen.get(uid)) >= 600000)) {
-                    currentCount++;
-                    visitorLastSeen.set(uid, time);
+                const uid = f.user_id?.stringValue || f.id?.stringValue || docId;
+                
+                // Track in cache
+                if (!cache.uniqueUids.has(uid)) {
+                    cache.uniqueUids.add(uid);
                 }
-                locationMatches.push(uid);
+                newDocs.push(docId);
             });
+
+            // Update raw count incrementally (estimate)
+            if (needsFullSync) {
+                cache.rawCount = data.filter(d => d.document).length;
+            } else {
+                cache.rawCount += newDocs.length;
+            }
+
+            if (newDocs.length > 0) {
+                cache.lastDocId = newDocs[0]; // newest one
+            }
         }
-        return { count: currentCount, rawCount: locationMatches.length, date: todayStr };
+
+        return { count: cache.uniqueUids.size, rawCount: cache.rawCount, date: todayStr };
     });
 
     res.json({ ok: true, gymId, ...result });
