@@ -1,4 +1,4 @@
-// auto_sync.js — Improved nightly sync with sorting and robust filtering
+// auto_sync.js — Optimized: reads daily_unique/daily_total from latest doc (1 read per gym)
 const DOOR_PROJECT = "megadoor-b3ccb";
 const DOOR_API_KEY = process.env.DOOR_FIREBASE_API_KEY || "AIzaSyBzNbHN_a-4kvI-Z22Ho_pric3mQ7IdiH8";
 
@@ -12,12 +12,13 @@ function moroccoDateStr(date = new Date()) {
 }
 
 /**
- * ✅ IMPROVED: Fetches documents for a specific date range with ORDERING.
- * Using order ensures we get the most recent data even if we hit the limit.
+ * NEW: Fetch only the LATEST 1 document for a given date.
+ * The device embeds daily_total and daily_unique in every entry.
+ * 1 read = perfect accuracy. Falls back to old method if fields missing.
  */
-async function fetchRecentLogs(collectionName, dateStr, limit = 2000) {
+async function fetchLatestDoc(collectionName, dateStr) {
   const url = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT}/databases/(default)/documents:runQuery?key=${DOOR_API_KEY}`;
-  
+
   const body = {
     structuredQuery: {
       from: [{ collectionId: collectionName }],
@@ -28,9 +29,39 @@ async function fetchRecentLogs(collectionName, dateStr, limit = 2000) {
           value: { stringValue: dateStr }
         }
       },
-      orderBy: [
-        { field: { fieldPath: "timestamp" }, direction: "DESCENDING" }
-      ],
+      orderBy: [{ field: { fieldPath: "timestamp" }, direction: "DESCENDING" }],
+      limit: 1
+    }
+  };
+
+  try {
+    const res  = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = await res.json();
+    if (!Array.isArray(data) || !data[0]?.document) return null;
+    return data[0].document;
+  } catch (err) {
+    console.error(`  ❌ REST Fetch failed for ${collectionName}:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * FALLBACK: Old method — fetch up to 2000 docs and manually count.
+ * Used only when daily_unique is missing from the latest doc (old format).
+ */
+async function fetchRecentLogs(collectionName, dateStr, limit = 2000) {
+  const url = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT}/databases/(default)/documents:runQuery?key=${DOOR_API_KEY}`;
+  const body = {
+    structuredQuery: {
+      from: [{ collectionId: collectionName }],
+      where: {
+        fieldFilter: {
+          field: { fieldPath: "timestamp" },
+          op: "GREATER_THAN_OR_EQUAL",
+          value: { stringValue: dateStr }
+        }
+      },
+      orderBy: [{ field: { fieldPath: "timestamp" }, direction: "DESCENDING" }],
       limit: limit
     }
   };
@@ -38,34 +69,24 @@ async function fetchRecentLogs(collectionName, dateStr, limit = 2000) {
   try {
     const res  = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const data = await res.json();
-
-    if (!Array.isArray(data)) {
-      console.warn(`  ⚠️  runQuery returned non-array for ${collectionName}:`, JSON.stringify(data).slice(0, 200));
-      return [];
-    }
-
+    if (!Array.isArray(data)) return [];
     return data.filter(item => item.document).map(item => item.document);
   } catch (err) {
-    console.error(`  ❌ REST Fetch failed for ${collectionName}:`, err.message);
+    console.error(`  ❌ REST Fetch fallback failed for ${collectionName}:`, err.message);
     return [];
   }
 }
 
 function deduplicateForDate(docs, locationTag, dateStr) {
   const targetLoc = locationTag.toLowerCase().trim();
-  
-  // Filter by date string and location
   const filtered = docs.filter(doc => {
     const fields = doc.fields || {};
     const timestamp = fields.timestamp?.stringValue || "";
     if (!timestamp.startsWith(dateStr)) return false;
-
     const loc = (fields.location?.stringValue || "").toLowerCase().trim();
-    // Inclusive matching for location names
-    return loc === targetLoc || loc.includes(targetLoc) || targetLoc.includes(loc) || (targetLoc === "fes saiss" && loc === "");
+    return loc === targetLoc || loc.includes(targetLoc) || targetLoc.includes(loc);
   });
 
-  // Sort chronologically for unique counting
   const sorted = [...filtered].sort((a, b) =>
     (a.fields.timestamp?.stringValue || "").localeCompare(b.fields.timestamp?.stringValue || "")
   );
@@ -76,8 +97,6 @@ function deduplicateForDate(docs, locationTag, dateStr) {
     const f   = doc.fields;
     const uid = f.user_id?.stringValue || f.id?.stringValue || doc.name.split("/").pop();
     const t   = new Date(f.timestamp?.stringValue || 0).getTime();
-    
-    // 10-minute timeout for unique re-entry
     if (!seen.has(uid) || Math.abs(t - seen.get(uid)) >= 600000) {
       unique++;
       seen.set(uid, t);
@@ -86,35 +105,76 @@ function deduplicateForDate(docs, locationTag, dateStr) {
   return { unique, raw: filtered.length };
 }
 
+const parseNum = (field) => {
+  if (!field) return null;
+  if (field.integerValue !== undefined) return parseInt(field.integerValue);
+  if (field.doubleValue  !== undefined) return Math.round(field.doubleValue);
+  return null;
+};
+
 async function syncGymCounts(db, apiCache, daysBack = 1) {
+  const admin = require("firebase-admin");
+  const today = moroccoDateStr();
+
+  // Build list of dates to sync (today + past N days)
   const dates = [];
   for (let i = 0; i <= daysBack; i++) {
     dates.push(moroccoDateStr(new Date(Date.now() - i * 86400000)));
   }
-  
+
   console.log(`🔄 Auto-sync starting for: ${dates.join(", ")}`);
-  const admin = require("firebase-admin");
 
   for (const gym of GYM_SYNC_MAP) {
-    // Fetch a large chunk of recent logs once per gym to save quota
-    const oldestDate = dates[dates.length - 1];
-    const allRecentDocs = await fetchRecentLogs(gym.collection, oldestDate);
-    
     for (const dateStr of dates) {
       try {
-        const { unique, raw } = deduplicateForDate(allRecentDocs, gym.locationTag, dateStr);
+        let unique, raw;
+
+        if (dateStr === today) {
+          // ✅ TODAY: Use new fast path — fetch 1 doc, read device counters
+          const latestDoc = await fetchLatestDoc(gym.collection, dateStr);
+
+          if (latestDoc) {
+            const f = latestDoc.fields || {};
+            const loc = (f.location?.stringValue || "").toLowerCase().trim();
+            const targetLoc = gym.locationTag.toLowerCase().trim();
+            const locationOk = loc === targetLoc || loc.includes(targetLoc) || targetLoc.includes(loc);
+
+            const dailyUnique = parseNum(f.daily_unique);
+            const dailyTotal  = parseNum(f.daily_total);
+
+            if (locationOk && dailyUnique !== null && dailyTotal !== null) {
+              // New format ✅ — device-computed, 1 read
+              unique = dailyUnique;
+              raw    = dailyTotal;
+              console.log(`  ⚡ ${gym.id} / ${dateStr}: ${unique} unique, ${raw} raw (fast path)`);
+            } else {
+              // Old format fallback — manual count
+              console.log(`  ⚠️  ${gym.id}: daily_unique missing, using fallback count`);
+              const allDocs = await fetchRecentLogs(gym.collection, dateStr);
+              ({ unique, raw } = deduplicateForDate(allDocs, gym.locationTag, dateStr));
+              console.log(`  📊 ${gym.id} / ${dateStr}: ${unique} unique, ${raw} raw (fallback)`);
+            }
+          } else {
+            unique = 0; raw = 0;
+            console.log(`  ℹ️  ${gym.id}: No entries today yet`);
+          }
+        } else {
+          // 📅 PAST DAYS: Use old method (daily_unique not reliable for past docs)
+          const allDocs = await fetchRecentLogs(gym.collection, dateStr);
+          ({ unique, raw } = deduplicateForDate(allDocs, gym.locationTag, dateStr));
+          console.log(`  📅 ${gym.id} / ${dateStr}: ${unique} unique, ${raw} raw (historical)`);
+        }
 
         await db.collection("gym_daily_stats").doc(`${gym.id}_${dateStr}`).set(
-          { 
-            gym_id: gym.id, 
-            date: dateStr, 
-            count: unique, 
+          {
+            gym_id: gym.id,
+            date:   dateStr,
+            count:  unique,
             rawCount: raw,
-            lastSyncedAt: admin.firestore.FieldValue.serverTimestamp() 
+            lastSyncedAt: admin.firestore.FieldValue.serverTimestamp()
           },
           { merge: true }
         );
-        console.log(`  ✅ ${gym.id} / ${dateStr}: ${unique} unique (${raw} raw)`);
 
         if (apiCache?.dailyStats?.delete) apiCache.dailyStats.delete(gym.id);
       } catch (err) {
@@ -125,19 +185,34 @@ async function syncGymCounts(db, apiCache, daysBack = 1) {
   console.log("✨ Auto-sync complete.");
 }
 
+/**
+ * Schedule: hourly during the day (08:00–23:00 Morocco) + nightly at 00:05
+ */
 function scheduleNightlySync(db, apiCache) {
+  // ── Nightly full sync at 00:05 Morocco ──────────────────────────────────
   const moroccoNow = new Date(Date.now() + 3600000);
-  const nextRun    = new Date(moroccoNow);
-  nextRun.setHours(0, 5, 0, 0); // 00:05 Morocco time
-  if (nextRun <= moroccoNow) nextRun.setDate(nextRun.getDate() + 1);
-  
-  const ms = nextRun.getTime() - moroccoNow.getTime();
-  console.log(`⏰ Nightly sync scheduled in ${Math.round(ms / 60000)} min (00:05 Morocco)`);
-  
+  const nextNight  = new Date(moroccoNow);
+  nextNight.setHours(0, 5, 0, 0);
+  if (nextNight <= moroccoNow) nextNight.setDate(nextNight.getDate() + 1);
+  const msToNight = nextNight.getTime() - moroccoNow.getTime();
+
+  console.log(`⏰ Nightly sync scheduled in ${Math.round(msToNight / 60000)} min (00:05 Morocco)`);
   setTimeout(() => {
     syncGymCounts(db, apiCache, 7).catch(e => console.error("❌ Nightly sync error:", e));
-    scheduleNightlySync(db, apiCache);
-  }, ms);
+    scheduleNightlySync(db, apiCache); // reschedule for next night
+  }, msToNight);
+
+  // ── Hourly today-only sync ───────────────────────────────────────────────
+  // Runs every 60 minutes — uses 1 read per gym (fast path)
+  setInterval(() => {
+    const h = new Date(Date.now() + 3600000).getHours(); // Morocco hour
+    if (h >= 7 && h <= 23) { // Only during gym hours
+      console.log(`⏱️  Hourly sync triggered (${h}:xx Morocco)`);
+      syncGymCounts(db, apiCache, 0).catch(e => console.error("❌ Hourly sync error:", e));
+    }
+  }, 60 * 60 * 1000); // every 60 minutes
+
+  console.log(`⏱️  Hourly sync active (every 60min, 07:00–23:00 Morocco)`);
 }
 
 module.exports = { syncGymCounts, scheduleNightlySync };
