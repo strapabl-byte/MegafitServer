@@ -1311,8 +1311,8 @@ app.get("/api/live-entries", verifyAzureToken, async (req, res) => {
   }
 });
 
-// NEW: Optimized endpoint for total count only (saves reads)
-// Uses Firestore REST runAggregationQuery for maximum efficiency
+// NEW: Ultra-efficient endpoint — reads daily_total & daily_unique from the LATEST doc only
+// The access control device embeds running counters in every entry, so 1 read = perfect accuracy
 app.get("/api/live-count", verifyAzureToken, async (req, res) => {
   try {
     const { gymId } = req.query;
@@ -1327,109 +1327,66 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
 
     const cacheKey = `live_count_${gymId}`;
     const result = await getCachedOrFetch(apiCache.general, cacheKey, 15000, async () => {
-        const url = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT_ID}/databases/(default)/documents:runQuery?key=${DOOR_REST_KEY}`;
-        
-        // --- SENIOR DEV OPTIMIZATION ---
-        const todayStr = getMoroccanDateStr();
-        
-        // 1. Initialize Cache for this gym
-        if (!liveCountCache[gymId] || liveCountCache[gymId].date !== todayStr) {
-            liveCountCache[gymId] = {
-                date: todayStr,
-                lastFullSync: 0,
-                uniqueCount: 0,
-                lastSeenMap: new Map(), // UID -> last timestamp
-                rawCount: 0,
-                lastDocId: null
-            };
+      const todayStr = getMoroccanDateStr();
+      const url = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT_ID}/databases/(default)/documents:runQuery?key=${DOOR_REST_KEY}`;
+
+      // 🎯 Fetch only the LATEST 1 document — device embeds daily_total & daily_unique counters
+      const body = {
+        structuredQuery: {
+          from: [{ collectionId: gym.collection }],
+          where: {
+            fieldFilter: {
+              field: { fieldPath: "timestamp" },
+              op: "GREATER_THAN_OR_EQUAL",
+              value: { stringValue: todayStr }
+            }
+          },
+          orderBy: [{ field: { fieldPath: "timestamp" }, direction: "DESCENDING" }],
+          limit: 1
         }
+      };
 
-        const cache = liveCountCache[gymId];
-        const now = Date.now();
-        const needsFullSync = (now - cache.lastFullSync) > 900000; // 15 minutes
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
 
-        // 2. Determine Query Limit (Aggressive Cost Saving)
-        // If we have a fresh cache, we only check for the VERY LATEST 10 scans
-        const queryLimit = needsFullSync ? 1000 : 20;
+      const data = await resp.json();
 
-        const body = {
-          structuredQuery: {
-            from: [{ collectionId: gym.collection }],
-            where: {
-              fieldFilter: {
-                field: { fieldPath: "timestamp" },
-                op: "GREATER_THAN_OR_EQUAL",
-                value: { stringValue: todayStr }
-              }
-            },
-            orderBy: [{ field: { fieldPath: "timestamp" }, direction: "DESCENDING" }],
-            limit: queryLimit
-          }
-        };
+      if (!Array.isArray(data) || !data[0]?.document) {
+        console.log(`[${gymId}] No entries today yet`);
+        return { count: 0, rawCount: 0, date: todayStr };
+      }
 
-        const resp = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body)
-        });
-        
-        const data = await resp.json();
-        
-        if (Array.isArray(data)) {
-            // If it's a full sync, clear the state
-            if (needsFullSync) {
-                cache.uniqueCount = 0;
-                cache.lastSeenMap = new Map();
-                cache.rawCount = 0;
-                cache.lastFullSync = now;
-            }
+      const f = data[0].document.fields || {};
+      const loc = (f.location?.stringValue || "").toLowerCase().trim();
+      const targetLoc = gym.locationTag.toLowerCase().trim();
 
-            // Important: process chronologically (Ascending) for deduplication window logic
-            const validDocs = data
-                .filter(d => d.document)
-                .map(d => ({
-                    id: d.document.name.split("/").pop(),
-                    fields: d.document.fields,
-                    timestamp: new Date(d.document.fields.timestamp?.stringValue || 0).getTime()
-                }))
-                .filter(d => needsFullSync || d.id !== cache.lastDocId)
-                .sort((a, b) => a.timestamp - b.timestamp);
+      // Verify this latest doc belongs to this gym's location
+      if (loc !== targetLoc && !loc.includes(targetLoc) && !targetLoc.includes(loc)) {
+        console.warn(`[${gymId}] Latest doc location mismatch: "${loc}" vs "${targetLoc}"`);
+        return { count: 0, rawCount: 0, date: todayStr };
+      }
 
-            const newDocs = [];
-            validDocs.forEach(doc => {
-                // If we've seen this doc in an incremental poll, stop processing older docs (handled by filter/sort above)
-                const docId = doc.id;
-                const f = doc.fields;
-                const loc = (f.location?.stringValue || "").toLowerCase().trim();
-                const targetLoc = gym.locationTag.toLowerCase().trim();
+      // ✅ Read running counters embedded by the device
+      const parseNum = (field) => {
+        if (!field) return 0;
+        if (field.integerValue) return parseInt(field.integerValue);
+        if (field.doubleValue) return Math.round(field.doubleValue);
+        return 0;
+      };
 
-                if (loc !== targetLoc && !loc.includes(targetLoc) && !targetLoc.includes(loc)) return;
+      const dailyUnique = parseNum(f.daily_unique);
+      const dailyTotal  = parseNum(f.daily_total);
 
-                const uid = f.user_id?.stringValue || f.id?.stringValue || docId;
-                const time = doc.timestamp;
+      console.log(`✅ [${gymId}] daily_unique=${dailyUnique} daily_total=${dailyTotal} (1 read)`);
 
-                // 10-minute window deduplication (Match auto_sync.js)
-                if (!cache.lastSeenMap.has(uid) || Math.abs(time - cache.lastSeenMap.get(uid)) >= 600000) {
-                    cache.uniqueCount++;
-                    cache.lastSeenMap.set(uid, time);
-                }
-                newDocs.push(docId);
-            });
-
-            // Update raw count incrementally
-            if (needsFullSync) {
-                cache.rawCount = validDocs.length;
-            } else {
-                cache.rawCount += newDocs.length;
-            }
-
-            if (newDocs.length > 0) {
-                // newest one (since sorted ascending, it's the last one)
-                cache.lastDocId = newDocs[newDocs.length - 1]; 
-            }
-        }
-
-        return { count: cache.uniqueCount, rawCount: cache.rawCount, date: todayStr };
+      return {
+        count:    dailyUnique,  // unique people today (device-deduped)
+        rawCount: dailyTotal,   // all scans including re-entries
+        date: todayStr
+      };
     });
 
     res.json({ ok: true, gymId, ...result });
@@ -1440,6 +1397,7 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
 });
 
 // ---------- ANALYTICS ----------
+
 
 app.get("/api/analytics/daily-stats/:gymId", verifyAzureToken, async (req, res) => {
   try {
