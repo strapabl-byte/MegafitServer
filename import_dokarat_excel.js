@@ -44,8 +44,8 @@ const allData = {
     { contrat: "13507", commercial: "HAJARE", nom: "TOUAB ABDERHAHIM", cin: "-", tel: "-", tpe: 0, espece: 0, virement: 5900, cheque: 0, abonnement: "2 ANS S/V" }
   ],
   "2026-04-03": [
-    { contrat: "14124", commercial: "OUISSAL", nom: "ZOLIKHA HADDACHE", cin: "Z2680", tel: "0641525976", tpe: 3000, espece: 0, virement: 0, cheque: 0, abonnement: "AV DE 2 ANS" },
-    { contrat: "14125", commercial: "OUISSAL", nom: "CHAHD MSA", cin: "CD416932", tel: "0650845382", tpe: 0, espece: 3000, virement: 0, cheque: 0, abonnement: "AV DE 2 ANS" },
+    { contrat: "14124", commercial: "OUISSALE", nom: "ZOLIKHA HADDACHE", cin: "Z2680", tel: "0641525976", tpe: 3000, espece: 0, virement: 0, cheque: 0, abonnement: "AV DE 2 ANS" },
+    { contrat: "14125", commercial: "OUISSALE", nom: "CHAHD MSA", cin: "CD416932", tel: "0650845382", tpe: 0, espece: 3000, virement: 0, cheque: 0, abonnement: "AV DE 2 ANS" },
     { contrat: "14126", commercial: "HAJARE", nom: "EL BARAKA NAJOUA", cin: "CD719910", tel: "0666527869", tpe: 0, espece: 4000, virement: 0, cheque: 0, abonnement: "1 AN" },
     { contrat: "PDC", commercial: "HAJARE", nom: "MRABET YASMINE", cin: "-", tel: "-", tpe: 0, espece: 0, virement: 0, cheque: 1000, abonnement: "-" },
     { contrat: "14128", commercial: "OUISSALE", nom: "ALAOUI ABDELAH I.", cin: "-", tel: "0661720873", tpe: 5900, espece: 0, virement: 0, cheque: 0, abonnement: "2 ANS S/V" },
@@ -71,7 +71,7 @@ const allData = {
     { contrat: "14125", commercial: "OUISSALE", nom: "CHAHD HSAKEN", cin: "CD416932", tel: "0650845382", tpe: 0, espece: 2900, virement: 0, cheque: 0, abonnement: "COMPL. 2 ANS S/V" }
   ],
   "2026-04-05": [
-    { contrat: "14145", commercial: "ouissal", nom: "hasmoudi hassaniya", cin: "fs82589", tel: "0772343517", tpe: 3000, espece: 0, virement: 0, cheque: 0, abonnement: "AV DE 2 ANS S/V" },
+    { contrat: "14145", commercial: "OUISSALE", nom: "hasmoudi hassaniya", cin: "fs82589", tel: "0772343517", tpe: 3000, espece: 0, virement: 0, cheque: 0, abonnement: "AV DE 2 ANS S/V" },
     { contrat: "14146", commercial: "HAJARE", nom: "imane bourissai", cin: "cd175425", tel: "0617900010", tpe: 0, espece: 0, virement: 1500, cheque: 0, abonnement: "CONV. CREDIT AGRICOLE" }
   ],
   "2026-04-06": [
@@ -83,7 +83,7 @@ const allData = {
     { contrat: "-", commercial: "HAJARE", nom: "REDA JABER", cin: "CD221864", tel: "0652760838", tpe: 0, espece: 400, virement: 0, cheque: 0, abonnement: "AV DE MULTICUB" }
   ],
   "2026-04-07": [
-    { contrat: "14150", commercial: "OUISSAL", nom: "EL AOUALE OUAFAE", cin: "C444315", tel: "0645351284", tpe: 0, espece: 5900, virement: 0, cheque: 0, abonnement: "2 ANS S/V" },
+    { contrat: "14150", commercial: "OUISSALE", nom: "EL AOUALE OUAFAE", cin: "C444315", tel: "0645351284", tpe: 0, espece: 5900, virement: 0, cheque: 0, abonnement: "2 ANS S/V" },
     { contrat: "14152", commercial: "HAJARE", nom: "OMAR BEN JELLOUN F.", cin: "CD650383", tel: "0664955144", tpe: 5900, espece: 0, virement: 0, cheque: 0, abonnement: "2 ANS S/V" },
     { contrat: "14153", commercial: "HAJARE", nom: "MOHAMED BAKKALI", cin: "CD591135", tel: "0661165511", tpe: 0, espece: 5900, virement: 0, cheque: 0, abonnement: "2 ANS S/V" },
     { contrat: "14154", commercial: "OUISSALE", nom: "FASSI FIHRI BADIA", cin: "C367746", tel: "0663806032", tpe: 6900, espece: 0, virement: 0, cheque: 0, abonnement: "2 ANS S/V" },

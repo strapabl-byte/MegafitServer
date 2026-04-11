@@ -21,10 +21,14 @@ async function fixNames() {
 
   let totalUpdated = 0;
 
+  // Mapping of incorrect names to correct names (case-insensitive keys)
+  const corrections = {
+    "HAJAR": "HAJARE",
+    "OUISSAL": "OUISSALE"
+  };
+
   for (const dayDoc of registerSnap.docs) {
     const entriesRef = dayDoc.ref.collection("entries");
-    
-    // Find entries where commercial is "HAJAR" (case-insensitive search isn't native, so we fetch and filter)
     const entriesSnap = await entriesRef.get();
     
     const batch = db.batch();
@@ -32,11 +36,12 @@ async function fixNames() {
 
     entriesSnap.docs.forEach(doc => {
       const data = doc.data();
-      const name = (data.commercial || "").trim().toUpperCase();
+      const currentName = (data.commercial || "").trim().toUpperCase();
       
-      if (name === "HAJAR") {
-        console.log(`  📝 Updating entry ${doc.id} on ${dayDoc.id}: ${data.nom} | ${data.commercial} -> HAJARE`);
-        batch.update(doc.ref, { commercial: "HAJARE" });
+      if (corrections[currentName]) {
+        const correctName = corrections[currentName];
+        console.log(`  📝 Updating entry ${doc.id} on ${dayDoc.id}: ${data.nom} | ${data.commercial} -> ${correctName}`);
+        batch.update(doc.ref, { commercial: correctName });
         batchSize++;
         totalUpdated++;
       }
