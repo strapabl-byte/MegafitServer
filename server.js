@@ -1176,6 +1176,7 @@ app.get("/api/register/calendar", verifyAzureToken, async (req, res) => {
     }));
 
     res.json({ ok: true, gymId, year: Number(year), calendarData, resteData });
+  } catch (err) {
     console.error("GET /api/register/calendar error:", err);
     res.status(500).json({ error: "Failed to fetch calendar" });
   }
