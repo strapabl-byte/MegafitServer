@@ -1176,9 +1176,61 @@ app.get("/api/register/calendar", verifyAzureToken, async (req, res) => {
     }));
 
     res.json({ ok: true, gymId, year: Number(year), calendarData, resteData });
-  } catch (err) {
     console.error("GET /api/register/calendar error:", err);
     res.status(500).json({ error: "Failed to fetch calendar" });
+  }
+});
+
+// ---------- Commercials Management ----------
+
+// GET /api/commercials?gymId=dokarat
+app.get("/api/commercials", verifyAzureToken, async (req, res) => {
+  try {
+    const { gymId = "dokarat" } = req.query;
+    const snap = await db.collection("gym_commercials")
+      .where("gymId", "==", gymId)
+      .orderBy("name", "asc")
+      .get();
+      
+    const commercials = snap.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+    
+    res.json({ ok: true, commercials });
+  } catch (err) {
+    console.error("GET /api/commercials error:", err);
+    res.status(500).json({ error: "Failed to fetch commercials" });
+  }
+});
+
+// POST /api/commercials
+app.post("/api/commercials", verifyAzureToken, requireAdmin, async (req, res) => {
+  try {
+    const { gymId, name } = req.body;
+    if (!gymId || !name) return res.status(400).json({ error: "gymId and name required" });
+
+    const docRef = await db.collection("gym_commercials").add({
+      gymId,
+      name: name.trim().toUpperCase(),
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    res.json({ ok: true, id: docRef.id, name: name.trim().toUpperCase() });
+  } catch (err) {
+    console.error("POST /api/commercials error:", err);
+    res.status(500).json({ error: "Failed to add commercial" });
+  }
+});
+
+// DELETE /api/commercials/:id
+app.delete("/api/commercials/:id", verifyAzureToken, requireAdmin, async (req, res) => {
+  try {
+    await db.collection("gym_commercials").doc(req.params.id).delete();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("DELETE /api/commercials error:", err);
+    res.status(500).json({ error: "Failed to delete commercial" });
   }
 });
 
