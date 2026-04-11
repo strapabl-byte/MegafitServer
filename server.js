@@ -1078,7 +1078,7 @@ app.get("/api/register", verifyAzureToken, async (req, res) => {
 });
 
 // POST /api/register/entry — create new row
-app.post("/api/register/entry", verifyAzureToken, async (req, res) => {
+app.post("/api/register/entry", verifyAzureToken, requireAdmin, async (req, res) => {
   try {
     const { date, gymId = "dokarat", ...entry } = req.body;
     if (!date) return res.status(400).json({ error: "date required" });
@@ -1106,7 +1106,7 @@ app.post("/api/register/entry", verifyAzureToken, async (req, res) => {
 });
 
 // PUT /api/register/entry/:id — update a row
-app.put("/api/register/entry/:id", verifyAzureToken, async (req, res) => {
+app.put("/api/register/entry/:id", verifyAzureToken, requireAdmin, async (req, res) => {
   try {
     const { date, gymId = "dokarat", ...entry } = req.body;
     if (!date) return res.status(400).json({ error: "date required" });
@@ -1126,7 +1126,7 @@ app.put("/api/register/entry/:id", verifyAzureToken, async (req, res) => {
 });
 
 // DELETE /api/register/entry/:id
-app.delete("/api/register/entry/:id", verifyAzureToken, async (req, res) => {
+app.delete("/api/register/entry/:id", verifyAzureToken, requireAdmin, async (req, res) => {
   try {
     const { date, gymId = "dokarat" } = req.query;
     if (!date) return res.status(400).json({ error: "date required" });
