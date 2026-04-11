@@ -1188,15 +1188,15 @@ app.get("/api/register/calendar", verifyAzureToken, async (req, res) => {
 app.get("/api/commercials", verifyAzureToken, async (req, res) => {
   try {
     const { gymId = "dokarat" } = req.query;
+    // NOTE: No orderBy here — compound where+orderBy requires a Firestore composite index.
+    // We sort in JS instead, which works without any index.
     const snap = await db.collection("gym_commercials")
       .where("gymId", "==", gymId)
-      .orderBy("name", "asc")
       .get();
       
-    const commercials = snap.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    }));
+    const commercials = snap.docs
+      .map(doc => ({ id: doc.id, ...doc.data() }))
+      .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
     
     res.json({ ok: true, commercials });
   } catch (err) {
