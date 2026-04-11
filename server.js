@@ -1455,27 +1455,41 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
 app.get("/api/analytics/daily-stats/:gymId", verifyAzureToken, async (req, res) => {
   try {
     const { gymId } = req.params;
-    
-    const data = await getCachedOrFetch(apiCache.dailyStats, gymId, 300000, async () => {
-      console.log(`📊 Fetching daily stats for ${gymId} from DB...`);
-      const snap = await db.collection("gym_daily_stats")
-        .where("gym_id", "==", gymId)
-        .limit(40) // ✅ Fetch 40 to guarantee we always have the last 30 days
-        .get();
 
-      let snapData = snap.docs.map(doc => doc.data());
-      
-      // Filter out invalid records, sort descending to pick 30 most recent
-      snapData = snapData.filter(d => d && d.date);
-      snapData.sort((a, b) => b.date.localeCompare(a.date)); // newest first
-      snapData = snapData.slice(0, 30);  // take 30 most recent
-      
-      // Reverse for the chart (oldest on left → newest on right)
-      snapData.reverse();
+    const data = await getCachedOrFetch(apiCache.dailyStats, gymId, 300000, async () => {
+      console.log(`📊 Building 30-day scaffold for ${gymId}...`);
+
+      // Build exact document IDs for the last 30 days (Morocco UTC+1 time)
+      const docIds = [];
+      const dateStrs = [];
+      for (let i = 29; i >= 0; i--) {
+        // Morocco is UTC+1 — shift time before extracting date
+        const dateStr = new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10);
+        dateStrs.push(dateStr);
+        docIds.push(`${gymId}_${dateStr}`);
+      }
+
+      // Batch-fetch all 30 documents in parallel (30 reads, guaranteed correct dates)
+      const docRefs = docIds.map(id => db.collection("gym_daily_stats").doc(id));
+      const snapshots = await db.getAll(...docRefs);
+
+      const snapData = snapshots.map((snap, i) => {
+        if (!snap.exists) {
+          return { gym_id: gymId, date: dateStrs[i], count: 0, rawCount: 0 };
+        }
+        const d = snap.data();
+        return {
+          gym_id:   gymId,
+          date:     d.date     || dateStrs[i],
+          count:    d.count    || 0,
+          rawCount: d.rawCount || 0,
+        };
+      });
+
+      console.log(`✅ 30-day scaffold ready for ${gymId} (${snapData.filter(d => d.count > 0).length} days with data)`);
       return snapData;
     });
-    
-    console.log(`✅ Returned ${data.length} days of stats for ${gymId}`);
+
     res.json(data);
   } catch (err) {
     console.error("Daily Stats Fetch Error:", err);
