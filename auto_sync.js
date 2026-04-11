@@ -176,7 +176,8 @@ async function syncGymCounts(db, apiCache, daysBack = 1) {
           { merge: true }
         );
 
-        if (apiCache?.dailyStats?.delete) apiCache.dailyStats.delete(gym.id);
+        // Invalidate the RAM cache so next request gets fresh data from Firestore
+        if (apiCache?.dailyStats) delete apiCache.dailyStats[gym.id];
       } catch (err) {
         console.error(`  ❌ Sync failed for ${gym.id} / ${dateStr}:`, err.message);
       }
