@@ -485,28 +485,39 @@ app.post("/api/inscriptions/:id/confirm", verifyAzureToken, async (req, res) => 
       inscriptionId: req.params.id,       // ✅ Link back to inscription doc
     });
 
-    // 3. Link any existing payments (e.g., recorded via 'complete-inscription' before this step)
+    // 3. Link any existing payments
     const existingPayments = await db.collection("payments").where("inscriptionId", "==", req.params.id).get();
     for (const p of existingPayments.docs) {
       await p.ref.update({ memberId: memberRef.id });
     }
 
+    // Also check if a registration-type payment already exists for this member (prevent double-recording)
+    const existingRegPayment = existingPayments.docs.some(p => p.data().type === 'registration');
+
     // 4. Auto-record the initial registration payment if not already present
-    // (This ensures even manually confirmed members have a history entry)
-    if (existingPayments.empty) {
-        const totalPaid = (Number(ins.payments?.espece)||0) + (Number(ins.payments?.tpe)||0) + (Number(ins.payments?.virement)||0) + (Number(ins.payments?.cheque)||0);
+    if (!existingRegPayment) {
+        const espece   = Number(ins.payments?.espece   || 0);
+        const carte    = Number(ins.payments?.carte    || ins.payments?.tpe || 0);
+        const virement = Number(ins.payments?.virement || 0);
+        const cheque   = Number(ins.payments?.cheque   || 0);
+        const totalPaid = espece + carte + virement + cheque;
+
         if (totalPaid > 0) {
+            // Determine dominant method label
+            const method = carte > 0 ? "Carte Bancaire" : (espece > 0 ? "Espèces" : (virement > 0 ? "Virement" : "Chèque"));
             await db.collection("payments").add({
-              memberId: memberRef.id,
+              memberId:    memberRef.id,
               inscriptionId: req.params.id,
-              amount: totalPaid,
-              plan: plan || "Monthly",
-              date: new Date().toISOString(),
-              method: Number(ins.payments?.espece) > 0 ? "Espèces" : (Number(ins.payments?.tpe) > 0 ? "TPE" : (Number(ins.payments?.virement) > 0 ? "Virement" : "Chèque")),
-              note: "Paiement inscription initiale",
-              createdAt: admin.firestore.FieldValue.serverTimestamp(),
-              recordedBy: req.user?.preferred_username || req.user?.name || "Admin",
-              type: "registration"
+              amount:      totalPaid,
+              plan:        plan || "Monthly",
+              date:        new Date().toISOString(),
+              method,
+              // ✅ Store full split so the UI can show each method separately
+              paymentsSplit: { espece, carte, virement, cheque },
+              note:        "Paiement inscription initiale",
+              createdAt:   admin.firestore.FieldValue.serverTimestamp(),
+              recordedBy:  req.user?.preferred_username || req.user?.name || "Admin",
+              type:        "registration"
             });
         }
     }
