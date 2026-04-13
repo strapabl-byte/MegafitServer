@@ -354,6 +354,44 @@ app.post("/public/inscriptions", async (req, res) => {
   }
 });
 
+// Public: Search members by Name or CIN for form auto-fill
+app.get("/public/members/search", async (req, res) => {
+  try {
+    const q = (req.query.q || "").trim().toLowerCase();
+    if (q.length < 2) return res.json([]); // Only search for 2+ chars
+
+    const snap = await db.collection("members").get(); // Simple fetch for small/medium DB
+    // Optimization: In a huge DB, we would use separate prefix queries for fullName and cin
+    const matches = snap.docs
+      .map(doc => ({ id: doc.id, ...doc.data() }))
+      .filter(m => 
+        (m.fullName || "").toLowerCase().includes(q) || 
+        (m.cin || "").toLowerCase().includes(q) ||
+        (m.phone || "").includes(q)
+      )
+      .slice(0, 5); // Limit to top 5 suggestions
+
+    // Minimize data sent publicly
+    const safeMatches = matches.map(m => ({
+      id: m.id,
+      fullName: m.fullName,
+      nom: (m.fullName || "").split(" ").pop(),
+      prenom: (m.fullName || "").split(" ")[0],
+      cin: m.cin,
+      phone: m.phone,
+      email: m.email,
+      birthday: m.birthday,
+      adresse: m.adresse || m.address || "",
+      ville: m.ville || m.city || "",
+    }));
+
+    res.json(safeMatches);
+  } catch (err) {
+    console.error("Public Member Search Error:", err);
+    res.status(500).json({ error: "Failed to search members" });
+  }
+});
+
 // Admin: List pending inscriptions (Web only)
 app.get("/api/inscriptions", verifyAzureToken, async (req, res) => {
   try {
@@ -455,16 +493,34 @@ app.post("/api/inscriptions/:id/confirm", verifyAzureToken, async (req, res) => 
 
     const gymId = ins.gymId || "dokarat";
 
-    // 1️⃣ Map subscription name to plan
+    // 1️⃣ Search for existing member by phone or CIN (Search both to be sure)
+    let existingMember = null;
+    const phone = ins.telephone;
+    const cin = ins.cin;
+
+    if (phone) {
+        const q = await db.collection("members")
+            .where("phone", "==", phone)
+            .limit(1)
+            .get();
+        if (!q.empty) existingMember = q.docs[0];
+    }
+    if (!existingMember && cin) {
+        const q = await db.collection("members")
+            .where("cin", "==", cin)
+            .limit(1)
+            .get();
+        if (!q.empty) existingMember = q.docs[0];
+    }
+
+    // 2️⃣ Map subscription name to plan
     const sName = (ins.subscriptionName || "").toLowerCase();
     let plan = "Monthly";
     if (sName.includes("an") || sName.includes("anu")) plan = "Annual";
     else if (sName.includes("trim") || sName.includes("3 mois")) plan = "Quarterly";
     else if (sName.includes("sem") || sName.includes("6 mois")) plan = "Semi-Annual";
 
-    // 2️⃣ Create Member only
-    const qrToken = crypto.randomBytes(16).toString("hex");
-    const memberRef = await db.collection("members").add({
+    const memberData = {
       fullName: `${ins.prenom || ""} ${ins.nom || ""}`.trim(),
       phone: ins.telephone || null,
       plan,
@@ -476,19 +532,35 @@ app.post("/api/inscriptions/:id/confirm", verifyAzureToken, async (req, res) => 
       location: gymId,
       contractNumber: ins.contractNumber || null,
       commercial: ins.commercial || null,
-      qrToken,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      confirmedBy: req.user?.preferred_username || req.user?.name || "Admin",
-      pdfUrl: ins.pdfUrl || null,         // ✅ PDF download link
-      balance: ins.totals?.balance || 0,  // ✅ Outstanding balance (reste à payer)
-      payments: ins.payments || null,     // ✅ Original payment split
-      inscriptionId: req.params.id,       // ✅ Link back to inscription doc
-    });
+      pdfUrl: ins.pdfUrl || null,
+      balance: ins.totals?.balance || 0,
+      balanceDeadline: req.body.balanceDeadline || null, // Capture from confirm call
+      payments: ins.payments || null,
+      inscriptionId: req.params.id,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    let memberId;
+    if (existingMember) {
+        memberId = existingMember.id;
+        await existingMember.ref.update(memberData);
+        console.log(`🔄 Unified Match: Updated existing member ${memberId} (${memberData.fullName})`);
+    } else {
+        const qrToken = crypto.randomBytes(16).toString("hex");
+        const doc = await db.collection("members").add({
+            ...memberData,
+            qrToken,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            confirmedBy: req.user?.preferred_username || req.user?.name || "Admin",
+        });
+        memberId = doc.id;
+        console.log(`✨ Unified Match: Created new member ${memberId} (${memberData.fullName})`);
+    }
 
     // 3. Link any existing payments
     const existingPayments = await db.collection("payments").where("inscriptionId", "==", req.params.id).get();
     for (const p of existingPayments.docs) {
-      await p.ref.update({ memberId: memberRef.id });
+      await p.ref.update({ memberId });
     }
 
     // Also check if a registration-type payment already exists for this member (prevent double-recording)
@@ -506,7 +578,7 @@ app.post("/api/inscriptions/:id/confirm", verifyAzureToken, async (req, res) => 
             // Determine dominant method label
             const method = carte > 0 ? "Carte Bancaire" : (espece > 0 ? "Espèces" : (virement > 0 ? "Virement" : "Chèque"));
             await db.collection("payments").add({
-              memberId:    memberRef.id,
+              memberId,
               inscriptionId: req.params.id,
               amount:      totalPaid,
               plan:        plan || "Monthly",
@@ -514,6 +586,7 @@ app.post("/api/inscriptions/:id/confirm", verifyAzureToken, async (req, res) => 
               method,
               // ✅ Store full split so the UI can show each method separately
               paymentsSplit: { espece, carte, virement, cheque },
+              chequePhoto: ins.chequePhoto || null, // Transfer from inscription
               note:        "Paiement inscription initiale",
               createdAt:   admin.firestore.FieldValue.serverTimestamp(),
               recordedBy:  req.user?.preferred_username || req.user?.name || "Admin",
@@ -799,7 +872,7 @@ async function autoRegisterCA({ gymId='dokarat', date, nom, tel, plan, amount, m
       cheque,
       abonnement: planToAbonnement(plan),
       reste:      Number(reste) || 0,
-      note_reste: note ? note : (reste > 0 ? `Reste: ${reste} DH` : ''),
+      note_reste: note ? note : (reste > 0 ? `Reste: ${reste} DH${req.body.balanceDeadline ? ` (Délai: ${req.body.balanceDeadline})` : ''}` : ''),
       source:     'inscription_auto',
       createdAt:  admin.firestore.FieldValue.serverTimestamp(),
       createdBy:  'auto',
@@ -826,6 +899,15 @@ app.post("/api/payments", verifyAzureToken, async (req, res) => {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       recordedBy: req.user?.preferred_username || req.user?.name || "Admin"
     });
+
+    // Update member's balance and deadline if provided
+    if (memberId && req.body.reste !== undefined) {
+        await db.collection("members").doc(memberId).update({
+            balance: Number(req.body.reste) || 0,
+            balanceDeadline: req.body.balanceDeadline || null,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+    }
 
     // Fetch member name/phone/location for the register
     let nom = '', tel = '', loc = location || 'dokarat';
@@ -887,8 +969,12 @@ app.post("/api/payments/settle-balance", verifyAzureToken, async (req, res) => {
       type: "balance_settlement",
     });
 
-    // 2️⃣ Update member's balance
-    await memberRef.update({ balance: newBalance });
+    // 2️⃣ Update member's balance & deadline
+    await memberRef.update({ 
+        balance: newBalance,
+        balanceDeadline: req.body.balanceDeadline || null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
 
     // 3️⃣ Find the original register entry for this member and update it
     const methodMap = {
