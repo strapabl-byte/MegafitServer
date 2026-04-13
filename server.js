@@ -754,7 +754,7 @@ function planToAbonnement(plan) {
   return map[plan] || plan || '1 AN';
 }
 
-async function autoRegisterCA({ gymId='dokarat', date, nom, tel, plan, amount, method, commercial, contrat, payments: splitPayments, reste }) {
+async function autoRegisterCA({ gymId='dokarat', date, nom, tel, plan, amount, method, commercial, contrat, payments: splitPayments, reste, note }) {
   try {
     const today = date || new Date().toISOString().slice(0,10);
     const docId = `${gymId}_${today}`;
@@ -799,7 +799,7 @@ async function autoRegisterCA({ gymId='dokarat', date, nom, tel, plan, amount, m
       cheque,
       abonnement: planToAbonnement(plan),
       reste:      Number(reste) || 0,
-      note_reste: reste > 0 ? `Reste: ${reste} DH` : '',
+      note_reste: note ? note : (reste > 0 ? `Reste: ${reste} DH` : ''),
       source:     'inscription_auto',
       createdAt:  admin.firestore.FieldValue.serverTimestamp(),
       createdBy:  'auto',
@@ -818,9 +818,11 @@ async function autoRegisterCA({ gymId='dokarat', date, nom, tel, plan, amount, m
 app.post("/api/payments", verifyAzureToken, async (req, res) => {
 
   try {
-    const { memberId, amount, plan, date, method, contrat, commercial, location, payments: splitPayments } = req.body;
+    const { memberId, amount, plan, date, method, contrat, commercial, location, payments: splitPayments, type, note } = req.body;
     const docRef = await db.collection("payments").add({
       memberId, amount, plan, date: date || new Date().toISOString(), method: method || "Cash",
+      type: type || 'renewal',
+      note: note || '',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       recordedBy: req.user?.preferred_username || req.user?.name || "Admin"
     });
@@ -844,6 +846,7 @@ app.post("/api/payments", verifyAzureToken, async (req, res) => {
       contrat: contrat || '',
       payments: splitPayments,
       reste: req.body.reste || 0,
+      note: note || '',
     });
 
     const snap = await docRef.get();
@@ -936,7 +939,7 @@ app.post("/api/payments/settle-balance", verifyAzureToken, async (req, res) => {
 // Admin: Validates payment and updates inscription, but leaves member creation for manual review.
 app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res) => {
   try {
-    const { inscriptionId, amount, plan, method, fullName, phone, birthday, expiresOn, photo } = req.body;
+    const { inscriptionId, amount, plan, method, fullName, phone, birthday, expiresOn, photo, note } = req.body;
     const inscriptionRef = db.collection("pending_members").doc(inscriptionId);
     const insDoc = await inscriptionRef.get();
 
@@ -951,6 +954,8 @@ app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res
       plan: plan || "Monthly",
       date: new Date().toISOString(),
       method: method || "Espèces",
+      type: 'registration',
+      note: note || '',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       recordedBy: req.user?.preferred_username || req.user?.name || "Admin",
       location: insData.gymId || "dokarat"
@@ -967,6 +972,7 @@ app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res
       contrat:    insData.contractNumber || '',
       payments:   insData.payments || null,
       reste:      insData.totals?.balance || 0,
+      note:       note || '',
     });
     // 4. Update inscription flag instead of deleting it
     if (insDoc.exists) {
