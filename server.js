@@ -100,6 +100,10 @@ function verifyAzureToken(req, res, next) {
     req.user = mockUsers[token] || { name: "Demo Admin", role: "admin" };
     req.isAdmin = req.user.role === "admin";
     req.isManager = req.user.role === "manager";
+    // Give mock managers access to their gym
+    const gymMap = { 'manager_marjane': ['marjane'], 'manager2': ['dokarat'] };
+    req.assignedGyms = gymMap[token] || [];
+    req.hasAccessToGym = (gymId) => req.isAdmin || req.assignedGyms.includes(gymId);
     return next();
   }
 
@@ -152,7 +156,8 @@ const apiCache = {
   inscriptions: {}, // keyed by gymId (or 'all')
   liveEntries: {},  // keyed by gymId
   dailyStats: {},   // keyed by gymId
-  general: {}      // for generic counts and simple flags
+  general: {},      // for generic counts and simple flags
+  profiles: {}      // keyed by memberId — 60s TTL
 };
 
 async function getCachedOrFetch(cacheObj, key, ttlMs, fetchFn) {
@@ -532,8 +537,8 @@ app.post("/api/inscriptions/:id/confirm", verifyAzureToken, async (req, res) => 
 
 
 
-// Admin: Delete/Mark as processed
-app.delete("/api/inscriptions/:id", verifyAzureToken, async (req, res) => {
+// Super Admin only: Delete a pending inscription
+app.delete("/api/inscriptions/:id", verifyAzureToken, requireAdmin, async (req, res) => {
   try {
     await db.collection("pending_members").doc(req.params.id).delete();
     
@@ -553,6 +558,77 @@ app.get("/api/members/:id", verifyAzureToken, async (req, res) => {
     res.json({ id: doc.id, ...doc.data() });
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch member" });
+  }
+});
+
+// Smart profile: member + linked inscription merged in one call
+// ✅ Secured: gym-based access enforced for managers
+// ✅ Optimised: 60s server-side RAM cache (2 Firestore reads saved per repeated call)
+app.get("/api/members/:id/profile", verifyAzureToken, async (req, res) => {
+  const memberId = req.params.id;
+  const cacheKey = memberId;
+
+  try {
+    // ── Cache hit ───────────────────────────────────────────────────────────
+    const cached = apiCache.profiles[cacheKey];
+    if (cached && (Date.now() - cached.ts < 60000)) {
+      // Still enforce gym access even on cache hit
+      if (!req.isAdmin && cached.data.location && !req.hasAccessToGym(cached.data.location)) {
+        return res.status(403).json({ error: "Access denied to this member" });
+      }
+      return res.json(cached.data);
+    }
+
+    // ── Fetch member ─────────────────────────────────────────────────────────
+    const memberDoc = await db.collection("members").doc(memberId).get();
+    if (!memberDoc.exists) return res.status(404).json({ error: "Member not found" });
+
+    const member = { id: memberDoc.id, ...memberDoc.data() };
+
+    // ── Gym access control for managers ──────────────────────────────────────
+    if (!req.isAdmin) {
+      const memberGym = member.location || null;
+      if (!memberGym || !req.hasAccessToGym(memberGym)) {
+        console.warn(`🚫 Manager ${req.user?.name} tried to access member ${memberId} from gym ${memberGym}`);
+        return res.status(403).json({ error: "Access denied: member belongs to a different gym" });
+      }
+    }
+
+    // ── Fetch linked inscription (if any) ────────────────────────────────────
+    let inscription = null;
+    if (member.inscriptionId) {
+      const insDoc = await db.collection("pending_members").doc(member.inscriptionId).get();
+      if (insDoc.exists) {
+        const ins = insDoc.data();
+        inscription = {
+          cin:              ins.cin || null,
+          adresse:          ins.adresse || null,
+          ville:            ins.ville || null,
+          email:            ins.email || null,
+          commercial:       ins.commercial || null,
+          subscriptionName: ins.subscriptionName || null,
+          contractNumber:   ins.contractNumber || member.contractNumber || null,
+          pdfUrl:           ins.pdfUrl || member.pdfUrl || null,
+          gymId:            ins.gymId || member.location || null,
+          periodFrom:       ins.periodFrom || null,
+          periodTo:         ins.periodTo || member.expiresOn || null,
+          totals:           ins.totals || null,
+          payments:         ins.payments || null,
+          balance:          ins.totals?.balance ?? member.balance ?? 0,
+          source:           ins.source || "web",
+        };
+      }
+    }
+
+    const payload = { ...member, inscription };
+
+    // ── Store in cache ────────────────────────────────────────────────────────
+    apiCache.profiles[cacheKey] = { data: payload, ts: Date.now() };
+
+    res.json(payload);
+  } catch (err) {
+    console.error("Profile fetch error:", err);
+    res.status(500).json({ error: "Failed to fetch member profile" });
   }
 });
 
