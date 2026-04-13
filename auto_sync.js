@@ -3,8 +3,19 @@ const DOOR_PROJECT = "megadoor-b3ccb";
 const DOOR_API_KEY = process.env.DOOR_FIREBASE_API_KEY || "AIzaSyBzNbHN_a-4kvI-Z22Ho_pric3mQ7IdiH8";
 
 const GYM_SYNC_MAP = [
-  { id: "dokarat", collection: "mega_fit_logs",      locationTag: "dokkarat fes" },
-  { id: "marjane", collection: "saiss entrees logs", locationTag: "fes saiss"    },
+  { 
+    id: "dokarat", 
+    collection: "mega_fit_logs",      
+    locationTags: ["dokkarat fes"],
+    collections: ["mega_fit_logs"] 
+  },
+  { 
+    id: "marjane", 
+    collection: "saiss entrees logs", 
+    locationTags: ["fes saiss", "fes marjane"], // flexible matching
+    collections: ["saiss entrees logs", "mega_fit_logs"], // aggregate leaked logs
+    forceManualCount: true // Device counter for Saiss is unreliable/too high
+  },
 ];
 
 function moroccoDateStr(date = new Date()) {
@@ -46,45 +57,54 @@ async function fetchLatestDoc(collectionName, dateStr) {
 }
 
 /**
- * FALLBACK: Old method — fetch up to 2000 docs and manually count.
- * Used only when daily_unique is missing from the latest doc (old format).
+ * FALLBACK: Old method — fetch docs across multiple collections and manually count.
+ * Used only when daily_unique is missing or for historical sync.
  */
-async function fetchRecentLogs(collectionName, dateStr, limit = 2000) {
-  const url = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT}/databases/(default)/documents:runQuery?key=${DOOR_API_KEY}`;
-  const body = {
-    structuredQuery: {
-      from: [{ collectionId: collectionName }],
-      where: {
-        fieldFilter: {
-          field: { fieldPath: "timestamp" },
-          op: "GREATER_THAN_OR_EQUAL",
-          value: { stringValue: dateStr }
-        }
-      },
-      orderBy: [{ field: { fieldPath: "timestamp" }, direction: "DESCENDING" }],
-      limit: limit
-    }
-  };
+async function fetchRecentLogsFromCollections(collectionNames, dateStr, limit = 2000) {
+  const allDocs = [];
+  
+  for (const coll of collectionNames) {
+    const url = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT}/databases/(default)/documents:runQuery?key=${DOOR_API_KEY}`;
+    const body = {
+      structuredQuery: {
+        from: [{ collectionId: coll }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "timestamp" },
+            op: "GREATER_THAN_OR_EQUAL",
+            value: { stringValue: dateStr }
+          }
+        },
+        orderBy: [{ field: { fieldPath: "timestamp" }, direction: "DESCENDING" }],
+        limit: limit
+      }
+    };
 
-  try {
-    const res  = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    const data = await res.json();
-    if (!Array.isArray(data)) return [];
-    return data.filter(item => item.document).map(item => item.document);
-  } catch (err) {
-    console.error(`  ❌ REST Fetch fallback failed for ${collectionName}:`, err.message);
-    return [];
+    try {
+      const res  = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        const docs = data.filter(item => item.document).map(item => item.document);
+        allDocs.push(...docs);
+      }
+    } catch (err) {
+      console.error(`  ❌ REST Fetch fallback failed for ${coll}:`, err.message);
+    }
   }
+  return allDocs;
 }
 
-function deduplicateForDate(docs, locationTag, dateStr) {
-  const targetLoc = locationTag.toLowerCase().trim();
+function deduplicateForDate(docs, targetTags, dateStr) {
+  const tags = targetTags.map(t => t.toLowerCase().trim());
+  
   const filtered = docs.filter(doc => {
     const fields = doc.fields || {};
     const timestamp = fields.timestamp?.stringValue || "";
     if (!timestamp.startsWith(dateStr)) return false;
+    
     const loc = (fields.location?.stringValue || "").toLowerCase().trim();
-    return loc === targetLoc || loc.includes(targetLoc) || targetLoc.includes(loc);
+    // Match any of the target tags precisely or via inclusion
+    return tags.some(t => loc === t || loc.includes(t) || t.includes(loc));
   });
 
   const sorted = [...filtered].sort((a, b) =>
@@ -129,15 +149,15 @@ async function syncGymCounts(db, apiCache, daysBack = 1) {
       try {
         let unique, raw;
 
-        if (dateStr === today) {
+        if (dateStr === today && !gym.forceManualCount) {
           // ✅ TODAY: Use new fast path — fetch 1 doc, read device counters
           const latestDoc = await fetchLatestDoc(gym.collection, dateStr);
 
           if (latestDoc) {
             const f = latestDoc.fields || {};
             const loc = (f.location?.stringValue || "").toLowerCase().trim();
-            const targetLoc = gym.locationTag.toLowerCase().trim();
-            const locationOk = loc === targetLoc || loc.includes(targetLoc) || targetLoc.includes(loc);
+            const tags = (gym.locationTags || [gym.locationTag]).map(t => t.toLowerCase().trim());
+            const locationOk = tags.some(t => loc === t || loc.includes(t) || t.includes(loc));
 
             const dailyUnique = parseNum(f.daily_unique);
             const dailyTotal  = parseNum(f.daily_total);
@@ -148,10 +168,10 @@ async function syncGymCounts(db, apiCache, daysBack = 1) {
               raw    = dailyTotal;
               console.log(`  ⚡ ${gym.id} / ${dateStr}: ${unique} unique, ${raw} raw (fast path)`);
             } else {
-              // Old format fallback — manual count
-              console.log(`  ⚠️  ${gym.id}: daily_unique missing, using fallback count`);
-              const allDocs = await fetchRecentLogs(gym.collection, dateStr);
-              ({ unique, raw } = deduplicateForDate(allDocs, gym.locationTag, dateStr));
+              // Old format fallback — manual count across one or more collections
+              console.log(`  ⚠️  ${gym.id}: daily_unique missing or location mismatch, using fallback count`);
+              const allDocs = await fetchRecentLogsFromCollections(gym.collections || [gym.collection], dateStr);
+              ({ unique, raw } = deduplicateForDate(allDocs, gym.locationTags || [gym.locationTag], dateStr));
               console.log(`  📊 ${gym.id} / ${dateStr}: ${unique} unique, ${raw} raw (fallback)`);
             }
           } else {
@@ -160,8 +180,8 @@ async function syncGymCounts(db, apiCache, daysBack = 1) {
           }
         } else {
           // 📅 PAST DAYS: Use old method (daily_unique not reliable for past docs)
-          const allDocs = await fetchRecentLogs(gym.collection, dateStr);
-          ({ unique, raw } = deduplicateForDate(allDocs, gym.locationTag, dateStr));
+          const allDocs = await fetchRecentLogsFromCollections(gym.collections || [gym.collection], dateStr);
+          ({ unique, raw } = deduplicateForDate(allDocs, gym.locationTags || [gym.locationTag], dateStr));
           console.log(`  📅 ${gym.id} / ${dateStr}: ${unique} unique, ${raw} raw (historical)`);
         }
 

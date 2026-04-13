@@ -14,7 +14,8 @@ const app = express();
 const helmet = require("helmet");
 app.use(helmet()); // Basic security headers
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
 // ---------- Firebase Admin ----------
 let serviceAccount;
@@ -117,6 +118,13 @@ function verifyAzureToken(req, res, next) {
     // Adjust these based on your specific Azure Ad setup
     req.isAdmin = decoded.roles?.includes("Admin") || decoded.extension_Role === "admin";
     req.isManager = decoded.roles?.includes("Manager") || decoded.extension_Role === "manager";
+    
+    // Gym authorization
+    req.assignedGyms = decoded.assignedGyms || (decoded.extension_Gym ? [decoded.extension_Gym] : []);
+    req.hasAccessToGym = (gymId) => {
+      if (req.isAdmin) return true;
+      return req.assignedGyms.includes(gymId);
+    };
 
     next();
   });
@@ -250,7 +258,7 @@ app.get("/api/members", verifyAzureToken, async (req, res) => {
 
 app.post("/api/members", verifyAzureToken, async (req, res) => {
   try {
-    const { fullName, phone, plan, birthday, expiresOn, photo } = req.body;
+    const { fullName, phone, plan, birthday, expiresOn, photo, email, location } = req.body;
 
     // Check for existing member by phone to prevent duplicates
     if (phone) {
@@ -272,6 +280,8 @@ app.post("/api/members", verifyAzureToken, async (req, res) => {
       birthday: birthday || null,
       expiresOn: expiresOn || new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0],
       photo: photo || null,
+      email: email || null,
+      location: location || "dokarat",   // ✅ Gym ID — used by GET /api/members?gymId= filter
       qrToken,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
@@ -313,8 +323,17 @@ app.post("/public/generate-contract", async (req, res) => {
 app.post("/public/inscriptions", async (req, res) => {
   try {
     const data = req.body;
+    
+    // Normalize gymId — also read from query param as safety fallback
+    const rawGymId = data.gymId || req.query.gymId || req.query.gym || 'dokarat';
+    const gymMap = { 'dokkarat': 'dokarat', 'marjane': 'marjane', 'casa1': 'casa1', 'casa2': 'casa2', 'saiss': 'marjane' };
+    const cleanId = rawGymId.toLowerCase().trim();
+    const normalizedGymId = gymMap[cleanId] || cleanId;
+    console.log(`📝 New inscription for gym: "${normalizedGymId}" (raw: "${rawGymId}")`);
+
     const docRef = await db.collection("pending_members").add({
       ...data,
+      gymId: normalizedGymId,
       source: "web",
       status: "pending",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -390,6 +409,129 @@ app.patch("/api/inscriptions/:id", verifyAzureToken, async (req, res) => {
   }
 });
 
+// Public: Save PDF URL to inscription (called by inscription form after Firebase Storage upload)
+app.patch("/api/inscriptions/:id/set-pdf", async (req, res) => {
+  try {
+    const { pdfUrl } = req.body;
+    if (!pdfUrl) return res.status(400).json({ error: "pdfUrl required" });
+
+    await db.collection("pending_members").doc(req.params.id).update({
+      pdfUrl,
+      pdfUploadedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    invalidateCache(apiCache.inscriptions);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Set PDF URL error:", err);
+    res.status(500).json({ error: "Failed to save PDF URL" });
+  }
+});
+
+// Admin: CONFIRM inscription (Step 1) — creates member only, stays in Payments for manual confirmation
+app.post("/api/inscriptions/:id/confirm", verifyAzureToken, async (req, res) => {
+  try {
+    const insRef = db.collection("pending_members").doc(req.params.id);
+    const insDoc = await insRef.get();
+
+    if (!insDoc.exists) {
+      return res.status(404).json({ error: "Inscription not found" });
+    }
+
+    const ins = insDoc.data();
+
+    if (ins.status === "converted") {
+      return res.status(409).json({ error: "Inscription already confirmed" });
+    }
+
+    if (ins.memberId) {
+      return res.status(409).json({ error: "Member already created for this inscription" });
+    }
+
+    const gymId = ins.gymId || "dokarat";
+
+    // 1️⃣ Map subscription name to plan
+    const sName = (ins.subscriptionName || "").toLowerCase();
+    let plan = "Monthly";
+    if (sName.includes("an") || sName.includes("anu")) plan = "Annual";
+    else if (sName.includes("trim") || sName.includes("3 mois")) plan = "Quarterly";
+    else if (sName.includes("sem") || sName.includes("6 mois")) plan = "Semi-Annual";
+
+    // 2️⃣ Create Member only
+    const qrToken = crypto.randomBytes(16).toString("hex");
+    const memberRef = await db.collection("members").add({
+      fullName: `${ins.prenom || ""} ${ins.nom || ""}`.trim(),
+      phone: ins.telephone || null,
+      plan,
+      birthday: ins.dateNaissance || null,
+      expiresOn: ins.periodTo || new Date(Date.now() + 365 * 86400000).toISOString().split("T")[0],
+      photo: ins.profilePicture || null,
+      email: ins.email || null,
+      cin: ins.cin || null,
+      location: gymId,
+      contractNumber: ins.contractNumber || null,
+      commercial: ins.commercial || null,
+      qrToken,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      confirmedBy: req.user?.preferred_username || req.user?.name || "Admin",
+      pdfUrl: ins.pdfUrl || null,         // ✅ PDF download link
+      balance: ins.totals?.balance || 0,  // ✅ Outstanding balance (reste à payer)
+      payments: ins.payments || null,     // ✅ Original payment split
+      inscriptionId: req.params.id,       // ✅ Link back to inscription doc
+    });
+
+    // 3. Link any existing payments (e.g., recorded via 'complete-inscription' before this step)
+    const existingPayments = await db.collection("payments").where("inscriptionId", "==", req.params.id).get();
+    for (const p of existingPayments.docs) {
+      await p.ref.update({ memberId: memberRef.id });
+    }
+
+    // 4. Auto-record the initial registration payment if not already present
+    // (This ensures even manually confirmed members have a history entry)
+    if (existingPayments.empty) {
+        const totalPaid = (Number(ins.payments?.espece)||0) + (Number(ins.payments?.tpe)||0) + (Number(ins.payments?.virement)||0) + (Number(ins.payments?.cheque)||0);
+        if (totalPaid > 0) {
+            await db.collection("payments").add({
+              memberId: memberRef.id,
+              inscriptionId: req.params.id,
+              amount: totalPaid,
+              plan: plan || "Monthly",
+              date: new Date().toISOString(),
+              method: Number(ins.payments?.espece) > 0 ? "Espèces" : (Number(ins.payments?.tpe) > 0 ? "TPE" : (Number(ins.payments?.virement) > 0 ? "Virement" : "Chèque")),
+              note: "Paiement inscription initiale",
+              createdAt: admin.firestore.FieldValue.serverTimestamp(),
+              recordedBy: req.user?.preferred_username || req.user?.name || "Admin",
+              type: "registration"
+            });
+        }
+    }
+
+    // 5️⃣ Mark inscription as "awaiting_payment" — stays visible in Payments page
+    await insRef.update({
+      status: "awaiting_payment",
+      memberId: memberRef.id,
+      memberCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      memberCreatedBy: req.user?.preferred_username || req.user?.name || "Admin",
+    });
+
+    invalidateCache(apiCache.inscriptions);
+
+    const memberSnap = await memberRef.get();
+    // Return with a clear message that payment still needs to be confirmed
+    res.json({ 
+      ok: true, 
+      member: { id: memberRef.id, ...memberSnap.data() },
+      nextStep: "Go to Payments page to confirm and record the payment"
+    });
+
+  } catch (err) {
+    console.error("Confirm Inscription Error:", err);
+    res.status(500).json({ error: "Failed to confirm inscription" });
+  }
+});
+
+
+
 // Admin: Delete/Mark as processed
 app.delete("/api/inscriptions/:id", verifyAzureToken, async (req, res) => {
   try {
@@ -456,10 +598,60 @@ app.delete("/api/members/:id", verifyAzureToken, async (req, res) => {
 
 // ---------- PAYMENTS ----------
 
-app.get("/api/payments/:memberId", verifyAzureToken, requireAdmin, async (req, res) => {
+app.get("/api/payments/:memberId", verifyAzureToken, async (req, res) => {
   try {
-    const snap = await db.collection("payments").where("memberId", "==", req.params.memberId).orderBy("date", "desc").get();
-    res.json(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    const paymentsSnap = await db.collection("payments").where("memberId", "==", req.params.memberId).get();
+    let payments = paymentsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    
+    // Sort in memory to avoid index requirements
+    payments.sort((a, b) => {
+        const dateA = new Date(a.date || a.createdAt?._seconds * 1000 || 0);
+        const dateB = new Date(b.date || b.createdAt?._seconds * 1000 || 0);
+        return dateB - dateA;
+    });
+
+    // ✅ Virtual Backfill: If no 'registration' payment exists, try to inject it from the member's source inscription
+    if (!payments.some(p => p.type === 'registration')) {
+        const memberSnap = await db.collection("members").doc(req.params.memberId).get();
+        if (memberSnap.exists) {
+            const member = memberSnap.data();
+            if (member.inscriptionId) {
+                const insSnap = await db.collection("pending_members").doc(member.inscriptionId).get();
+                if (insSnap.exists) {
+                    const ins = insSnap.data();
+                    // Use pre-calculated paid total if available, else sum up fields
+                    const totalPaid = Number(ins.totals?.paid) || 
+                        ((Number(ins.payments?.espece)||0) + 
+                         (Number(ins.payments?.tpe)||0) + 
+                         (Number(ins.payments?.carte)||0) + 
+                         (Number(ins.payments?.virement)||0) + 
+                         (Number(ins.payments?.cheque)||0));
+                    
+                    if (totalPaid > 0) {
+                        // Construct summary of methods used
+                        const methods = [];
+                        if (Number(ins.payments?.espece) > 0) methods.push("Esp");
+                        if (Number(ins.payments?.carte || ins.payments?.tpe) > 0) methods.push("Car");
+                        if (Number(ins.payments?.cheque) > 0) methods.push("Chq");
+                        if (Number(ins.payments?.virement) > 0) methods.push("Vir");
+                        
+                        payments.push({
+                            id: `reg-${member.inscriptionId}`,
+                            amount: totalPaid,
+                            plan: member.plan || "Monthly",
+                            date: member.createdAt?._seconds ? new Date(member.createdAt._seconds * 1000).toISOString() : new Date().toISOString(),
+                            method: methods.length > 0 ? methods.join("+") : "Dépôt",
+                            type: "registration",
+                            note: "Paiement inscription initiale",
+                            virtual: true
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    res.json(payments);
   } catch (err) {
     console.error("Payment History Fetch Error:", err);
     res.status(500).json({ error: "Failed to fetch payments" });
@@ -475,18 +667,37 @@ function planToAbonnement(plan) {
   return map[plan] || plan || '1 AN';
 }
 
-async function autoRegisterCA({ gymId='dokarat', date, nom, tel, plan, amount, method, commercial, contrat }) {
+async function autoRegisterCA({ gymId='dokarat', date, nom, tel, plan, amount, method, commercial, contrat, payments: splitPayments, reste }) {
   try {
-    const methodMap = {
-      'Espèces':'espece','Cash':'espece','espece':'espece',
-      'TPE':'tpe','Carte Bancaire':'tpe','tpe':'tpe',
-      'Virement':'virement','virement':'virement',
-      'Chèque':'cheque','Cheque':'cheque','cheque':'cheque',
-    };
-    const field = methodMap[method] || 'espece';
-    const amt   = Number(amount) || 0;
     const today = date || new Date().toISOString().slice(0,10);
     const docId = `${gymId}_${today}`;
+    const totalAmt = Number(amount) || 0;
+
+    // ── Split mode: inscription sent per-method amounts ──────────────
+    let tpe = 0, espece = 0, virement = 0, cheque = 0;
+
+    if (splitPayments && typeof splitPayments === 'object') {
+      // Use explicit per-method amounts from the inscription form
+      tpe      = Number(splitPayments.carte    || splitPayments.tpe      || 0);
+      espece   = Number(splitPayments.espece   || 0);
+      virement = Number(splitPayments.virement || 0);
+      cheque   = Number(splitPayments.cheque   || 0);
+    } else {
+      // ── Single-method mode: renewal or manual payment ────────────────
+      const methodMap = {
+        'Esp\u00e8ces':'espece','Cash':'espece','espece':'espece',
+        'TPE':'tpe','Carte Bancaire':'tpe','tpe':'tpe','carte':'tpe',
+        'Virement':'virement','virement':'virement',
+        'Ch\u00e8que':'cheque','Cheque':'cheque','cheque':'cheque',
+      };
+      const field = methodMap[method] || 'espece';
+      if (field === 'tpe')      tpe      = totalAmt;
+      else if (field === 'virement') virement = totalAmt;
+      else if (field === 'cheque')   cheque   = totalAmt;
+      else                           espece   = totalAmt;
+    }
+
+    const prix = tpe + espece + virement + cheque || totalAmt;
 
     await db.collection('megafit_daily_register').doc(docId).collection('entries').add({
       nom:        nom        || '',
@@ -494,13 +705,14 @@ async function autoRegisterCA({ gymId='dokarat', date, nom, tel, plan, amount, m
       contrat:    contrat    || '',
       commercial: (commercial || 'FORM').toUpperCase(),
       cin:        '',
-      prix:       amt,
-      tpe:        field==='tpe'      ? amt : 0,
-      espece:     field==='espece'   ? amt : 0,
-      virement:   field==='virement' ? amt : 0,
-      cheque:     field==='cheque'   ? amt : 0,
+      prix,
+      tpe,
+      espece,
+      virement,
+      cheque,
       abonnement: planToAbonnement(plan),
-      note_reste: '',
+      reste:      Number(reste) || 0,
+      note_reste: reste > 0 ? `Reste: ${reste} DH` : '',
       source:     'inscription_auto',
       createdAt:  admin.firestore.FieldValue.serverTimestamp(),
       createdBy:  'auto',
@@ -510,7 +722,7 @@ async function autoRegisterCA({ gymId='dokarat', date, nom, tel, plan, amount, m
       { gymId, date: today, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
       { merge: true }
     );
-    console.log(`✅ AutoRegisterCA: ${nom} | ${amt} DH (${method}) → ${docId}`);
+    console.log(`✅ AutoRegisterCA: ${nom} | ${prix} DH (tpe:${tpe} esp:${espece} vir:${virement} chq:${cheque}) → ${docId}`);
   } catch (err) {
     console.error('⚠️  AutoRegisterCA (non-blocking):', err.message);
   }
@@ -519,36 +731,117 @@ async function autoRegisterCA({ gymId='dokarat', date, nom, tel, plan, amount, m
 app.post("/api/payments", verifyAzureToken, async (req, res) => {
 
   try {
-    const { memberId, amount, plan, date, method } = req.body;
+    const { memberId, amount, plan, date, method, contrat, commercial, location, payments: splitPayments } = req.body;
     const docRef = await db.collection("payments").add({
       memberId, amount, plan, date: date || new Date().toISOString(), method: method || "Cash",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       recordedBy: req.user?.preferred_username || req.user?.name || "Admin"
     });
 
-    // Fetch member name/phone for the register
-    let nom = '', tel = '', loc = 'dokarat';
+    // Fetch member name/phone/location for the register
+    let nom = '', tel = '', loc = location || 'dokarat';
     try {
       const mSnap = await db.collection('members').doc(memberId).get();
       if (mSnap.exists) { 
         nom = mSnap.data().fullName || ''; 
         tel = mSnap.data().phone || ''; 
-        loc = mSnap.data().location || 'dokarat';
+        loc = location || mSnap.data().location || 'dokarat';
       }
     } catch(_) {}
 
-    // Auto-add to daily CA register
+    // Auto-add to daily CA register ✅ (with full payment split and balance if provided)
     await autoRegisterCA({
       gymId: loc,
       nom, tel, plan, amount, method: method || 'Cash',
-      commercial: req.user?.preferred_username || req.user?.name || 'Admin',
-      contrat: req.body.contrat || ''
+      commercial: commercial || req.user?.preferred_username || req.user?.name || 'Admin',
+      contrat: contrat || '',
+      payments: splitPayments,
+      reste: req.body.reste || 0,
     });
 
     const snap = await docRef.get();
     res.json({ id: docRef.id, ...snap.data() });
   } catch (err) {
     res.status(500).json({ error: "Failed to record payment" });
+  }
+});
+
+
+// ✅ Settle outstanding balance — records late partial payment + updates original register entry
+app.post("/api/payments/settle-balance", verifyAzureToken, async (req, res) => {
+  try {
+    const { memberId, amount, method, note } = req.body;
+    if (!memberId || !amount) return res.status(400).json({ error: "memberId and amount required" });
+
+    const memberRef = db.collection("members").doc(memberId);
+    const memberSnap = await memberRef.get();
+    if (!memberSnap.exists) return res.status(404).json({ error: "Member not found" });
+
+    const member = memberSnap.data();
+    const oldBalance = Number(member.balance) || 0;
+    const payAmount  = Number(amount) || 0;
+    const newBalance = Math.max(0, oldBalance - payAmount);
+    const gymId      = member.location || "dokarat";
+    const contractNumber = member.contractNumber || "";
+
+    // 1️⃣ Record supplementary payment
+    await db.collection("payments").add({
+      memberId,
+      amount: payAmount,
+      plan: member.plan || "Monthly",
+      date: new Date().toISOString(),
+      method: method || "Espèces",
+      note: note || `Complément de paiement — reste initial: ${oldBalance} DH`,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      recordedBy: req.user?.preferred_username || req.user?.name || "Admin",
+      type: "balance_settlement",
+    });
+
+    // 2️⃣ Update member's balance
+    await memberRef.update({ balance: newBalance });
+
+    // 3️⃣ Find the original register entry for this member and update it
+    const methodMap = {
+      "Espèces": "espece", "Cash": "espece", "espece": "espece",
+      "TPE": "tpe", "Carte Bancaire": "tpe", "tpe": "tpe",
+      "Virement": "virement", "virement": "virement",
+      "Chèque": "cheque", "Cheque": "cheque", "cheque": "cheque",
+    };
+    const field = methodMap[method] || "espece";
+
+    // Search register entries for this member (by contractNumber, last 60 days)
+    const cutoff = new Date(Date.now() - 60 * 86400000);
+    const regSnap = await db.collectionGroup("entries")
+      .where("contrat", "==", contractNumber)
+      .orderBy("createdAt", "desc")
+      .limit(1)
+      .get();
+
+    if (!regSnap.empty) {
+      const entryDoc = regSnap.docs[0];
+      const entry = entryDoc.data();
+      const prevNote = entry.note_reste || "";
+      const dateStr = new Date().toLocaleDateString("fr-FR");
+      const commentLine = `+ ${payAmount} DH (${method || "Espèces"}) le ${dateStr}`;
+      const newNote = prevNote ? `${prevNote}\n${commentLine}` : commentLine;
+
+      await entryDoc.ref.update({
+        [field]: (Number(entry[field]) || 0) + payAmount,   // cumulate payment on correct method
+        prix:    (Number(entry.prix) || 0) + payAmount,      // update total price
+        reste:   newBalance,                                  // update remaining balance
+        note_reste: newBalance <= 0
+          ? `✅ Soldé — ${commentLine}`
+          : `⚠️ Reste: ${newBalance} DH\n${commentLine}`,
+      });
+      console.log(`✅ Register updated for ${member.fullName}: +${payAmount} DH via ${field}, reste: ${newBalance}`);
+    } else {
+      console.warn(`⚠️ No register entry found for contract ${contractNumber}`);
+    }
+
+    res.json({ ok: true, newBalance, message: `Complément enregistré. Nouveau reste: ${newBalance} DH` });
+  } catch (err) {
+    console.error("Settle Balance Error:", err);
+    res.status(500).json({ error: "Failed to settle balance" });
   }
 });
 
@@ -576,7 +869,6 @@ app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res
       location: insData.gymId || "dokarat"
     });
 
-    // 3. Auto-register in daily CA
     await autoRegisterCA({
       gymId:      insData.gymId || 'dokarat',
       nom:        `${insData.prenom || ''} ${insData.nom || ''}`.trim() || fullName || '',
@@ -586,13 +878,33 @@ app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res
       method:     method || 'Espèces',
       commercial: insData.commercial || req.user?.preferred_username || req.user?.name || 'FORM',
       contrat:    insData.contractNumber || '',
+      payments:   insData.payments || null,
+      reste:      insData.totals?.balance || 0,
     });
     // 4. Update inscription flag instead of deleting it
     if (insDoc.exists) {
-      await inscriptionRef.update({ 
+      const ins = insDoc.data();
+      const updateData = { 
         payment_validated: true,
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      });
+      };
+      
+      // If member already exists, link the new payment to them!
+      if (ins.memberId) {
+          // This happens if Option A (confirm first, pay later) was used
+          // We should find the payment we just created and add the memberId
+          const latestPayment = await db.collection("payments")
+            .where("inscriptionId", "==", inscriptionId)
+            .orderBy("createdAt", "desc")
+            .limit(1)
+            .get();
+          
+          if (!latestPayment.empty) {
+            await latestPayment.docs[0].ref.update({ memberId: ins.memberId });
+          }
+      }
+
+      await inscriptionRef.update(updateData);
     }
 
     res.json({ ok: true, message: "Paiement validé avec succès." });
@@ -1168,8 +1480,15 @@ app.get("/api/register/calendar", verifyAzureToken, async (req, res) => {
         const e = d.data();
         const paid = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
         ca += paid;
-        const prix = Number(e.prix) || 0;
-        if (prix > 0 && prix > paid) reste += (prix - paid);
+        // ✅ Prefer stored reste field (set by autoRegisterCA for partial payments)
+        // Fallback to prix - paid for manually entered rows
+        const storedReste = Number(e.reste) || 0;
+        if (storedReste > 0) {
+          reste += storedReste;
+        } else {
+          const prix = Number(e.prix) || 0;
+          if (prix > 0 && prix > paid) reste += (prix - paid);
+        }
       });
       calendarData[date] = ca;
       if (reste > 0) resteData[date] = reste;
@@ -1253,15 +1572,20 @@ try {
 const DOOR_PROJECT_ID = process.env.DOOR_FIREBASE_PROJECT_ID || "megadoor-b3ccb";
 const DOOR_REST_KEY = process.env.DOOR_FIREBASE_API_KEY;
 
-async function fetchDoorCollection(collectionName, locationTag, limitCount = 50) {
+async function fetchDoorCollections(collectionNames, locationTags, limitCount = 50) {
+  const collections = Array.isArray(collectionNames) ? collectionNames : [collectionNames];
+  const tags = Array.isArray(locationTags) ? locationTags.map(t => t.toLowerCase().trim()) : [locationTags.toLowerCase().trim()];
+  
+  const allDocs = [];
   const url = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT_ID}/databases/(default)/documents:runQuery?key=${DOOR_REST_KEY}`;
-    const now = new Date();
-    // Start of today (Morocco time)
-    const todayStr = new Date(now.getTime() + 60 * 60 * 1000).toISOString().slice(0, 10);
+  const todayStr = new Date(Date.now() + 60 * 60 * 1000).toISOString().slice(0, 10);
 
+  for (const collName of collections) {
+    if (!collName) continue;
+    
     const body = {
       structuredQuery: {
-        from: [{ collectionId: collectionName }],
+        from: [{ collectionId: collName }],
         where: {
           fieldFilter: {
             field: { fieldPath: "timestamp" },
@@ -1269,71 +1593,64 @@ async function fetchDoorCollection(collectionName, locationTag, limitCount = 50)
             value: { stringValue: todayStr }
           }
         },
-        orderBy: [
-          {
-            field: { fieldPath: "timestamp" },
-            direction: "DESCENDING"
-          }
-        ],
-        limit: 1000 // Increased to handle busy days (Dokkarat had 433+ today)
+        orderBy: [{ field: { fieldPath: "timestamp" }, direction: "DESCENDING" }],
+        limit: 1000
       }
     };
 
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  const data = await resp.json();
-  if (!Array.isArray(data)) return [];
-
-  // DEBUG LOG: See what's actually in this collection
-  if (collectionName.includes("saiss")) {
-      console.log(`🔍 [DEBUG SAISS] Sample entry from ${collectionName}:`, JSON.stringify(data[0]?.document?.fields?.location || "NO_LOCATION_FIELD"));
+    try {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      const data = await resp.json();
+      if (Array.isArray(data)) {
+        allDocs.push(...data.filter(item => item.document));
+      }
+    } catch (err) {
+      console.error(`❌ fetchDoorCollections error for ${collName}:`, err.message);
+    }
   }
 
-  const docs = data
-    .filter(item => item.document)
-    .map(item => {
-      const f = item.document.fields || {};
-      const pushedAt = f.pushed_at?.timestampValue || null;
-      const timestamp = f.timestamp?.stringValue || null;
+  const processed = allDocs.map(item => {
+    const f = item.document.fields || {};
+    const pushedAt = f.pushed_at?.timestampValue || null;
+    const timestamp = f.timestamp?.stringValue || null;
 
-      // Resolve display time
-      let sortKey = "";
-      let displayTime = "--:--";
-      if (pushedAt) {
-        const d = new Date(pushedAt);
-        sortKey = d.toISOString();
-        displayTime = d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", timeZone: "Africa/Casablanca" });
-      } else if (timestamp) {
-        sortKey = timestamp;
-        displayTime = timestamp.split(" ")[1]?.slice(0, 5) || "--:--";
-      }
+    let sortKey = "";
+    let displayTime = "--:--";
+    if (pushedAt) {
+      const d = new Date(pushedAt);
+      sortKey = d.toISOString();
+      displayTime = d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", timeZone: "Africa/Casablanca" });
+    } else if (timestamp) {
+      sortKey = timestamp;
+      displayTime = timestamp.split(" ")[1]?.slice(0, 5) || "--:--";
+    }
 
-      const method = f.method?.stringValue || "";
-      return {
-        docId: item.document.name.split("/").pop(),
-        name: f.name?.stringValue || "Anonyme",
-        userId: f.user_id?.stringValue || "",
-        status: f.status?.stringValue || "Entrée",
-        method,
-        location: f.location?.stringValue || "",
-        sortKey,
-        displayTime,
-        isFace: method.toLowerCase().includes("face") || method.toLowerCase().includes("visage")
-      };
-    })
-    .filter(d => {
-        if (!d.sortKey) return false;
-        const loc = d.location.toLowerCase().trim();
-        const target = locationTag.toLowerCase().trim();
-        return loc === target || loc.includes(target) || target.includes(loc);
-    })
-    .sort((a, b) => b.sortKey.localeCompare(a.sortKey))
-    .slice(0, limitCount);
+    const method = f.method?.stringValue || "";
+    return {
+      docId: item.document.name.split("/").pop(),
+      name: f.name?.stringValue || "Anonyme",
+      userId: f.user_id?.stringValue || "",
+      status: f.status?.stringValue || "Entrée",
+      method,
+      location: f.location?.stringValue || "",
+      sortKey,
+      displayTime,
+      isFace: method.toLowerCase().includes("face") || method.toLowerCase().includes("visage")
+    };
+  })
+  .filter(d => {
+    if (!d.sortKey) return false;
+    const loc = d.location.toLowerCase().trim();
+    return tags.some(t => loc === t || loc.includes(t) || t.includes(loc));
+  })
+  .sort((a, b) => b.sortKey.localeCompare(a.sortKey))
+  .slice(0, limitCount);
 
-  return docs;
+  return processed;
 }
 
 // GET /api/live-entries?gymId=dokarat|marjane&limit=20
@@ -1344,7 +1661,7 @@ app.get("/api/live-entries", verifyAzureToken, async (req, res) => {
 
     const gymMap = {
       dokarat: { collection: "mega_fit_logs", locationTag: "dokkarat fes" },
-      marjane: { collection: "saiss entrees logs", locationTag: "fes saiss" }
+      marjane: { collections: ["saiss entrees logs", "mega_fit_logs"], locationTags: ["fes saiss", "fes marjane"] }
     };
 
     const gym = gymMap[gymId];
@@ -1354,7 +1671,10 @@ app.get("/api/live-entries", verifyAzureToken, async (req, res) => {
 
     const cacheKey = `${gymId}_limit_${limitCount}`; 
     const entries = await getCachedOrFetch(apiCache.liveEntries, cacheKey, 15000, async () => {
-      return await fetchDoorCollection(gym.collection, gym.locationTag, limitCount);
+      // Support both singular (legacy/simple) and plural (robust) config keys
+      const collections = gym.collections || [gym.collection];
+      const tags = gym.locationTags || [gym.locationTag];
+      return await fetchDoorCollections(collections, tags, limitCount);
     });
     
     res.json({ ok: true, gymId, count: entries.length, entries });
@@ -1373,7 +1693,7 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
 
     const gymMap = {
       dokarat: { collection: "mega_fit_logs", locationTag: "dokkarat fes" },
-      marjane: { collection: "saiss entrees logs", locationTag: "fes saiss" }
+      marjane: { collection: "saiss entrees logs", locationTag: "fes saiss", forceManualCount: true }
     };
     const gym = gymMap[gymId];
     if (!gym) return res.status(400).json({ error: "Invalid gymId" });
@@ -1381,6 +1701,19 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
     const cacheKey = `live_count_${gymId}`;
     const result = await getCachedOrFetch(apiCache.general, cacheKey, 15000, async () => {
       const todayStr = getMoroccanDateStr();
+
+      // 🛡️ For Marjane, we KNOW the device counter is broken (unreliable).
+      // We return the manual count from the gym_daily_stats doc instead.
+      if (gym.forceManualCount) {
+        console.log(`🛡️ [${gymId}] Forcing manual count lookup (device counter unreliable)`);
+        const statsDoc = await db.collection("gym_daily_stats").doc(`${gymId}_${todayStr}`).get();
+        if (statsDoc.exists) {
+          const data = statsDoc.data();
+          return { count: data.count || 0, rawCount: data.rawCount || 0, date: todayStr, isManual: true };
+        }
+        return { count: 0, rawCount: 0, date: todayStr, isManual: true };
+      }
+
       const url = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT_ID}/databases/(default)/documents:runQuery?key=${DOOR_REST_KEY}`;
 
       // 🎯 Fetch only the LATEST 1 document — device embeds daily_total & daily_unique counters
@@ -1633,8 +1966,202 @@ app.post("/api/chat", verifyAzureToken, async (req, res) => {
   }
 });
 
+// ---------- INSCRIPTION FORM CONFIG (per gym) ----------
+
+const GYM_IDS = ['dokarat', 'marjane', 'casa1', 'casa2'];
+
+const DEFAULT_SUBSCRIPTION_GROUPS = [
+  {
+    label: 'COURTE DUREE',
+    options: [
+      { name: '7 JOURS',  price: 0, note: 'Accès 7 jours' },
+      { name: '15 JOURS', price: 800,  note: 'Accès 15 jours' },
+    ],
+  },
+  {
+    label: '1 MOIS',
+    options: [
+      { name: '1 MOIS LOCAL',      price: 1000, note: 'Accès local uniquement' },
+      { name: '1 MOIS LOCAL KIDS', price: 800,  note: 'Enfants — accès local' },
+      { name: '1 MOIS MULTI',      price: 1000, note: 'Multiclub — tous les 4 Gyms Megafit' },
+      { name: '1 MOIS MULTI CASA', price: 1200, note: 'Multiclub Casablanca' },
+    ],
+  },
+  {
+    label: '3 MOIS',
+    options: [
+      { name: '3 MOIS LOCAL',     price: 0, note: 'Accès local uniquement' },
+      { name: '3 MOIS MULTI FES', price: 0, note: 'Multiclub Fès' },
+      { name: '3 MOIS CASA',      price: 2200, note: 'Casablanca' },
+      { name: '3 MOIS KIDS',      price: 2200, note: 'Enfants' },
+    ],
+  },
+  {
+    label: '6 MOIS',
+    options: [
+      { name: '6 MOIS MULTI', price: 5000, note: 'Multiclub — tous les 4 Gyms Megafit' },
+      { name: '6 MOIS KIDS',  price: 6000, note: 'Enfants' },
+    ],
+  },
+  {
+    label: '12 MOIS',
+    options: [
+      { name: '12 MOIS LOCAL - 4000',                                  price: 0, note: 'Accès local' },
+      { name: '12 MOIS - MULTI 5250',                                  price: 0, note: 'Multiclub — tous les 4 Gyms Megafit' },
+      { name: '12 MOIS AVEC ASSURANCE MEGA KIDS',                      price: 0, note: 'Enfants — avec assurance' },
+      { name: '12 MOIS OUVERTURE CASA-LADY ANFA',                      price: 0, note: 'Ouverture Anfa' },
+      { name: '12 MOIS OUVERTURE CASA-LADY ANFA + 10 SEANCES PILATES', price: 0, note: 'Ouverture Anfa + Pilates' },
+    ],
+  },
+  {
+    label: '18 MOIS',
+    options: [
+      { name: '18 MOIS LOCAL', price: 5500, note: 'Accès local' },
+      { name: '18 MOIS MULTI', price: 6500, note: 'Multiclub — tous les 4 Gyms Megafit' },
+    ],
+  },
+  {
+    label: '24 MOIS',
+    options: [
+      { name: '24 MOIS - BLACK FRIDAY LOCAL',                          price: 0, note: 'Promo Black Friday — local' },
+      { name: '24 MOIS - BLACK FRIDAY MULTI',                          price: 0, note: 'Promo Black Friday — tous les 4 Gyms' },
+      { name: '24 MOIS AVEC ASSURANCE MEGA KIDS',                      price: 0, note: 'Enfants — avec assurance' },
+      { name: '24 MOIS OUVERTURE CASA-ANFA',                           price: 8900, note: 'Ouverture Anfa' },
+      { name: '24 MOIS OUVERTURE CASA-LADY ANFA',                      price: 6900, note: 'Ouverture Lady Anfa' },
+      { name: '24 MOIS OUVERTURE CASA-LADY ANFA + 10 SEANCES PILATES', price: 7900, note: 'Lady Anfa + Pilates' },
+      { name: '24 MOIS OUVERTURE SAISS MARJANE FES',                   price: 7900, note: 'Multiclub Fès — Saiss / Marjane' },
+      { name: '24 MOIS OUVERTURE SAISS MARJANE FES LOCAL',             price: 6900, note: 'Fès local — Saiss / Marjane' },
+      { name: 'UPGRADE 24 MOIS OUVERTURE CASA-LADY ANFA',              price: 0, note: 'Mise à niveau vers Lady Anfa' },
+    ],
+  },
+  {
+    label: 'SAINT VALENTIN',
+    options: [
+      { name: '1 AN S/V',  price: 0, note: '1 An — Offre Saint Valentin' },
+      { name: '2 ANS S/V', price: 0, note: '2 Ans — Offre Saint Valentin' },
+    ],
+  },
+  {
+    label: 'ENTREES / CARNETS',
+    options: [
+      { name: 'ENTREE JOURNALIER',                  price: 0, note: 'Séance unique' },
+      { name: '10 ENTREES',                         price: 0, note: 'Carnet 10 entrées' },
+      { name: '25 ENTREES',                         price: 1750, note: 'Carnet 25 entrées' },
+      { name: '30 ENTREES',                         price: 1800, note: 'Carnet 30 entrées' },
+      { name: '50 ENTREES',                         price: 2000, note: 'Carnet 50 entrées' },
+      { name: '25 TICKETS ENTREE JOURNALIERS CASA', price: 2500, note: 'Casablanca — 25 tickets' },
+      { name: '50 TICKETS ENTREE JOURNALIERS CASA', price: 4500, note: 'Casablanca — 50 tickets' },
+    ],
+  },
+  {
+    label: 'CONVENTIONS',
+    options: [
+      { name: 'CONVENTION CDGAPR',           price: 0, note: null },
+      { name: 'CONVENTION ATT.IJARI',        price: 0, note: null },
+      { name: 'CONVENTION BANQUE POPULAIRE', price: 0, note: null },
+      { name: 'CONVENTION MARKET SOLUTION',  price: 0, note: null },
+      { name: 'CONVENTION CREDIT AGRICOL',   price: 0, note: null },
+    ],
+  },
+  {
+    label: 'OFFRES / PROMOS',
+    options: [
+      { name: 'OFFRE FAMILLE ASS',            price: 0, note: 'Pack famille' },
+      { name: 'OFFRE 12 MOIS ETE FES LOCAL',  price: 0, note: 'Offre été — Fès local' },
+      { name: 'PROMO 12 MOIS AVEC ASSURANCE',   price: 0, note: 'Avec assurance' },
+      { name: 'PROMO NOEL 12 MOIS CASA-ANFA', price: 0, note: 'Noël — 12 mois' },
+      { name: 'PROMO NOEL 24 MOIS CASA-ANFA', price: 0, note: 'Noël — 24 mois' },
+      { name: 'OFFERT PAR LA DIRECTION',      price: 0,    note: 'Gratuit — direction' },
+      { name: 'OFFERT PAR LA DIRECTION KIDS', price: 0,    note: 'Gratuit — enfants' },
+    ],
+  },
+  {
+    label: 'TRANSFERTS / AUTRES',
+    options: [
+      { name: 'TRANSFERT ABO',    price: 0, note: 'Transfert abonnement' },
+      { name: 'TRANSFERT OPTION', price: 0, note: 'Option seule' },
+      { name: 'TRANSFERT PREMIUM',price: 0, note: 'Vers formule premium' },
+      { name: 'ACCES MULTI FES',  price: 0, note: 'Multiclub Fès' },
+    ],
+  },
+];
+
+const defaultGymConfig = (gymId) => ({
+  gymId,
+  gymName: {
+    dokarat: 'MEGAFIT DOKKARAT',
+    marjane: 'MEGAFIT SAISS / MARJANE',
+    casa1:   'MEGAFIT ANFA',
+    casa2:   'MEGAFIT LADY ANFA',
+  }[gymId] || 'MEGA FIT',
+  registrationFee: 3000,
+  isOpen: true,
+  subscriptionGroups: DEFAULT_SUBSCRIPTION_GROUPS,
+});
+
+// Public: inscription form reads its own config by gymId
+app.get("/public/inscription-config", async (req, res) => {
+  try {
+    const gymId = req.query.gymId || 'dokarat';
+    const doc = await db.collection("config").doc(`inscription-${gymId}`).get();
+    const defaults = defaultGymConfig(gymId);
+    if (!doc.exists) {
+      return res.json(defaults);
+    }
+    const data = doc.data();
+    // Merge defaults, but ensure gymName isn't overridden by empty or generic "MEGA FIT" values
+    const merged = { ...defaults, ...data };
+    if (!merged.gymName || merged.gymName === "MEGA FIT") {
+      merged.gymName = defaults.gymName;
+    }
+    
+    res.json(merged);
+  } catch (err) {
+    res.status(500).json({ error: "Could not load inscription config" });
+  }
+});
+
+// Protected: dashboard saves per-gym config
+app.post("/api/inscription-config", verifyAzureToken, async (req, res) => {
+  try {
+    const { gymId, gymName, registrationFee, isOpen, subscriptionGroups } = req.body;
+    if (!gymId || !GYM_IDS.includes(gymId)) {
+      return res.status(400).json({ error: "Invalid gymId" });
+    }
+    if (!req.hasAccessToGym(gymId)) {
+      return res.status(403).json({ error: "Access Denied: You are not authorized for this gym" });
+    }
+    await db.collection("config").doc(`inscription-${gymId}`).set(
+      { gymId, gymName, registrationFee, isOpen, subscriptionGroups, updatedAt: new Date().toISOString() },
+      { merge: true }
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: "Could not save inscription config" });
+  }
+});
+
+// Protected: get all gym configs (for dashboard overview)
+app.get("/api/inscription-configs", verifyAzureToken, async (req, res) => {
+  try {
+    const allowedGyms = GYM_IDS.filter(id => req.hasAccessToGym(id));
+    
+    const configs = await Promise.all(
+      allowedGyms.map(async (gymId) => {
+        const doc = await db.collection("config").doc(`inscription-${gymId}`).get();
+        const data = doc.exists ? doc.data() : {};
+        // Merge defaults to ensure all fields (like subscriptionGroups) are present
+        return { ...defaultGymConfig(gymId), ...data };
+      })
+    );
+    res.json(configs);
+  } catch (err) {
+    res.status(500).json({ error: "Could not load configs" });
+  }
+});
+
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log('✅ API running on port ' + PORT);
   scheduleNightlySync(db, apiCache); // Runs at 00:05 Morocco time
 });
