@@ -178,11 +178,42 @@ async function getCachedOrFetch(cacheObj, key, ttlMs, fetchFn) {
 
 function invalidateCache(cacheObj, key = null) {
   if (key) {
-    delete cacheObj[key];
-    console.log(`🧹 [CACHE INVALIDATED] Key '${key}'`);
+    if (cacheObj[key]) delete cacheObj[key];
   } else {
-    for (let k of Object.keys(cacheObj)) delete cacheObj[k];
-    console.log(`🧹 [CACHE CLEAR ALL]`);
+    // Partial clear (preserve structure)
+    Object.keys(cacheObj).forEach(k => delete cacheObj[k]);
+  }
+}
+
+/**
+ * ☁️ Helper to upload base64 image to Firebase Storage and return a permanent URL
+ */
+async function uploadBase64ToStorage(base64Data, destinationPath) {
+  if (!base64Data || !base64Data.startsWith("data:image")) return base64Data; // Already a URL or empty
+
+  try {
+    const matches = base64Data.match(/^data:([A-Za-z-+/]+);base64,(.+)$/);
+    if (!matches || matches.length !== 3) throw new Error("Format base64 invalide");
+
+    const contentType = matches[1];
+    const buffer = Buffer.from(matches[2], "base64");
+    const file = bucket.file(destinationPath);
+
+    await file.save(buffer, {
+      metadata: { contentType },
+      resumable: false
+    });
+
+    // Generate a long-lived signed URL (effectively permanent for the app)
+    const [url] = await file.getSignedUrl({
+      action: "read",
+      expires: "2100-01-01"
+    });
+
+    return url;
+  } catch (err) {
+    console.error("❌ Storage Upload Error:", err);
+    return base64Data; // Fallback to base64 if upload fails (integrity)
   }
 }
 
@@ -526,7 +557,7 @@ app.post("/api/inscriptions/:id/confirm", verifyAzureToken, async (req, res) => 
       plan,
       birthday: ins.dateNaissance || null,
       expiresOn: ins.periodTo || new Date(Date.now() + 365 * 86400000).toISOString().split("T")[0],
-      photo: ins.profilePicture || null,
+      photo: ins.profilePicture || null, 
       email: ins.email || null,
       cin: ins.cin || null,
       location: gymId,
@@ -543,10 +574,15 @@ app.post("/api/inscriptions/:id/confirm", verifyAzureToken, async (req, res) => 
     let memberId;
     if (existingMember) {
         memberId = existingMember.id;
+        // ☁️ Update photo to Storage if it's new/base64
+        if (memberData.photo && memberData.photo.startsWith("data:image")) {
+            memberData.photo = await uploadBase64ToStorage(memberData.photo, `members/${memberId}/profile.jpg`);
+        }
         await existingMember.ref.update(memberData);
         console.log(`🔄 Unified Match: Updated existing member ${memberId} (${memberData.fullName})`);
     } else {
         const qrToken = crypto.randomBytes(16).toString("hex");
+        // Create doc first to get memberId
         const doc = await db.collection("members").add({
             ...memberData,
             qrToken,
@@ -554,6 +590,14 @@ app.post("/api/inscriptions/:id/confirm", verifyAzureToken, async (req, res) => 
             confirmedBy: req.user?.preferred_username || req.user?.name || "Admin",
         });
         memberId = doc.id;
+        
+        // ☁️ Upload photo separately and update URL
+        if (memberData.photo && memberData.photo.startsWith("data:image")) {
+            const storageUrl = await uploadBase64ToStorage(memberData.photo, `members/${memberId}/profile.jpg`);
+            await doc.update({ photo: storageUrl });
+            memberData.photo = storageUrl; // for later use
+        }
+        
         console.log(`✨ Unified Match: Created new member ${memberId} (${memberData.fullName})`);
     }
 
@@ -577,6 +621,10 @@ app.post("/api/inscriptions/:id/confirm", verifyAzureToken, async (req, res) => 
         if (totalPaid > 0) {
             // Determine dominant method label
             const method = carte > 0 ? "Carte Bancaire" : (espece > 0 ? "Espèces" : (virement > 0 ? "Virement" : "Chèque"));
+            const chequePhoto = ins.chequePhoto && ins.chequePhoto.startsWith("data:image")
+                ? await uploadBase64ToStorage(ins.chequePhoto, `members/${memberId}/cheques/${Date.now()}.jpg`)
+                : (ins.chequePhoto || null);
+
             await db.collection("payments").add({
               memberId,
               inscriptionId: req.params.id,
@@ -586,7 +634,7 @@ app.post("/api/inscriptions/:id/confirm", verifyAzureToken, async (req, res) => 
               method,
               // ✅ Store full split so the UI can show each method separately
               paymentsSplit: { espece, carte, virement, cheque },
-              chequePhoto: ins.chequePhoto || null, // Transfer from inscription
+              chequePhoto, 
               note:        "Paiement inscription initiale",
               createdAt:   admin.firestore.FieldValue.serverTimestamp(),
               recordedBy:  req.user?.preferred_username || req.user?.name || "Admin",
