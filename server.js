@@ -2423,4 +2423,29 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log('✅ API running on port ' + PORT);
   scheduleNightlySync(db, apiCache); // Runs at 00:05 Morocco time
+
+  // 🌱 Seed SQLite with historical stats from Firestore (one-time on startup)
+  // Only runs if SQLite is missing data — subsequent starts use the cached db file
+  setTimeout(() => seedSQLiteHistoricalStats(), 3000);
 });
+
+async function seedSQLiteHistoricalStats() {
+  try {
+    // Check if we already have enough data in SQLite for both gyms
+    const dokaratStats = lc.getDailyStats('dokarat', 30);
+    const marjaneStats = lc.getDailyStats('marjane', 30);
+
+    if (dokaratStats.length >= 14 && marjaneStats.length >= 14) {
+      console.log(`✅ SQLite already seeded (dokarat: ${dokaratStats.length}d, marjane: ${marjaneStats.length}d) — skip`);
+      return;
+    }
+
+    // ✅ Read from megadoor-b3ccb via REST (separate quota, always available)
+    // NOT from mega-b891d Firestore (which has the exhausted quota)
+    console.log(`🌱 Seeding SQLite from megadoor-b3ccb REST API (last 7 days)...`);
+    await syncGymCounts(db, apiCache, 7);
+    console.log(`✅ SQLite seeded from megadoor-b3ccb — 0 Firebase reads used`);
+  } catch (err) {
+    console.warn(`⚠️ SQLite seed warning: ${err.message}`);
+  }
+}
