@@ -64,25 +64,42 @@ async function fetchLatestDoc(collectionName, dateStr) {
 }
 
 /**
- * FALLBACK: Old method — fetch docs across multiple collections and manually count.
- * Used only when daily_unique is missing or for historical sync.
+ * Fetch docs for ONE specific date using a range query (>= dateStr AND < nextDay).
+ * This ensures we get the right docs regardless of how far back the date is.
  */
 async function fetchRecentLogsFromCollections(collectionNames, dateStr, limit = 2000) {
   const allDocs = [];
-  
+
+  // Build the next day string for the upper bound
+  const nextDay = new Date(new Date(dateStr).getTime() + 86400000).toISOString().slice(0, 10);
+
   for (const coll of collectionNames) {
     const url = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT}/databases/(default)/documents:runQuery?key=${DOOR_API_KEY}`;
     const body = {
       structuredQuery: {
         from: [{ collectionId: coll }],
         where: {
-          fieldFilter: {
-            field: { fieldPath: "timestamp" },
-            op: "GREATER_THAN_OR_EQUAL",
-            value: { stringValue: dateStr }
+          compositeFilter: {
+            op: "AND",
+            filters: [
+              {
+                fieldFilter: {
+                  field: { fieldPath: "timestamp" },
+                  op: "GREATER_THAN_OR_EQUAL",
+                  value: { stringValue: dateStr }
+                }
+              },
+              {
+                fieldFilter: {
+                  field: { fieldPath: "timestamp" },
+                  op: "LESS_THAN",
+                  value: { stringValue: nextDay }
+                }
+              }
+            ]
           }
         },
-        orderBy: [{ field: { fieldPath: "timestamp" }, direction: "DESCENDING" }],
+        orderBy: [{ field: { fieldPath: "timestamp" }, direction: "ASCENDING" }],
         limit: limit
       }
     };

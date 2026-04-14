@@ -2435,16 +2435,42 @@ async function seedSQLiteHistoricalStats() {
     const dokaratStats = lc.getDailyStats('dokarat', 30);
     const marjaneStats = lc.getDailyStats('marjane', 30);
 
-    if (dokaratStats.length >= 14 && marjaneStats.length >= 14) {
+    if (dokaratStats.length >= 28 && marjaneStats.length >= 28) {
       console.log(`✅ SQLite already seeded (dokarat: ${dokaratStats.length}d, marjane: ${marjaneStats.length}d) — skip`);
       return;
     }
 
-    // ✅ Read from megadoor-b3ccb via REST (separate quota, always available)
-    // NOT from mega-b891d Firestore (which has the exhausted quota)
-    console.log(`🌱 Seeding SQLite from megadoor-b3ccb REST API (last 7 days)...`);
-    await syncGymCounts(db, apiCache, 7);
-    console.log(`✅ SQLite seeded from megadoor-b3ccb — 0 Firebase reads used`);
+    // 1️⃣ Try Firestore gym_daily_stats first — full 30 days, only 60 reads total
+    try {
+      console.log(`🌱 Seeding SQLite from Firestore gym_daily_stats (30 days × 2 gyms = 60 reads)...`);
+      const GYMS = ['dokarat', 'marjane'];
+      for (const gymId of GYMS) {
+        const dateStrs = [], docIds = [];
+        for (let i = 29; i >= 0; i--) {
+          const d = new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10);
+          dateStrs.push(d);
+          docIds.push(`${gymId}_${d}`);
+        }
+        const docRefs = docIds.map(id => db.collection('gym_daily_stats').doc(id));
+        const snaps = await db.getAll(...docRefs);
+        let seeded = 0;
+        snaps.forEach((snap, i) => {
+          const d = snap.exists ? snap.data() : {};
+          lc.upsertDailyStat(gymId, dateStrs[i], d.count || 0, d.rawCount || 0);
+          if (d.count > 0) seeded++;
+        });
+        console.log(`  ✅ ${gymId}: ${seeded} days with data seeded from Firestore`);
+      }
+      console.log(`✅ SQLite seeded from Firestore — full 30-day history`);
+      return;
+    } catch (firestoreErr) {
+      console.warn(`⚠️ Firestore seed failed (quota?): ${firestoreErr.message}`);
+      console.log(`🔄 Falling back to megadoor-b3ccb REST (last ~10 days)...`);
+    }
+
+    // 2️⃣ Fallback: megadoor-b3ccb REST — no Firebase reads, but only ~10 days of data
+    await syncGymCounts(db, apiCache, 30);
+    console.log(`✅ SQLite seeded from megadoor-b3ccb REST — 0 Firebase reads used`);
   } catch (err) {
     console.warn(`⚠️ SQLite seed warning: ${err.message}`);
   }
