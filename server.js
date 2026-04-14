@@ -8,6 +8,7 @@ const admin = require("firebase-admin");
 const multer = require("multer");
 const crypto = require("crypto");
 const { syncGymCounts, scheduleNightlySync } = require('./auto_sync');
+const lc = require('./localCache'); // SQLite local cache — zero Firebase reads for display data
 
 // ---------- App Setup ----------
 const app = express();
@@ -1895,27 +1896,41 @@ async function fetchDoorCollections(collectionNames, locationTags, limitCount = 
 app.get("/api/live-entries", verifyAzureToken, async (req, res) => {
   try {
     const { gymId, limit: limitParam } = req.query;
-    const limitCount = parseInt(limitParam) || 50; // Optimized default limit
+    const limitCount = parseInt(limitParam) || 50;
 
+    if (!gymId) return res.status(400).json({ error: "gymId required" });
+
+    // 🚀 Serve from SQLite first — zero Firestore reads
+    const today = getMoroccanDateStr();
+    const cachedEntries = lc.getEntries(gymId, today, limitCount);
+    if (cachedEntries.length > 0) {
+      const entries = cachedEntries.map(e => ({
+        docId: e.id, name: e.name, displayTime: e.timestamp?.slice(11, 16) || '',
+        timestamp: e.timestamp, status: e.status, method: e.method,
+        isFace: e.is_face === 1,
+      }));
+      return res.json({ ok: true, gymId, count: entries.length, entries, source: 'sqlite' });
+    }
+
+    // Fallback: fetch from door project via REST (megadoor-b3ccb) then cache
     const gymMap = {
       dokarat: { collection: "mega_fit_logs", locationTag: "dokkarat fes" },
       marjane: { collections: ["saiss entrees logs", "mega_fit_logs"], locationTags: ["fes saiss", "fes marjane"] }
     };
-
     const gym = gymMap[gymId];
-    if (!gym) {
-      return res.status(400).json({ error: "Unknown gymId. Use 'dokarat' or 'marjane'." });
-    }
+    if (!gym) return res.status(400).json({ error: "Unknown gymId" });
 
-    const cacheKey = `${gymId}_limit_${limitCount}`; 
+    const cacheKey = `${gymId}_limit_${limitCount}`;
     const entries = await getCachedOrFetch(apiCache.liveEntries, cacheKey, 15000, async () => {
-      // Support both singular (legacy/simple) and plural (robust) config keys
       const collections = gym.collections || [gym.collection];
       const tags = gym.locationTags || [gym.locationTag];
       return await fetchDoorCollections(collections, tags, limitCount);
     });
-    
-    res.json({ ok: true, gymId, count: entries.length, entries });
+
+    // Save to SQLite for next time
+    if (entries.length > 0) lc.upsertEntries(gymId, entries);
+
+    res.json({ ok: true, gymId, count: entries.length, entries, source: 'door' });
   } catch (err) {
     console.error("❌ Live Entries Error:", err);
     res.status(500).json({ error: "Failed to fetch live entries" });
@@ -2027,37 +2042,43 @@ app.get("/api/analytics/daily-stats/:gymId", verifyAzureToken, async (req, res) 
   try {
     const { gymId } = req.params;
 
-    const data = await getCachedOrFetch(apiCache.dailyStats, gymId, 300000, async () => {
-      console.log(`📊 Building 30-day scaffold for ${gymId}...`);
+    // 🚀 Try SQLite first (zero Firestore reads)
+    const sqliteStats = lc.getDailyStats(gymId, 30);
+    if (sqliteStats.length > 0) {
+      // Build full 30-day scaffold with zeros for missing days
+      const dateStrs = [];
+      for (let i = 29; i >= 0; i--) {
+        dateStrs.push(new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10));
+      }
+      const statsMap = Object.fromEntries(sqliteStats.map(s => [s.date, s]));
+      const scaffold = dateStrs.map(date => ({
+        gym_id: gymId, date,
+        count:    statsMap[date]?.count    || 0,
+        rawCount: statsMap[date]?.rawCount || 0,
+      }));
+      return res.json(scaffold);
+    }
 
-      // Build exact document IDs for the last 30 days (Morocco UTC+1 time)
+    // Fallback: read from Firestore and populate SQLite for next time
+    const data = await getCachedOrFetch(apiCache.dailyStats, gymId, 300000, async () => {
+      console.log(`📊 Building 30-day scaffold for ${gymId} from Firestore...`);
       const docIds = [];
       const dateStrs = [];
       for (let i = 29; i >= 0; i--) {
-        // Morocco is UTC+1 — shift time before extracting date
         const dateStr = new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10);
         dateStrs.push(dateStr);
         docIds.push(`${gymId}_${dateStr}`);
       }
-
-      // Batch-fetch all 30 documents in parallel (30 reads, guaranteed correct dates)
       const docRefs = docIds.map(id => db.collection("gym_daily_stats").doc(id));
       const snapshots = await db.getAll(...docRefs);
-
       const snapData = snapshots.map((snap, i) => {
-        if (!snap.exists) {
-          return { gym_id: gymId, date: dateStrs[i], count: 0, rawCount: 0 };
-        }
+        if (!snap.exists) return { gym_id: gymId, date: dateStrs[i], count: 0, rawCount: 0 };
         const d = snap.data();
-        return {
-          gym_id:   gymId,
-          date:     d.date     || dateStrs[i],
-          count:    d.count    || 0,
-          rawCount: d.rawCount || 0,
-        };
+        return { gym_id: gymId, date: d.date || dateStrs[i], count: d.count || 0, rawCount: d.rawCount || 0 };
       });
-
-      console.log(`✅ 30-day scaffold ready for ${gymId} (${snapData.filter(d => d.count > 0).length} days with data)`);
+      // Populate SQLite so next request is free
+      snapData.forEach(s => lc.upsertDailyStat(gymId, s.date, s.count, s.rawCount));
+      console.log(`✅ 30-day stats for ${gymId} loaded from Firestore → saved to SQLite`);
       return snapData;
     });
 

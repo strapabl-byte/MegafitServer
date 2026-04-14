@@ -2,6 +2,13 @@
 const DOOR_PROJECT = "megadoor-b3ccb";
 const DOOR_API_KEY = process.env.DOOR_FIREBASE_API_KEY || "AIzaSyBzNbHN_a-4kvI-Z22Ho_pric3mQ7IdiH8";
 
+let lc; // lazy-load to avoid circular dependency issues
+function getLC() {
+  if (!lc) lc = require('./localCache');
+  return lc;
+}
+
+
 const GYM_SYNC_MAP = [
   { 
     id: "dokarat", 
@@ -195,6 +202,9 @@ async function syncGymCounts(db, apiCache, daysBack = 1) {
           },
           { merge: true }
         );
+
+        // Also write to SQLite local cache — eliminates Firestore reads for display
+        getLC().upsertDailyStat(gym.id, dateStr, unique, raw);
 
         // Invalidate the RAM cache so next request gets fresh data from Firestore
         if (apiCache?.dailyStats) delete apiCache.dailyStats[gym.id];
