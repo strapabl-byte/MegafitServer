@@ -157,7 +157,8 @@ const apiCache = {
   liveEntries: {},  // keyed by gymId
   dailyStats: {},   // keyed by gymId
   general: {},      // for generic counts and simple flags
-  profiles: {}      // keyed by memberId — 60s TTL
+  profiles: {},     // keyed by memberId — 60s TTL
+  calendar: {},     // keyed by gymId_year — 10min TTL (expensive sub-collection read)
 };
 
 async function getCachedOrFetch(cacheObj, key, ttlMs, fetchFn) {
@@ -288,7 +289,11 @@ app.get("/api/members", verifyAzureToken, async (req, res) => {
     res.json(members);
   } catch (err) {
     console.error("Members Fetch Error:", err);
-    res.status(500).json({ error: "Failed to fetch members" });
+    // Detect Firebase quota exceeded (gRPC code 8)
+    if (err.code === 8 || (err.details && err.details.includes('Quota exceeded'))) {
+      return res.status(429).json({ error: "Firebase quota exceeded. Réessayez demain.", quotaExceeded: true, members: [] });
+    }
+    res.status(500).json({ error: "Failed to fetch members", members: [] });
   }
 });
 
@@ -572,29 +577,31 @@ app.post("/api/inscriptions/:id/confirm", verifyAzureToken, async (req, res) => 
     };
 
     let memberId;
+    let memberRef;
     if (existingMember) {
         memberId = existingMember.id;
+        memberRef = existingMember.ref;
         // ☁️ Update photo to Storage if it's new/base64
         if (memberData.photo && memberData.photo.startsWith("data:image")) {
             memberData.photo = await uploadBase64ToStorage(memberData.photo, `members/${memberId}/profile.jpg`);
         }
-        await existingMember.ref.update(memberData);
+        await memberRef.update(memberData);
         console.log(`🔄 Unified Match: Updated existing member ${memberId} (${memberData.fullName})`);
     } else {
         const qrToken = crypto.randomBytes(16).toString("hex");
         // Create doc first to get memberId
-        const doc = await db.collection("members").add({
+        memberRef = await db.collection("members").add({
             ...memberData,
             qrToken,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
             confirmedBy: req.user?.preferred_username || req.user?.name || "Admin",
         });
-        memberId = doc.id;
+        memberId = memberRef.id;
         
         // ☁️ Upload photo separately and update URL
         if (memberData.photo && memberData.photo.startsWith("data:image")) {
             const storageUrl = await uploadBase64ToStorage(memberData.photo, `members/${memberId}/profile.jpg`);
-            await doc.update({ photo: storageUrl });
+            await memberRef.update({ photo: storageUrl });
             memberData.photo = storageUrl; // for later use
         }
         
@@ -1688,40 +1695,44 @@ app.delete("/api/register/entry/:id", verifyAzureToken, requireAdmin, async (req
 app.get("/api/register/calendar", verifyAzureToken, async (req, res) => {
   try {
     const { year = new Date().getFullYear(), gymId = "dokarat" } = req.query;
-    const prefix = `${gymId}_${year}`;
+    const cacheKey = `${gymId}_${year}`;
+    const TTL_10MIN = 10 * 60 * 1000;
 
-    const snap = await db.collection("megafit_daily_register")
-      .where(admin.firestore.FieldPath.documentId(), ">=", prefix + "-01-01")
-      .where(admin.firestore.FieldPath.documentId(), "<=", prefix + "-12-31")
-      .get();
+    const result = await getCachedOrFetch(apiCache.calendar, cacheKey, TTL_10MIN, async () => {
+      const prefix = `${gymId}_${year}`;
+      const snap = await db.collection("megafit_daily_register")
+        .where(admin.firestore.FieldPath.documentId(), ">=", prefix + "-01-01")
+        .where(admin.firestore.FieldPath.documentId(), "<=", prefix + "-12-31")
+        .get();
 
-    const calendarData = {};
-    const resteData = {};
+      const calendarData = {};
+      const resteData = {};
 
-    await Promise.all(snap.docs.map(async parentDoc => {
-      const date = parentDoc.id.replace(`${gymId}_`, "");
-      const entriesSnap = await parentDoc.ref.collection("entries").get();
-      let ca = 0;
-      let reste = 0;
-      entriesSnap.docs.forEach(d => {
-        const e = d.data();
-        const paid = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
-        ca += paid;
-        // ✅ Prefer stored reste field (set by autoRegisterCA for partial payments)
-        // Fallback to prix - paid for manually entered rows
-        const storedReste = Number(e.reste) || 0;
-        if (storedReste > 0) {
-          reste += storedReste;
-        } else {
-          const prix = Number(e.prix) || 0;
-          if (prix > 0 && prix > paid) reste += (prix - paid);
-        }
-      });
-      calendarData[date] = ca;
-      if (reste > 0) resteData[date] = reste;
-    }));
+      await Promise.all(snap.docs.map(async parentDoc => {
+        const date = parentDoc.id.replace(`${gymId}_`, "");
+        const entriesSnap = await parentDoc.ref.collection("entries").get();
+        let ca = 0;
+        let reste = 0;
+        entriesSnap.docs.forEach(d => {
+          const e = d.data();
+          const paid = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
+          ca += paid;
+          const storedReste = Number(e.reste) || 0;
+          if (storedReste > 0) {
+            reste += storedReste;
+          } else {
+            const prix = Number(e.prix) || 0;
+            if (prix > 0 && prix > paid) reste += (prix - paid);
+          }
+        });
+        calendarData[date] = ca;
+        if (reste > 0) resteData[date] = reste;
+      }));
 
-    res.json({ ok: true, gymId, year: Number(year), calendarData, resteData });
+      return { calendarData, resteData };
+    });
+
+    res.json({ ok: true, gymId, year: Number(year), ...result });
   } catch (err) {
     console.error("GET /api/register/calendar error:", err);
     res.status(500).json({ error: "Failed to fetch calendar" });
