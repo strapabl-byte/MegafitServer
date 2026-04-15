@@ -2477,6 +2477,17 @@ app.listen(PORT, "0.0.0.0", () => {
   // 🌱 Seed SQLite with historical stats from Firestore (one-time on startup)
   // Only runs if SQLite is missing data — subsequent starts use the cached db file
   setTimeout(() => seedSQLiteHistoricalStats(), 3000);
+
+  // 🔁 Retry seed every hour in case quota was exhausted on startup
+  // When quota resets at 08:00 Morocco time, this will auto-populate the 30-day chart
+  setInterval(async () => {
+    const dokaratStats = lc.getDailyStats('dokarat', 30);
+    const marjaneStats = lc.getDailyStats('marjane', 30);
+    if (dokaratStats.length < 7 || marjaneStats.length < 7) {
+      console.log(`🔁 Hourly seed retry (dokarat: ${dokaratStats.length}d, marjane: ${marjaneStats.length}d)...`);
+      await seedSQLiteHistoricalStats();
+    }
+  }, 60 * 60 * 1000); // every 60 minutes
 });
 
 async function seedSQLiteHistoricalStats() {
