@@ -116,6 +116,13 @@ function getEntryCount(gymId, date) {
   return row?.cnt || 0;
 }
 
+function getUniqueEntryCount(gymId, date) {
+  const row = db.prepare(
+    'SELECT COUNT(DISTINCT name) as cnt FROM entries WHERE gym_id=? AND date=? AND name != ""'
+  ).get(gymId, date);
+  return row?.cnt || 0;
+}
+
 // ── DAILY STATS ──────────────────────────────────────────────────────────────
 
 const insertStat = db.prepare(`
@@ -242,7 +249,7 @@ function getCacheStats() {
 
 module.exports = {
   // entries
-  upsertEntries, getEntries, getEntryCount,
+  upsertEntries, getEntries, getEntryCount, getUniqueEntryCount,
   // daily stats
   upsertDailyStat, getDailyStats, getDailyStat,
   // members

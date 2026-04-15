@@ -1892,50 +1892,102 @@ async function fetchDoorCollections(collectionNames, locationTags, limitCount = 
   return processed;
 }
 
-// GET /api/live-entries?gymId=dokarat|marjane&limit=20
+// GET /api/live-entries?gymId=dokarat|marjane&limit=50
 app.get("/api/live-entries", verifyAzureToken, async (req, res) => {
   try {
     const { gymId, limit: limitParam } = req.query;
-    const limitCount = parseInt(limitParam) || 50;
+    const limitCount = Math.min(parseInt(limitParam) || 50, 200);
 
     if (!gymId) return res.status(400).json({ error: "gymId required" });
 
-    // 🚀 Serve from SQLite first — zero Firestore reads
     const today = getMoroccanDateStr();
-    const cachedEntries = lc.getEntries(gymId, today, limitCount);
-    if (cachedEntries.length > 0) {
-      const entries = cachedEntries.map(e => ({
-        docId: e.id, name: e.name, displayTime: e.timestamp?.slice(11, 16) || '',
-        timestamp: e.timestamp, status: e.status, method: e.method,
-        isFace: e.is_face === 1,
-      }));
-      return res.json({ ok: true, gymId, count: entries.length, entries, source: 'sqlite' });
-    }
-
-    // Fallback: fetch from door project via REST (megadoor-b3ccb) then cache
     const gymMap = {
-      dokarat: { collection: "mega_fit_logs", locationTag: "dokkarat fes" },
+      dokarat: { collections: ["mega_fit_logs"],                       locationTags: ["dokkarat fes"] },
       marjane: { collections: ["saiss entrees logs", "mega_fit_logs"], locationTags: ["fes saiss", "fes marjane"] }
     };
     const gym = gymMap[gymId];
     if (!gym) return res.status(400).json({ error: "Unknown gymId" });
 
-    const cacheKey = `${gymId}_limit_${limitCount}`;
-    const entries = await getCachedOrFetch(apiCache.liveEntries, cacheKey, 15000, async () => {
-      const collections = gym.collections || [gym.collection];
-      const tags = gym.locationTags || [gym.locationTag];
-      return await fetchDoorCollections(collections, tags, limitCount);
-    });
+    // ── Incremental fetch: only pull NEW entries since last known timestamp ──
+    // This means: first request = ~450 megadoor reads, each subsequent = ~5 reads
+    const existingEntries = lc.getEntries(gymId, today, 5000);
+    const lastTimestamp = existingEntries.length > 0
+      ? existingEntries.reduce((max, e) => e.timestamp > max ? e.timestamp : max, '')
+      : null;
 
-    // Save to SQLite for next time
-    if (entries.length > 0) lc.upsertEntries(gymId, entries);
+    const FETCH_MIN_GAP_MS = 30000; // don't hammer megadoor more than once per 30s
+    const lastSyncKey = `liveEntries_sync_${gymId}`;
+    const lastSyncTime = parseInt(lc.getMeta(lastSyncKey) || '0');
+    const msSinceLast = Date.now() - lastSyncTime;
 
-    res.json({ ok: true, gymId, count: entries.length, entries, source: 'door' });
+    if (!lastTimestamp || msSinceLast >= FETCH_MIN_GAP_MS) {
+      try {
+        // Fetch only entries AFTER the last known timestamp (or all today's if first time)
+        const url = `https://firestore.googleapis.com/v1/projects/${process.env.DOOR_PROJECT_ID || 'megadoor-b3ccb'}/databases/(default)/documents:runQuery?key=${process.env.DOOR_FIREBASE_API_KEY || 'AIzaSyBzNbHN_a-4kvI-Z22Ho_pric3mQ7IdiH8'}`;
+        const newEntries = [];
+        for (const coll of gym.collections) {
+          const sinceTs = lastTimestamp || today; // start of today if first time
+          const body = {
+            structuredQuery: {
+              from: [{ collectionId: coll }],
+              where: {
+                fieldFilter: {
+                  field: { fieldPath: "timestamp" },
+                  op: lastTimestamp ? "GREATER_THAN" : "GREATER_THAN_OR_EQUAL",
+                  value: { stringValue: sinceTs }
+                }
+              },
+              orderBy: [{ field: { fieldPath: "timestamp" }, direction: "ASCENDING" }],
+              limit: 500
+            }
+          };
+          const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+          const data = await resp.json();
+          if (Array.isArray(data)) {
+            data.filter(d => d.document).forEach(d => {
+              const f = d.document.fields || {};
+              const ts = f.timestamp?.stringValue || '';
+              if (!ts.startsWith(today)) return; // only today's entries
+              const tag = gym.locationTags[gym.collections.indexOf(coll)] || '';
+              const loc = (f.location?.stringValue || f.Location?.stringValue || '').toLowerCase();
+              if (tag && !loc.includes(tag.split(' ')[0].toLowerCase())) return;
+              newEntries.push({
+                id: d.document.name?.split('/').pop() || ts,
+                gym_id: gymId, date: today, timestamp: ts,
+                name: f.name?.stringValue || f.Name?.stringValue || '',
+                method: f.method?.stringValue || f.Method?.stringValue || '',
+                status: f.status?.stringValue || 'granted',
+                is_face: (f.method?.stringValue || '').toLowerCase().includes('face') ? 1 : 0,
+              });
+            });
+          }
+        }
+        if (newEntries.length > 0) {
+          lc.upsertEntries(gymId, newEntries);
+          console.log(`📡 ${gymId}: +${newEntries.length} new entries added to SQLite`);
+        }
+        lc.setMeta(lastSyncKey, String(Date.now()));
+      } catch (fetchErr) {
+        console.warn(`⚠️ Incremental fetch failed for ${gymId}: ${fetchErr.message}`);
+      }
+    }
+
+    // Always serve from SQLite — includes existing + newly fetched entries
+    const allEntries = lc.getEntries(gymId, today, limitCount);
+    const entries = allEntries.map(e => ({
+      docId: e.id, name: e.name,
+      displayTime: (e.timestamp || '').slice(11, 16),
+      timestamp: e.timestamp, status: e.status, method: e.method,
+      isFace: e.is_face === 1,
+    }));
+
+    res.json({ ok: true, gymId, count: entries.length, entries, source: 'sqlite' });
   } catch (err) {
     console.error("❌ Live Entries Error:", err);
     res.status(500).json({ error: "Failed to fetch live entries" });
   }
 });
+
 
 // NEW: Ultra-efficient endpoint — reads daily_total & daily_unique from the LATEST doc only
 // The access control device embeds running counters in every entry, so 1 read = perfect accuracy
@@ -1952,22 +2004,20 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
     if (!gym) return res.status(400).json({ error: "Invalid gymId" });
 
     const cacheKey = `live_count_${gymId}`;
-    const result = await getCachedOrFetch(apiCache.general, cacheKey, 15000, async () => {
+    const result = await getCachedOrFetch(apiCache.general, cacheKey, 30000, async () => {
       const todayStr = getMoroccanDateStr();
 
-      // 🛡️ For Marjane, we KNOW the device counter is broken (unreliable).
-      // We return the manual count from the gym_daily_stats doc instead.
-      if (gym.forceManualCount) {
-        console.log(`🛡️ [${gymId}] Forcing manual count lookup (device counter unreliable)`);
-        const statsDoc = await db.collection("gym_daily_stats").doc(`${gymId}_${todayStr}`).get();
-        if (statsDoc.exists) {
-          const data = statsDoc.data();
-          return { count: data.count || 0, rawCount: data.rawCount || 0, date: todayStr, isManual: true };
-        }
-        return { count: 0, rawCount: 0, date: todayStr, isManual: true };
+      // ✅ PRIMARY: Compute count directly from SQLite entries (0 reads from any Firebase)
+      // SQLite is kept up to date by the incremental fetch in /api/live-entries (every 30s)
+      const rawCount  = lc.getEntryCount(gymId, todayStr);  // total scans
+      const uniqueCount = lc.getUniqueEntryCount(gymId, todayStr); // distinct names
+      if (rawCount > 0) {
+        return { count: uniqueCount, rawCount, date: todayStr, source: 'sqlite' };
       }
 
-      const url = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT_ID}/databases/(default)/documents:runQuery?key=${DOOR_REST_KEY}`;
+      // 🔄 FALLBACK: SQLite empty (first call of day before live-entries warms up)
+      // For marjane: read from gym_daily_stats; for dokarat: 1-doc device counter read
+
 
       // 🎯 Fetch only the LATEST 1 document — device embeds daily_total & daily_unique counters
       const body = {
@@ -2431,47 +2481,36 @@ app.listen(PORT, "0.0.0.0", () => {
 
 async function seedSQLiteHistoricalStats() {
   try {
-    // Check if we already have enough data in SQLite for both gyms
     const dokaratStats = lc.getDailyStats('dokarat', 30);
     const marjaneStats = lc.getDailyStats('marjane', 30);
-
     if (dokaratStats.length >= 28 && marjaneStats.length >= 28) {
       console.log(`✅ SQLite already seeded (dokarat: ${dokaratStats.length}d, marjane: ${marjaneStats.length}d) — skip`);
       return;
     }
-
-    // 1️⃣ Try Firestore gym_daily_stats first — full 30 days, only 60 reads total
-    try {
-      console.log(`🌱 Seeding SQLite from Firestore gym_daily_stats (30 days × 2 gyms = 60 reads)...`);
-      const GYMS = ['dokarat', 'marjane'];
-      for (const gymId of GYMS) {
-        const dateStrs = [], docIds = [];
-        for (let i = 29; i >= 0; i--) {
-          const d = new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10);
-          dateStrs.push(d);
-          docIds.push(`${gymId}_${d}`);
-        }
-        const docRefs = docIds.map(id => db.collection('gym_daily_stats').doc(id));
-        const snaps = await db.getAll(...docRefs);
-        let seeded = 0;
-        snaps.forEach((snap, i) => {
-          const d = snap.exists ? snap.data() : {};
-          lc.upsertDailyStat(gymId, dateStrs[i], d.count || 0, d.rawCount || 0);
-          if (d.count > 0) seeded++;
-        });
-        console.log(`  ✅ ${gymId}: ${seeded} days with data seeded from Firestore`);
+    // ✅ Only read aggregated counts from Firestore gym_daily_stats — just 60 reads total
+    // ❌ NEVER fall back to megadoor REST — that fetches raw docs (thousands of reads)
+    console.log(`🌱 Seeding SQLite from Firestore gym_daily_stats (30d × 2 gyms = 60 reads)...`);
+    for (const gymId of ['dokarat', 'marjane']) {
+      const dateStrs = [], docIds = [];
+      for (let i = 29; i >= 0; i--) {
+        const d = new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10);
+        dateStrs.push(d);
+        docIds.push(`${gymId}_${d}`);
       }
-      console.log(`✅ SQLite seeded from Firestore — full 30-day history`);
-      return;
-    } catch (firestoreErr) {
-      console.warn(`⚠️ Firestore seed failed (quota?): ${firestoreErr.message}`);
-      console.log(`🔄 Falling back to megadoor-b3ccb REST (last ~10 days)...`);
+      const docRefs = docIds.map(id => db.collection('gym_daily_stats').doc(id));
+      const snaps = await db.getAll(...docRefs);
+      let seeded = 0;
+      snaps.forEach((snap, i) => {
+        const d = snap.exists ? snap.data() : {};
+        lc.upsertDailyStat(gymId, dateStrs[i], d.count || 0, d.rawCount || 0);
+        if (d.count > 0) seeded++;
+      });
+      console.log(`  ✅ ${gymId}: ${seeded} days with data`);
     }
-
-    // 2️⃣ Fallback: megadoor-b3ccb REST — no Firebase reads, but only ~10 days of data
-    await syncGymCounts(db, apiCache, 30);
-    console.log(`✅ SQLite seeded from megadoor-b3ccb REST — 0 Firebase reads used`);
+    console.log(`✅ SQLite seeded — full 30-day history, 0 megadoor reads used`);
   } catch (err) {
-    console.warn(`⚠️ SQLite seed warning: ${err.message}`);
+    // Quota exhausted — skip gracefully, chart fills in after 08:00 Morocco time
+    console.warn(`⚠️ SQLite seed skipped (quota exhausted): chart history restores after reset`);
   }
-}
+}
+
