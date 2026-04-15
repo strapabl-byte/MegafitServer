@@ -2014,7 +2014,7 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
 
     const gymMap = {
       dokarat: { collection: "mega_fit_logs", locationTag: "dokkarat fes" },
-      marjane: { collection: "saiss entrees logs", locationTag: "fes saiss", forceManualCount: true }
+      marjane: { collection: "saiss entrees logs", locationTag: "fes saiss" }
     };
     const gym = gymMap[gymId];
     if (!gym) return res.status(400).json({ error: "Invalid gymId" });

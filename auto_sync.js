@@ -21,7 +21,6 @@ const GYM_SYNC_MAP = [
     collection: "saiss entrees logs", 
     locationTags: ["fes saiss", "fes marjane"], // flexible matching
     collections: ["saiss entrees logs", "mega_fit_logs"], // aggregate leaked logs
-    forceManualCount: true // Device counter for Saiss is unreliable/too high
   },
 ];
 
