@@ -1965,6 +1965,24 @@ app.get("/api/live-entries", verifyAzureToken, async (req, res) => {
         if (newEntries.length > 0) {
           lc.upsertEntries(gymId, newEntries);
           console.log(`📡 ${gymId}: +${newEntries.length} new entries added to SQLite`);
+          
+          // ✅ PROPAGATE HARDWARE COUNTERS: If latest entry has daily_unique, update daily_stats immediately
+          // This ensures the 30-day chart and Live circle are updated without waiting for auto_sync
+          const latestBatchDoc = data.filter(d => d.document).sort((a,b) => 
+            (b.document.fields?.timestamp?.stringValue || '').localeCompare(a.document.fields?.timestamp?.stringValue || '')
+          )[0];
+          
+          if (latestBatchDoc) {
+             const f = latestBatchDoc.document.fields || {};
+             const du = f.daily_unique?.integerValue || f.daily_unique?.doubleValue;
+             const dt = f.daily_total?.integerValue  || f.daily_total?.doubleValue;
+             if (du !== undefined && dt !== undefined) {
+               const valU = parseInt(du);
+               const valT = parseInt(dt);
+               lc.upsertDailyStat(gymId, today, valU, valT);
+               console.log(`📈 ${gymId}: Hardware counters updated in SQLite: ${valU} unique, ${valT} total`);
+             }
+          }
         }
         lc.setMeta(lastSyncKey, String(Date.now()));
       } catch (fetchErr) {
@@ -1989,8 +2007,6 @@ app.get("/api/live-entries", verifyAzureToken, async (req, res) => {
 });
 
 
-// NEW: Ultra-efficient endpoint — reads daily_total & daily_unique from the LATEST doc only
-// The access control device embeds running counters in every entry, so 1 read = perfect accuracy
 app.get("/api/live-count", verifyAzureToken, async (req, res) => {
   try {
     const { gymId } = req.query;
@@ -2003,23 +2019,29 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
     const gym = gymMap[gymId];
     if (!gym) return res.status(400).json({ error: "Invalid gymId" });
 
+    const todayStr = getMoroccanDateStr();
     const cacheKey = `live_count_${gymId}`;
-    const result = await getCachedOrFetch(apiCache.general, cacheKey, 30000, async () => {
-      const todayStr = getMoroccanDateStr();
 
-      // ✅ PRIMARY: Compute count directly from SQLite entries (0 reads from any Firebase)
-      // SQLite is kept up to date by the incremental fetch in /api/live-entries (every 30s)
-      const rawCount  = lc.getEntryCount(gymId, todayStr);  // total scans
-      const uniqueCount = lc.getUniqueEntryCount(gymId, todayStr); // distinct names
-      if (rawCount > 0) {
-        return { count: uniqueCount, rawCount, date: todayStr, source: 'sqlite' };
+    // ⚡ getCachedOrFetch with 0 TTL if we want it truly live, or short 30s
+    const result = await getCachedOrFetch(apiCache.general, cacheKey, 30000, async () => {
+      
+      // 1️⃣ Check updated daily_stats first (populated by /api/live-entries or auto_sync)
+      const cachedToday = lc.getDailyStat(gymId, todayStr);
+      if (cachedToday && cachedToday.count > 0) {
+        console.log(`✅ [${gymId}] Using cached today stat: ${cachedToday.count} (unique)`);
+        return { count: cachedToday.count, rawCount: cachedToday.raw_count, date: todayStr, source: 'stats_table' };
       }
 
-      // 🔄 FALLBACK: SQLite empty (first call of day before live-entries warms up)
-      // For marjane: read from gym_daily_stats; for dokarat: 1-doc device counter read
+      // 2️⃣ Fallback: Compute count from SQLite entries
+      const rawCountFromEntries    = lc.getEntryCount(gymId, todayStr);
+      const uniqueCountFromEntries = lc.getUniqueEntryCount(gymId, todayStr);
+      if (rawCountFromEntries > 0) {
+        console.log(`✅ [${gymId}] Computed from entries table: ${uniqueCountFromEntries} (unique)`);
+        return { count: uniqueCountFromEntries, rawCount: rawCountFromEntries, date: todayStr, source: 'entries_table' };
+      }
 
-
-      // 🎯 Fetch only the LATEST 1 document — device embeds daily_total & daily_unique counters
+      // 3️⃣ Deep Fallback: 1-doc Firebase read ( hardware counter source )
+      console.log(`🌐 [${gymId}] SQLite empty for today, fetching 1-doc from Firebase...`);
       const body = {
         structuredQuery: {
           from: [{ collectionId: gym.collection }],
@@ -2035,47 +2057,25 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
         }
       };
 
-      const resp = await fetch(url, {
+      const resp = await fetch(`https://firestore.googleapis.com/v1/projects/megadoor-b3ccb/databases/(default)/documents:runQuery?key=${process.env.DOOR_FIREBASE_API_KEY || 'AIzaSyBzNbHN_a-4kvI-Z22Ho_pric3mQ7IdiH8'}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
       });
 
       const data = await resp.json();
-
-      if (!Array.isArray(data) || !data[0]?.document) {
-        console.log(`[${gymId}] No entries today yet`);
-        return { count: 0, rawCount: 0, date: todayStr };
+      if (Array.isArray(data) && data[0]?.document) {
+        const f = data[0].document.fields || {};
+        const du = parseInt(f.daily_unique?.integerValue || f.daily_unique?.doubleValue || 0);
+        const dt = parseInt(f.daily_total?.integerValue  || f.daily_total?.doubleValue  || 0);
+        
+        if (du > 0) {
+           lc.upsertDailyStat(gymId, todayStr, du, dt);
+           return { count: du, rawCount: dt, date: todayStr, source: 'firebase_hardware' };
+        }
       }
 
-      const f = data[0].document.fields || {};
-      const loc = (f.location?.stringValue || "").toLowerCase().trim();
-      const targetLoc = gym.locationTag.toLowerCase().trim();
-
-      // Verify this latest doc belongs to this gym's location
-      if (loc !== targetLoc && !loc.includes(targetLoc) && !targetLoc.includes(loc)) {
-        console.warn(`[${gymId}] Latest doc location mismatch: "${loc}" vs "${targetLoc}"`);
-        return { count: 0, rawCount: 0, date: todayStr };
-      }
-
-      // ✅ Read running counters embedded by the device
-      const parseNum = (field) => {
-        if (!field) return 0;
-        if (field.integerValue) return parseInt(field.integerValue);
-        if (field.doubleValue) return Math.round(field.doubleValue);
-        return 0;
-      };
-
-      const dailyUnique = parseNum(f.daily_unique);
-      const dailyTotal  = parseNum(f.daily_total);
-
-      console.log(`✅ [${gymId}] daily_unique=${dailyUnique} daily_total=${dailyTotal} (1 read)`);
-
-      return {
-        count:    dailyUnique,  // unique people today (device-deduped)
-        rawCount: dailyTotal,   // all scans including re-entries
-        date: todayStr
-      };
+      return { count: 0, rawCount: 0, date: todayStr };
     });
 
     res.json({ ok: true, gymId, ...result });
@@ -2096,11 +2096,24 @@ app.get("/api/analytics/daily-stats/:gymId", verifyAzureToken, async (req, res) 
     const sqliteStats = lc.getDailyStats(gymId, 30);
     if (sqliteStats.length > 0) {
       // Build full 30-day scaffold with zeros for missing days
+      const todayStr = getMoroccanDateStr();
+      const todayUnique = lc.getUniqueEntryCount(gymId, todayStr);
+      const todayRaw    = lc.getEntryCount(gymId, todayStr);
+      const todayInCache = lc.getDailyStat(gymId, todayStr);
+
+      const finalTodayCount = todayInCache ? Math.max(todayInCache.count, todayUnique) : todayUnique;
+      const finalTodayRaw   = todayInCache ? Math.max(todayInCache.raw_count, todayRaw) : todayRaw;
+
       const dateStrs = [];
       for (let i = 29; i >= 0; i--) {
         dateStrs.push(new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10));
       }
+      
       const statsMap = Object.fromEntries(sqliteStats.map(s => [s.date, s]));
+      
+      // Merge live "Today" into the map for immediate visualization
+      statsMap[todayStr] = { count: finalTodayCount, rawCount: finalTodayRaw };
+
       const scaffold = dateStrs.map(date => ({
         gym_id: gymId, date,
         count:    statsMap[date]?.count    || 0,
