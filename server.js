@@ -368,7 +368,19 @@ app.post("/public/inscriptions", async (req, res) => {
     
     // Normalize gymId — also read from query param as safety fallback
     const rawGymId = data.gymId || req.query.gymId || req.query.gym || 'dokarat';
-    const gymMap = { 'dokkarat': 'dokarat', 'marjane': 'marjane', 'casa1': 'casa1', 'casa2': 'casa2', 'saiss': 'marjane' };
+    const gymMap = { 
+      'dokkarat': 'dokarat', 
+      'doukkarate': 'dokarat',
+      'deukarate': 'dokarat',
+      'marjane': 'marjane', 
+      'saiss': 'marjane',
+      'fesssaiss': 'marjane',
+      'fes saiss': 'marjane',
+      'fessmarjane': 'marjane',
+      'fes marjane': 'marjane',
+      'casa1': 'casa1', 
+      'casa2': 'casa2', 
+    };
     const cleanId = rawGymId.toLowerCase().trim();
     const normalizedGymId = gymMap[cleanId] || cleanId;
     console.log(`📝 New inscription for gym: "${normalizedGymId}" (raw: "${rawGymId}")`);
@@ -2412,7 +2424,7 @@ const defaultGymConfig = (gymId) => ({
   gymId,
   gymName: {
     dokarat: 'MEGAFIT DOKKARAT',
-    marjane: 'MEGAFIT SAISS / MARJANE',
+    marjane: 'MEGAFIT SAISS',
     casa1:   'MEGAFIT ANFA',
     casa2:   'MEGAFIT LADY ANFA',
   }[gymId] || 'MEGA FIT',
