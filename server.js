@@ -648,6 +648,7 @@ app.post("/api/inscriptions/:id/confirm", verifyAzureToken, async (req, res) => 
             await db.collection("payments").add({
               memberId,
               inscriptionId: req.params.id,
+              gymId, // ✅ Standardized for analytics
               amount:      totalPaid,
               plan:        plan || "Monthly",
               date:        new Date().toISOString(),
@@ -957,11 +958,23 @@ async function autoRegisterCA({ gymId='dokarat', date, nom, tel, plan, amount, m
 }
 
 app.post("/api/payments", verifyAzureToken, async (req, res) => {
-
   try {
     const { memberId, amount, plan, date, method, contrat, commercial, location, payments: splitPayments, type, note } = req.body;
+    
+    // Fetch member name/phone/location for the register
+    let nom = '', tel = '', loc = location || 'dokarat';
+    try {
+      const mSnap = await db.collection('members').doc(memberId).get();
+      if (mSnap.exists) { 
+        nom = mSnap.data().fullName || ''; 
+        tel = mSnap.data().phone || ''; 
+        loc = location || mSnap.data().location || 'dokarat';
+      }
+    } catch(_) {}
+
     const docRef = await db.collection("payments").add({
-      memberId, amount, plan, date: date || new Date().toISOString(), method: method || "Cash",
+      memberId, amount, plan, gymId: loc, // ✅ Standardized for analytics
+      date: date || new Date().toISOString(), method: method || "Cash",
       type: type || 'renewal',
       note: note || '',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -977,17 +990,6 @@ app.post("/api/payments", verifyAzureToken, async (req, res) => {
         });
     }
 
-    // Fetch member name/phone/location for the register
-    let nom = '', tel = '', loc = location || 'dokarat';
-    try {
-      const mSnap = await db.collection('members').doc(memberId).get();
-      if (mSnap.exists) { 
-        nom = mSnap.data().fullName || ''; 
-        tel = mSnap.data().phone || ''; 
-        loc = location || mSnap.data().location || 'dokarat';
-      }
-    } catch(_) {}
-
     // Auto-add to daily CA register ✅ (with full payment split and balance if provided)
     await autoRegisterCA({
       gymId: loc,
@@ -1002,6 +1004,7 @@ app.post("/api/payments", verifyAzureToken, async (req, res) => {
     const snap = await docRef.get();
     res.json({ id: docRef.id, ...snap.data() });
   } catch (err) {
+    console.error("Payment Record Error:", err);
     res.status(500).json({ error: "Failed to record payment" });
   }
 });
@@ -1027,6 +1030,7 @@ app.post("/api/payments/settle-balance", verifyAzureToken, async (req, res) => {
     // 1️⃣ Record supplementary payment
     await db.collection("payments").add({
       memberId,
+      gymId, // ✅ Standardized for analytics
       amount: payAmount,
       plan: member.plan || "Monthly",
       date: new Date().toISOString(),
@@ -1104,6 +1108,7 @@ app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res
     // 2. Record Orphan Payment (waiting to be linked)
     await db.collection("payments").add({
       inscriptionId, // Links it to the pending inscription until member is created
+      gymId: insData.gymId || "dokarat", // ✅ Standardized for analytics
       amount: Number(amount),
       plan: plan || "Monthly",
       date: new Date().toISOString(),
@@ -1112,7 +1117,6 @@ app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res
       note: note || '',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       recordedBy: req.user?.preferred_username || req.user?.name || "Admin",
-      location: insData.gymId || "dokarat"
     });
 
     await autoRegisterCA({
@@ -1927,7 +1931,7 @@ app.get("/api/live-entries", verifyAzureToken, async (req, res) => {
       ? existingEntries.reduce((max, e) => e.timestamp > max ? e.timestamp : max, '')
       : null;
 
-    const FETCH_MIN_GAP_MS = 30000; // don't hammer megadoor more than once per 30s
+    const FETCH_MIN_GAP_MS = 12000; // Poll every 12s
     const lastSyncKey = `liveEntries_sync_${gymId}`;
     const lastSyncTime = parseInt(lc.getMeta(lastSyncKey) || '0');
     const msSinceLast = Date.now() - lastSyncTime;
@@ -2163,6 +2167,171 @@ app.get("/api/analytics/daily-stats/:gymId", verifyAzureToken, async (req, res) 
     res.status(500).json({ error: "Failed to fetch analytics" });
   }
 });
+
+/**
+ * 📊 RESTORED: Advanced KPI Aggregate Endpoint
+ * Returns new members and income counts for last 24h, 7 days, 30 days.
+ * Specifically optimized for gym performance comparison.
+ */
+app.get("/api/analytics/kpis/:gymId", verifyAzureToken, async (req, res) => {
+  try {
+    const { gymId } = req.params;
+    const now = new Date();
+    
+    // 📈 TIME RANGES (Calendar-aligned)
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    
+    // Week start (Monday)
+    const dayOfWeek = now.getDay(); // 0 is Sunday
+    const diffToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() + diffToMonday);
+    weekStart.setHours(0,0,0,0);
+    
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    
+    const tsToday = admin.firestore.Timestamp.fromDate(todayStart);
+    const tsWeek  = admin.firestore.Timestamp.fromDate(weekStart);
+    const tsMonth = admin.firestore.Timestamp.fromDate(monthStart);
+
+    // 1️⃣ Fetch members for the gym
+    let membersQuery = db.collection("members");
+    if (gymId !== 'all') {
+      membersQuery = membersQuery.where("location", "==", gymId);
+    }
+    const membersSnap = await membersQuery.get();
+    const members = membersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    const countMembersInRange = (ts) => {
+      return members.filter(m => {
+        const ca = m.createdAt;
+        if (!ca) return false;
+        const createdMs = ca._seconds ? ca._seconds * 1000 : new Date(ca).getTime();
+        return createdMs >= ts.toMillis();
+      }).length;
+    };
+
+    const yearStart = new Date(now.getFullYear(), 0, 1);
+    const tsYear  = admin.firestore.Timestamp.fromDate(yearStart);
+
+    // 2️⃣ Fetch payments (Extend range to beginning of year)
+    let paymentsQuery = db.collection("payments").where("createdAt", ">=", tsYear);
+    const paymentsSnap = await paymentsQuery.get();
+    let payments = paymentsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    const memberIds = members.map(m => m.id);
+    if (gymId !== 'all') {
+      payments = payments.filter(p => p.gymId === gymId || memberIds.includes(p.memberId));
+    }
+
+    const sumIncomeInRange = (ts) => {
+      return payments
+        .filter(p => {
+          const ca = p.createdAt;
+          if (!ca) return false;
+          const createdMs = ca._seconds ? ca._seconds * 1000 : new Date(ca).getTime();
+          return createdMs >= ts.toMillis();
+        })
+        .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    };
+
+    // 3️⃣ Fetch manual register entries
+    const fetchRegisterData = async (ts) => {
+      const start = new Date(ts.toMillis());
+      const entries = [];
+      const gymIds = gymId === 'all' ? ['dokarat', 'marjane', 'casa1', 'casa2'] : [gymId];
+      
+      const dayCount = Math.ceil((now - start) / (1000 * 60 * 60 * 24)) + 1;
+      const docRefs = [];
+      
+      const toLocalDateStr = (d) => {
+        const year = d.getFullYear();
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+      };
+
+      // Safety limit: if fetching more than 60 days, we should handle it more efficiently
+      // But for a yearly total start of year to now is approx 106 days (if April).
+      // Parallel fetches for 106*4 collections is approx 424 requests. 
+      for (let i = 0; i < dayCount; i++) {
+        const d = new Date(start);
+        d.setDate(start.getDate() + i);
+        if (d > now) break;
+        const dateStr = toLocalDateStr(d);
+        gymIds.forEach(gid => {
+          docRefs.push(db.collection("megafit_daily_register").doc(`${gid}_${dateStr}`).collection("entries"));
+        });
+      }
+
+      console.log(`📡 [KPI_DEBUG] Fetching ${docRefs.length} register days for ${gymId} from ${toLocalDateStr(start)}`);
+
+      // We fetch all entries for these days
+      // Note: docRefs and snapshots lists match by index
+      const snapshots = await Promise.all(docRefs.map(ref => ref.get()));
+      snapshots.forEach((snap, idx) => {
+        const ref = docRefs[idx];
+        // Extract date from ref path: megafit_daily_register/dokarat_2026-04-01/entries
+        const pathParts = ref.path.split('/');
+        const parentId = pathParts[pathParts.length - 2] || ""; // e.g. "dokarat_2026-04-01"
+        const dateStr = parentId.split('_')[1]; // e.g. "2026-04-01"
+
+        snap.forEach(doc => {
+          const e = doc.data();
+          if (e.source !== 'inscription_auto') {
+            entries.push({ 
+              ...e, 
+              date: e.date || dateStr // Ensure date is present for filtering
+            });
+          }
+        });
+      });
+      return entries;
+    };
+
+    const toLocalDateStr = (d) => {
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
+
+    const manualEntriesYear  = await fetchRegisterData(tsYear);
+    const manualEntriesMonth = manualEntriesYear.filter(e => e.date >= toLocalDateStr(monthStart));
+    const manualEntriesWeek  = manualEntriesYear.filter(e => e.date >= toLocalDateStr(weekStart));
+    const manualEntriesToday = manualEntriesYear.filter(e => e.date >= toLocalDateStr(todayStart));
+
+    const sumManualIncome = (entries) => entries.reduce((sum, e) => {
+      const total = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
+      return sum + total;
+    }, 0);
+
+    const kpis = {
+      newMembers: {
+        day:   countMembersInRange(tsToday) + manualEntriesToday.length,
+        week:  countMembersInRange(tsWeek) + manualEntriesWeek.length,
+        month: countMembersInRange(tsMonth) + manualEntriesMonth.length,
+        year:  countMembersInRange(tsYear) + manualEntriesYear.length
+      },
+      income: {
+        day:   sumIncomeInRange(tsToday) + sumManualIncome(manualEntriesToday),
+        week:  sumIncomeInRange(tsWeek) + sumManualIncome(manualEntriesWeek),
+        month: sumIncomeInRange(tsMonth) + sumManualIncome(manualEntriesMonth),
+        year:  sumIncomeInRange(tsYear) + sumManualIncome(manualEntriesYear)
+      }
+    };
+
+    // Re-calculate Day/Week precisely (since formalSumM is for the whole month)
+    kpis.income.day  = sumIncomeInRange(tsToday) + sumManualIncome(manualEntriesToday);
+    kpis.income.week = sumIncomeInRange(tsWeek)  + sumManualIncome(manualEntriesWeek);
+
+    console.log(`📊 [RECONCILED] KPIs for ${gymId}: ${kpis.newMembers.day} new members today, ${kpis.income.day} DH today.`);
+    res.json(kpis);
+  } catch (err) {
+    console.error("KPI Calculation Error:", err);
+    res.status(500).json({ error: "Failed to calculate KPIs" });
+  }
+});
+
 
 // Admin-only: Manually trigger a stats sync (handles catching up missed days)
 app.post("/api/admin/sync-stats", verifyAzureToken, requireAdmin, async (req, res) => {

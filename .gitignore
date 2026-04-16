@@ -4,3 +4,4 @@ serviceAccount.json
 ngrok.log
 *.log
 .DS_Store
+megafit_cache.db*
