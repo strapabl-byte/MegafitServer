@@ -2243,19 +2243,17 @@ app.get("/api/analytics/kpis/:gymId", verifyAzureToken, async (req, res) => {
       });
     }
     lookupIds = [...new Set(lookupIds)];
-    
-    let membersQuery = db.collection("members");
-    if (gymId !== 'all') {
-      membersQuery = membersQuery.where("location", "in", lookupIds);
-    }
-    const membersSnap = await membersQuery.get();
-    const members = membersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    // ── Optimized Fetch from Local Cache ──
+    // Get all members and payments from SQLite to avoid burning Firestore quota
+    const members  = lc.getMembers(gymId === 'all' ? null : gymId.split(','));
+    const payments = lc.getPayments(gymId === 'all' ? null : gymId.split(','), 5000); // Fetch up to 5k historical payments
 
     const countMembersInRange = (ts) => {
       return members.filter(m => {
-        const ca = m.createdAt;
-        if (!ca) return false;
-        const createdMs = ca._seconds ? ca._seconds * 1000 : new Date(ca).getTime();
+        const ca = m.synced_at || m.createdAt; // fallback for legacy
+        if (!ca) return true; // if no date, assume old member (include in total)
+        const createdMs = new Date(ca).getTime();
         return createdMs >= ts.toMillis();
       }).length;
     };
@@ -2263,22 +2261,12 @@ app.get("/api/analytics/kpis/:gymId", verifyAzureToken, async (req, res) => {
     const yearStart = new Date(now.getFullYear(), 0, 1);
     const tsYear  = admin.firestore.Timestamp.fromDate(yearStart);
 
-    // 2️⃣ Fetch payments (Extend range to beginning of year)
-    let paymentsQuery = db.collection("payments").where("createdAt", ">=", tsYear);
-    const paymentsSnap = await paymentsQuery.get();
-    let payments = paymentsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-
-    const memberIds = members.map(m => m.id);
-    if (gymId !== 'all') {
-      payments = payments.filter(p => p.gymId === gymId || memberIds.includes(p.memberId));
-    }
-
     const sumIncomeInRange = (ts) => {
       return payments
         .filter(p => {
-          const ca = p.createdAt;
+          const ca = p.date || p.synced_at;
           if (!ca) return false;
-          const createdMs = ca._seconds ? ca._seconds * 1000 : new Date(ca).getTime();
+          const createdMs = new Date(ca).getTime();
           return createdMs >= ts.toMillis();
         })
         .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
@@ -2746,36 +2734,69 @@ app.listen(PORT, "0.0.0.0", () => {
 
 async function seedSQLiteHistoricalStats() {
   try {
-    const dokaratStats = lc.getDailyStats('dokarat', 30);
-    const marjaneStats = lc.getDailyStats('marjane', 30);
-    if (dokaratStats.length >= 28 && marjaneStats.length >= 28) {
-      console.log(`✅ SQLite already seeded (dokarat: ${dokaratStats.length}d, marjane: ${marjaneStats.length}d) — skip`);
+    const cacheStats = lc.getCacheStats();
+    console.log(`📡 Current Local Cache Stats: entries=${cacheStats.entries}, members=${cacheStats.members}, payments=${cacheStats.payments}`);
+    
+    // Always check members/payments if they are 0
+    let needsDailyStats = cacheStats.stats < 30;
+    let needsMembers = cacheStats.members < 10;
+    let needsPayments = cacheStats.payments < 10;
+
+    if (!needsDailyStats && !needsMembers && !needsPayments) {
+      console.log(`✅ Cache appears fully populated. Skip seeding.`);
       return;
     }
-    // ✅ Only read aggregated counts from Firestore gym_daily_stats — just 60 reads total
-    // ❌ NEVER fall back to megadoor REST — that fetches raw docs (thousands of reads)
-    console.log(`🌱 Seeding SQLite from Firestore gym_daily_stats (30d × 2 gyms = 60 reads)...`);
-    for (const gymId of ['dokarat', 'marjane']) {
-      const dateStrs = [], docIds = [];
-      for (let i = 29; i >= 0; i--) {
-        const d = new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10);
-        dateStrs.push(d);
-        docIds.push(`${gymId}_${d}`);
+
+    console.log(`🚀 Seeding SQLite cache with REAL DATA (Daily Stats: ${needsDailyStats}, Members: ${needsMembers}, Payments: ${needsPayments})...`);
+
+    // 1. Daily Stats (30 days) - Only if needed
+    if (needsDailyStats) {
+      for (const gymId of ['dokarat', 'marjane']) {
+        const dateStrs = [], docIds = [];
+        for (let i = 29; i >= 0; i--) {
+          const d = new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10);
+          dateStrs.push(d);
+          docIds.push(`${gymId}_${d}`);
+        }
+        const docRefs = docIds.map(id => db.collection('gym_daily_stats').doc(id));
+        const snaps = await db.getAll(...docRefs);
+        snaps.forEach((snap, i) => {
+          const d = snap.exists ? snap.data() : {};
+          lc.upsertDailyStat(gymId, dateStrs[i], d.count || 0, d.rawCount || 0);
+        });
       }
-      const docRefs = docIds.map(id => db.collection('gym_daily_stats').doc(id));
-      const snaps = await db.getAll(...docRefs);
-      let seeded = 0;
-      snaps.forEach((snap, i) => {
-        const d = snap.exists ? snap.data() : {};
-        lc.upsertDailyStat(gymId, dateStrs[i], d.count || 0, d.rawCount || 0);
-        if (d.count > 0) seeded++;
-      });
-      console.log(`  ✅ ${gymId}: ${seeded} days with data`);
+      console.log(`  📊 Daily stats cached.`);
     }
-    console.log(`✅ SQLite seeded — full 30-day history, 0 megadoor reads used`);
+
+    // 2. Members (Fetch if cache is low)
+    if (needsMembers) {
+      console.log(`  👥 Fetching members from Firestore...`);
+      const membersSnap = await db.collection("members").get();
+      const members = membersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      ['dokarat', 'marjane', 'casa1', 'casa2'].forEach(gid => {
+        // Broad search for gym location string
+        const gymMembers = members.filter(m => String(m.location || '').toLowerCase().includes(gid));
+        lc.upsertMembers(gid, gymMembers);
+        console.log(`    ✅ ${gid}: ${gymMembers.length} members cached`);
+      });
+    }
+
+    // 3. Payments (Fetch if cache is low)
+    if (needsPayments) {
+      console.log(`  💰 Fetching YTD payments from Firestore...`);
+      const yearStart = new Date(new Date().getFullYear(), 0, 1);
+      const paymentsSnap = await db.collection("payments").where("createdAt", ">=", admin.firestore.Timestamp.fromDate(yearStart)).get();
+      const payments = paymentsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      ['dokarat', 'marjane', 'casa1', 'casa2'].forEach(gid => {
+        const gymPayments = payments.filter(p => String(p.gymId || '').toLowerCase() === gid);
+        lc.upsertPayments(gid, gymPayments);
+        console.log(`    ✅ ${gid}: ${gymPayments.length} payments cached`);
+      });
+    }
+
+    console.log(`✨ SQLite cache seeding complete. REAL data is now ready for display.`);
   } catch (err) {
-    // Quota exhausted — skip gracefully, chart fills in after 08:00 Morocco time
-    console.warn(`⚠️ SQLite seed skipped (quota exhausted): chart history restores after reset`);
+    console.warn(`⚠️ SQLite seed skipped or partial:`, err.message);
   }
 }
 
