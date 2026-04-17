@@ -1988,10 +1988,6 @@ app.get("/api/live-entries", verifyAzureToken, async (req, res) => {
         ? existingEntries.reduce((max, e) => e.timestamp > max ? e.timestamp : max, '')
         : null;
 
-      const FETCH_MIN_GAP_MS = 12000;
-      const lastSyncKey = `liveEntries_sync_${gid}`;
-      const lastSyncTime = parseInt(lc.getMeta(lastSyncKey) || '0');
-      
       if (!lastTimestamp || (Date.now() - lastSyncTime >= FETCH_MIN_GAP_MS)) {
         try {
           const url = `https://firestore.googleapis.com/v1/projects/${process.env.DOOR_PROJECT_ID || 'megadoor-b3ccb'}/databases/(default)/documents:runQuery?key=${process.env.DOOR_FIREBASE_API_KEY || 'AIzaSyBzNbHN_a-4kvI-Z22Ho_pric3mQ7IdiH8'}`;
