@@ -4,8 +4,8 @@ serviceAccount.json
 ngrok.log
 *.log
 .DS_Store
-
 # SQLite Cache
 *.db
 *.db-shm
 *.db-wal
+megafit_cache.db*
