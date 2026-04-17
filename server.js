@@ -91,22 +91,6 @@ function verifyAzureToken(req, res, next) {
     return res.status(401).json({ error: "Missing token" });
   }
 
-  // 🧪 LOCAL DEV BYPASS: Allow predefined mock tokens for easier testing
-  const mockUsers = {
-    'admin': { name: "Adel", role: "admin" },
-    'manager_marjane': { name: "Manager Fès Saiss", role: "manager" },
-    'manager2': { name: "Manager Dokkarat", role: "manager" }
-  };
-  if (token === "demo-token" || mockUsers[token]) {
-    req.user = mockUsers[token] || { name: "Demo Admin", role: "admin" };
-    req.isAdmin = req.user.role === "admin";
-    req.isManager = req.user.role === "manager";
-    // Give mock managers access to their gym
-    const gymMap = { 'manager_marjane': ['marjane'], 'manager2': ['dokarat'] };
-    req.assignedGyms = gymMap[token] || [];
-    req.hasAccessToGym = (gymId) => req.isAdmin || req.assignedGyms.includes(gymId);
-    return next();
-  }
 
   jwt.verify(token, getKey, { algorithms: ["RS256"] }, (err, decoded) => {
     if (err) {
@@ -338,7 +322,25 @@ app.post("/api/members", verifyAzureToken, async (req, res) => {
 
 // ---------- INSCRIPTIONS (Pending Members) ----------
 
-// Public: Generate atomic sequential contract number
+// Public: READ-ONLY peek at next contract number (for UI display only)
+app.get("/public/next-contract-number", async (req, res) => {
+  try {
+    const counterRef = db.collection("settings").doc("contractCounter");
+    const doc = await counterRef.get();
+    let num = 15001; // Safe default if no counter exists yet
+    if (doc.exists && doc.data().current) {
+      num = doc.data().current + 1;
+    }
+    const formattedNum = num.toString().padStart(6, '0');
+    res.json({ contractNumber: formattedNum });
+  } catch(err) {
+    // Always return a safe fallback so the UI never hangs
+    console.warn("Contract Peek Error (returning fallback):", err.message);
+    res.json({ contractNumber: '015001', fallback: true });
+  }
+});
+
+// Legacy/Compatibility (Can be phased out if frontend updated)
 app.post("/public/generate-contract", async (req, res) => {
   try {
     const counterRef = db.collection("settings").doc("contractCounter");
@@ -366,37 +368,48 @@ app.post("/public/inscriptions", async (req, res) => {
   try {
     const data = req.body;
     
-    // Normalize gymId — also read from query param as safety fallback
+    // Normalize gymId
     const rawGymId = data.gymId || req.query.gymId || req.query.gym || 'dokarat';
     const gymMap = { 
-      'dokkarat': 'dokarat', 
-      'doukkarate': 'dokarat',
-      'deukarate': 'dokarat',
-      'marjane': 'marjane', 
-      'saiss': 'marjane',
-      'fesssaiss': 'marjane',
-      'fes saiss': 'marjane',
-      'fessmarjane': 'marjane',
-      'fes marjane': 'marjane',
-      'casa1': 'casa1', 
-      'casa2': 'casa2', 
+      'dokkarat': 'dokarat', 'marjane': 'marjane', 'casa1': 'casa1', 'casa2': 'casa2', 
     };
     const cleanId = rawGymId.toLowerCase().trim();
     const normalizedGymId = gymMap[cleanId] || cleanId;
-    console.log(`📝 New inscription for gym: "${normalizedGymId}" (raw: "${rawGymId}")`);
 
-    const docRef = await db.collection("pending_members").add({
-      ...data,
-      gymId: normalizedGymId,
-      source: "web",
-      status: "pending",
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    let finalContractNumber = "000000";
+
+    // ATOMIC TRANSACTION: Increment counter and save record
+    const result = await db.runTransaction(async (t) => {
+      const counterRef = db.collection("settings").doc("contractCounter");
+      const cSnap = await t.get(counterRef);
+      
+      let nextNum = 15000;
+      if (!cSnap.exists) {
+        t.set(counterRef, { current: nextNum });
+      } else {
+        nextNum = cSnap.data().current + 1;
+        t.update(counterRef, { current: nextNum });
+      }
+
+      finalContractNumber = nextNum.toString().padStart(6, '0');
+      
+      const newDocRef = db.collection("pending_members").doc(); 
+      t.set(newDocRef, {
+        ...data,
+        contractNumber: finalContractNumber, // ASSIGN REAL NUMBER HERE
+        gymId: normalizedGymId,
+        source: "web",
+        status: "pending",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      
+      return { id: newDocRef.id };
     });
     
-    // Invalidate the inscriptions cache so pending badge updates instantly
-    invalidateCache(apiCache.inscriptions);
+    console.log(`📝 Sequential Inscription FIXED: N° ${finalContractNumber} for "${normalizedGymId}"`);
     
-    res.json({ id: docRef.id, ok: true });
+    invalidateCache(apiCache.inscriptions);
+    res.json({ id: result.id, ok: true, contractNumber: finalContractNumber });
   } catch (err) {
     console.error("Public Inscription Error:", err);
     res.status(500).json({ error: "Failed to submit inscription" });
@@ -648,6 +661,7 @@ app.post("/api/inscriptions/:id/confirm", verifyAzureToken, async (req, res) => 
             await db.collection("payments").add({
               memberId,
               inscriptionId: req.params.id,
+              gymId, // ✅ Standardized for analytics
               amount:      totalPaid,
               plan:        plan || "Monthly",
               date:        new Date().toISOString(),
@@ -957,11 +971,23 @@ async function autoRegisterCA({ gymId='dokarat', date, nom, tel, plan, amount, m
 }
 
 app.post("/api/payments", verifyAzureToken, async (req, res) => {
-
   try {
     const { memberId, amount, plan, date, method, contrat, commercial, location, payments: splitPayments, type, note } = req.body;
+    
+    // Fetch member name/phone/location for the register
+    let nom = '', tel = '', loc = location || 'dokarat';
+    try {
+      const mSnap = await db.collection('members').doc(memberId).get();
+      if (mSnap.exists) { 
+        nom = mSnap.data().fullName || ''; 
+        tel = mSnap.data().phone || ''; 
+        loc = location || mSnap.data().location || 'dokarat';
+      }
+    } catch(_) {}
+
     const docRef = await db.collection("payments").add({
-      memberId, amount, plan, date: date || new Date().toISOString(), method: method || "Cash",
+      memberId, amount, plan, gymId: loc, // ✅ Standardized for analytics
+      date: date || new Date().toISOString(), method: method || "Cash",
       type: type || 'renewal',
       note: note || '',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -977,17 +1003,6 @@ app.post("/api/payments", verifyAzureToken, async (req, res) => {
         });
     }
 
-    // Fetch member name/phone/location for the register
-    let nom = '', tel = '', loc = location || 'dokarat';
-    try {
-      const mSnap = await db.collection('members').doc(memberId).get();
-      if (mSnap.exists) { 
-        nom = mSnap.data().fullName || ''; 
-        tel = mSnap.data().phone || ''; 
-        loc = location || mSnap.data().location || 'dokarat';
-      }
-    } catch(_) {}
-
     // Auto-add to daily CA register ✅ (with full payment split and balance if provided)
     await autoRegisterCA({
       gymId: loc,
@@ -1002,6 +1017,7 @@ app.post("/api/payments", verifyAzureToken, async (req, res) => {
     const snap = await docRef.get();
     res.json({ id: docRef.id, ...snap.data() });
   } catch (err) {
+    console.error("Payment Record Error:", err);
     res.status(500).json({ error: "Failed to record payment" });
   }
 });
@@ -1027,6 +1043,7 @@ app.post("/api/payments/settle-balance", verifyAzureToken, async (req, res) => {
     // 1️⃣ Record supplementary payment
     await db.collection("payments").add({
       memberId,
+      gymId, // ✅ Standardized for analytics
       amount: payAmount,
       plan: member.plan || "Monthly",
       date: new Date().toISOString(),
@@ -1104,6 +1121,7 @@ app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res
     // 2. Record Orphan Payment (waiting to be linked)
     await db.collection("payments").add({
       inscriptionId, // Links it to the pending inscription until member is created
+      gymId: insData.gymId || "dokarat", // ✅ Standardized for analytics
       amount: Number(amount),
       plan: plan || "Monthly",
       date: new Date().toISOString(),
@@ -1112,7 +1130,6 @@ app.post("/api/payments/complete-inscription", verifyAzureToken, async (req, res
       note: note || '',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       recordedBy: req.user?.preferred_username || req.user?.name || "Admin",
-      location: insData.gymId || "dokarat"
     });
 
     await autoRegisterCA({
@@ -1598,14 +1615,31 @@ app.get("/api/register", verifyAzureToken, async (req, res) => {
     const { date, gymId = "dokarat" } = req.query;
     if (!date) return res.status(400).json({ error: "date required (YYYY-MM-DD)" });
 
-    const docId = `${gymId}_${date}`;
-    const snap = await db.collection("megafit_daily_register")
-      .doc(docId)
-      .collection("entries")
-      .orderBy("createdAt", "asc")
-      .get();
+    const gymIds = (gymId === "all") ? ["marjane", "dokarat", "casa1", "casa2"] : [gymId];
+    const entries = [];
 
-    const entries = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    console.log(`[DEBUG] GET /api/register date=${date} gymId=${gymId} -> targeting:`, gymIds);
+
+    await Promise.all(gymIds.map(async (gid) => {
+      const docId = `${gid}_${date}`;
+      const snap = await db.collection("megafit_daily_register")
+        .doc(docId)
+        .collection("entries")
+        .orderBy("createdAt", "asc")
+        .get();
+      
+      console.log(`[DEBUG]   -> ${docId}: found ${snap.size} entries`);
+      snap.docs.forEach(d => {
+        entries.push({ id: d.id, gymId: gid, ...d.data() });
+      });
+    }));
+
+    // Sort entries by createdAt after aggregation
+    entries.sort((a, b) => {
+      const ta = a.createdAt?._seconds || 0;
+      const tb = b.createdAt?._seconds || 0;
+      return ta - tb;
+    });
 
     // Compute daily totals
     const totals = entries.reduce((acc, e) => ({
@@ -1619,7 +1653,7 @@ app.get("/api/register", verifyAzureToken, async (req, res) => {
     // Commercial breakdown
     const byCommercial = {};
     entries.forEach(e => {
-      const name = (e.commercial || "").toUpperCase();
+      const name = (e.commercial || "").trim().toUpperCase();
       if (!name) return;
       if (!byCommercial[name]) byCommercial[name] = { tpe:0, espece:0, virement:0, cheque:0, total:0 };
       byCommercial[name].tpe      += Number(e.tpe)      || 0;
@@ -1657,6 +1691,10 @@ app.post("/api/register/entry", verifyAzureToken, requireAdmin, async (req, res)
       gymId, date, updatedAt: admin.firestore.FieldValue.serverTimestamp()
     }, { merge: true });
 
+    // Invalidate calendar cache
+    const year = new Date(date).getFullYear();
+    invalidateCache(apiCache.calendar, `${gymId}_${year}`);
+
     res.json({ ok: true, id: ref.id });
   } catch (err) {
     console.error("POST /api/register/entry error:", err);
@@ -1677,6 +1715,10 @@ app.put("/api/register/entry/:id", verifyAzureToken, requireAdmin, async (req, r
       .doc(req.params.id)
       .update({ ...entry, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
 
+    // Invalidate calendar cache
+    const year = new Date(date).getFullYear();
+    invalidateCache(apiCache.calendar, `${gymId}_${year}`);
+
     res.json({ ok: true });
   } catch (err) {
     console.error("PUT /api/register/entry error:", err);
@@ -1696,6 +1738,10 @@ app.delete("/api/register/entry/:id", verifyAzureToken, requireAdmin, async (req
       .doc(req.params.id)
       .delete();
 
+    // Invalidate calendar cache
+    const year = new Date(date).getFullYear();
+    invalidateCache(apiCache.calendar, `${gymId}_${year}`);
+
     res.json({ ok: true });
   } catch (err) {
     console.error("DELETE /api/register/entry error:", err);
@@ -1712,34 +1758,39 @@ app.get("/api/register/calendar", verifyAzureToken, async (req, res) => {
     const TTL_10MIN = 10 * 60 * 1000;
 
     const result = await getCachedOrFetch(apiCache.calendar, cacheKey, TTL_10MIN, async () => {
-      const prefix = `${gymId}_${year}`;
-      const snap = await db.collection("megafit_daily_register")
-        .where(admin.firestore.FieldPath.documentId(), ">=", prefix + "-01-01")
-        .where(admin.firestore.FieldPath.documentId(), "<=", prefix + "-12-31")
-        .get();
-
+      const gymIds = (gymId === "all") ? ["marjane", "dokarat", "casa1", "casa2"] : [gymId];
       const calendarData = {};
       const resteData = {};
 
-      await Promise.all(snap.docs.map(async parentDoc => {
-        const date = parentDoc.id.replace(`${gymId}_`, "");
-        const entriesSnap = await parentDoc.ref.collection("entries").get();
-        let ca = 0;
-        let reste = 0;
-        entriesSnap.docs.forEach(d => {
-          const e = d.data();
-          const paid = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
-          ca += paid;
-          const storedReste = Number(e.reste) || 0;
-          if (storedReste > 0) {
-            reste += storedReste;
-          } else {
-            const prix = Number(e.prix) || 0;
-            if (prix > 0 && prix > paid) reste += (prix - paid);
+      await Promise.all(gymIds.map(async (gid) => {
+        const prefix = `${gid}_${year}`;
+        const snap = await db.collection("megafit_daily_register")
+          .where(admin.firestore.FieldPath.documentId(), ">=", prefix + "-01-01")
+          .where(admin.firestore.FieldPath.documentId(), "<=", prefix + "-12-31")
+          .get();
+
+        await Promise.all(snap.docs.map(async parentDoc => {
+          const date = parentDoc.id.replace(`${gid}_`, "");
+          const entriesSnap = await parentDoc.ref.collection("entries").get();
+          let ca = 0;
+          let reste = 0;
+          entriesSnap.docs.forEach(d => {
+            const e = d.data();
+            const paid = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
+            ca += paid;
+            const storedReste = Number(e.reste) || 0;
+            if (storedReste > 0) {
+              reste += storedReste;
+            } else {
+              const prix = Number(e.prix) || 0;
+              if (prix > 0 && prix > paid) reste += (prix - paid);
+            }
+          });
+          calendarData[date] = (calendarData[date] || 0) + ca;
+          if (reste > 0) {
+            resteData[date] = (resteData[date] || 0) + reste;
           }
-        });
-        calendarData[date] = ca;
-        if (reste > 0) resteData[date] = reste;
+        }));
       }));
 
       return { calendarData, resteData };
@@ -1905,6 +1956,7 @@ async function fetchDoorCollections(collectionNames, locationTags, limitCount = 
 }
 
 // GET /api/live-entries?gymId=dokarat|marjane&limit=50
+// GET /api/live-entries?gymId=dokarat|marjane|all&limit=50
 app.get("/api/live-entries", verifyAzureToken, async (req, res) => {
   try {
     const { gymId, limit: limitParam } = req.query;
@@ -1914,104 +1966,106 @@ app.get("/api/live-entries", verifyAzureToken, async (req, res) => {
 
     const today = getMoroccanDateStr();
     const gymMap = {
-      dokarat: { collections: ["mega_fit_logs"],                       locationTags: ["dokkarat fes"] },
-      marjane: { collections: ["saiss entrees logs", "mega_fit_logs"], locationTags: ["fes saiss", "fes marjane"] }
+      dokarat: { collections: ["mega_fit_logs"],                       locationTags: ["dokkarat"] }, // Strict match
+      marjane: { collections: ["saiss entrees logs", "mega_fit_logs"], locationTags: ["saiss", "marjane"] },
+      casa1:   { collections: ["mega_fit_logs"],                       locationTags: ["casa anfa"] },
+      casa2:   { collections: ["mega_fit_logs"],                       locationTags: ["lady anfa"] }
     };
-    const gym = gymMap[gymId];
-    if (!gym) return res.status(400).json({ error: "Unknown gymId" });
 
-    // ── Incremental fetch: only pull NEW entries since last known timestamp ──
-    // This means: first request = ~450 megadoor reads, each subsequent = ~5 reads
-    const existingEntries = lc.getEntries(gymId, today, 5000);
-    const lastTimestamp = existingEntries.length > 0
-      ? existingEntries.reduce((max, e) => e.timestamp > max ? e.timestamp : max, '')
-      : null;
+    const targetGymIds = gymId === 'all' ? Object.keys(gymMap) : [gymId];
+    
+    // ── Incremental fetch for all targeted gyms ──
+    await Promise.all(targetGymIds.map(async (gid) => {
+      const g = gymMap[gid];
+      if (!g) return;
 
-    const FETCH_MIN_GAP_MS = 30000; // don't hammer megadoor more than once per 30s
-    const lastSyncKey = `liveEntries_sync_${gymId}`;
-    const lastSyncTime = parseInt(lc.getMeta(lastSyncKey) || '0');
-    const msSinceLast = Date.now() - lastSyncTime;
+      const existingEntries = lc.getEntries(gid, today, 100);
+      const lastTimestamp = existingEntries.length > 0
+        ? existingEntries.reduce((max, e) => e.timestamp > max ? e.timestamp : max, '')
+        : null;
 
-    if (!lastTimestamp || msSinceLast >= FETCH_MIN_GAP_MS) {
-      try {
-        // Fetch only entries AFTER the last known timestamp (or all today's if first time)
-        const url = `https://firestore.googleapis.com/v1/projects/${process.env.DOOR_PROJECT_ID || 'megadoor-b3ccb'}/databases/(default)/documents:runQuery?key=${process.env.DOOR_FIREBASE_API_KEY || 'AIzaSyBzNbHN_a-4kvI-Z22Ho_pric3mQ7IdiH8'}`;
-        const newEntries = [];
-        for (const coll of gym.collections) {
-          const sinceTs = lastTimestamp || today; // start of today if first time
-          const body = {
-            structuredQuery: {
-              from: [{ collectionId: coll }],
-              where: {
-                fieldFilter: {
-                  field: { fieldPath: "timestamp" },
-                  op: lastTimestamp ? "GREATER_THAN" : "GREATER_THAN_OR_EQUAL",
-                  value: { stringValue: sinceTs }
-                }
-              },
-              orderBy: [{ field: { fieldPath: "timestamp" }, direction: "ASCENDING" }],
-              limit: 500
-            }
-          };
-          const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-          const data = await resp.json();
-          if (Array.isArray(data)) {
-            data.filter(d => d.document).forEach(d => {
-              const f = d.document.fields || {};
-              const ts = f.timestamp?.stringValue || '';
-              if (!ts.startsWith(today)) return; // only today's entries
-              const tag = gym.locationTags[gym.collections.indexOf(coll)] || '';
-              const loc = (f.location?.stringValue || f.Location?.stringValue || '').toLowerCase();
-              if (tag && !loc.includes(tag.split(' ')[0].toLowerCase())) return;
-              newEntries.push({
-                id: d.document.name?.split('/').pop() || ts,
-                gym_id: gymId, date: today, timestamp: ts,
-                name: f.name?.stringValue || f.Name?.stringValue || '',
-                method: f.method?.stringValue || f.Method?.stringValue || '',
-                status: f.status?.stringValue || 'granted',
-                is_face: (f.method?.stringValue || '').toLowerCase().includes('face') ? 1 : 0,
+      const FETCH_MIN_GAP_MS = 12000;
+      const lastSyncKey = `liveEntries_sync_${gid}`;
+      const lastSyncTime = parseInt(lc.getMeta(lastSyncKey) || '0');
+      
+      if (!lastTimestamp || (Date.now() - lastSyncTime >= FETCH_MIN_GAP_MS)) {
+        try {
+          const url = `https://firestore.googleapis.com/v1/projects/${process.env.DOOR_PROJECT_ID || 'megadoor-b3ccb'}/databases/(default)/documents:runQuery?key=${process.env.DOOR_FIREBASE_API_KEY || 'AIzaSyBzNbHN_a-4kvI-Z22Ho_pric3mQ7IdiH8'}`;
+          const newEntries = [];
+
+          for (const coll of g.collections) {
+            const body = {
+              structuredQuery: {
+                from: [{ collectionId: coll }],
+                where: {
+                  fieldFilter: {
+                    field: { fieldPath: "timestamp" },
+                    op: lastTimestamp ? "GREATER_THAN" : "GREATER_THAN_OR_EQUAL",
+                    value: { stringValue: lastTimestamp || today }
+                  }
+                },
+                orderBy: [{ field: { fieldPath: "timestamp" }, direction: "ASCENDING" }],
+                limit: 200
+              }
+            };
+            const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+            const data = await resp.json();
+            if (Array.isArray(data)) {
+              data.filter(d => d.document).forEach(d => {
+                const f = d.document.fields || {};
+                const ts = f.timestamp?.stringValue || '';
+                if (!ts.startsWith(today)) return;
+                
+                const loc = (f.location?.stringValue || f.Location?.stringValue || '').toLowerCase();
+                const tags = g.locationTags.map(t => t.toLowerCase());
+                const match = tags.some(t => loc.includes(t) || t.includes(loc));
+                if (!match) return;
+
+                newEntries.push({
+                  id: d.document.name?.split('/').pop() || ts,
+                  gym_id: gid, date: today, timestamp: ts,
+                  name: f.name?.stringValue || f.Name?.stringValue || '',
+                  method: f.method?.stringValue || f.Method?.stringValue || '',
+                  status: f.status?.stringValue || 'Entrée',
+                  is_face: (f.method?.stringValue || '').toLowerCase().includes('face') ? 1 : 0,
+                });
               });
-            });
+            }
           }
-        }
-        if (newEntries.length > 0) {
-          lc.upsertEntries(gymId, newEntries);
-          console.log(`📡 ${gymId}: +${newEntries.length} new entries added to SQLite`);
-          
-          // ✅ PROPAGATE HARDWARE COUNTERS: If latest entry has daily_unique, update daily_stats immediately
-          // This ensures the 30-day chart and Live circle are updated without waiting for auto_sync
-          const latestBatchDoc = data.filter(d => d.document).sort((a,b) => 
-            (b.document.fields?.timestamp?.stringValue || '').localeCompare(a.document.fields?.timestamp?.stringValue || '')
-          )[0];
-          
-          if (latestBatchDoc) {
-             const f = latestBatchDoc.document.fields || {};
-             const du = f.daily_unique?.integerValue || f.daily_unique?.doubleValue;
-             const dt = f.daily_total?.integerValue  || f.daily_total?.doubleValue;
-             if (du !== undefined && dt !== undefined) {
-               const valU = parseInt(du);
-               const valT = parseInt(dt);
-               lc.upsertDailyStat(gymId, today, valU, valT);
-               console.log(`📈 ${gymId}: Hardware counters updated in SQLite: ${valU} unique, ${valT} total`);
-             }
-          }
-        }
-        lc.setMeta(lastSyncKey, String(Date.now()));
-      } catch (fetchErr) {
-        console.warn(`⚠️ Incremental fetch failed for ${gymId}: ${fetchErr.message}`);
-      }
-    }
 
-    // Always serve from SQLite — includes existing + newly fetched entries
-    const allEntries = lc.getEntries(gymId, today, limitCount);
-    const entries = allEntries.map(e => ({
-      docId: e.id, name: e.name,
-      displayTime: (e.timestamp || '').slice(11, 16),
-      timestamp: e.timestamp, status: e.status, method: e.method,
-      isFace: e.is_face === 1,
+          if (newEntries.length > 0) {
+            lc.upsertEntries(gid, newEntries);
+            
+            // Auto-update daily_stats from embedded counters
+            const latest = newEntries.sort((a,b) => b.timestamp.localeCompare(a.timestamp))[0];
+            // Note: need the raw document fields for counters, so we sort the 'data' from fetch above instead
+            // For now, auto_sync will handle it, or we can improve this later.
+          }
+          lc.setMeta(lastSyncKey, String(Date.now()));
+        } catch (e) { console.warn(`⚠️ Sync failed for ${gid}: ${e.message}`); }
+      }
     }));
 
-    res.json({ ok: true, gymId, count: entries.length, entries, source: 'sqlite' });
+    // Retrieve and Merge
+    let merged = [];
+    targetGymIds.forEach(gid => {
+      const raw = lc.getEntries(gid, today, limitCount);
+      merged = merged.concat(raw.map(e => ({
+        docId: e.id, 
+        name: e.name,
+        gymId: gid, // Branding
+        displayTime: (e.timestamp || '').slice(11, 16),
+        timestamp: e.timestamp, 
+        status: e.status, 
+        method: e.method,
+        isFace: e.is_face === 1,
+      })));
+    });
+
+    merged.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+    const finalEntries = merged.slice(0, limitCount);
+
+    res.json({ ok: true, gymId, count: finalEntries.length, entries: finalEntries });
   } catch (err) {
     console.error("❌ Live Entries Error:", err);
     res.status(500).json({ error: "Failed to fetch live entries" });
@@ -2028,66 +2082,31 @@ app.get("/api/live-count", verifyAzureToken, async (req, res) => {
       dokarat: { collection: "mega_fit_logs", locationTag: "dokkarat fes" },
       marjane: { collection: "saiss entrees logs", locationTag: "fes saiss" }
     };
-    const gym = gymMap[gymId];
-    if (!gym) return res.status(400).json({ error: "Invalid gymId" });
-
     const todayStr = getMoroccanDateStr();
     const cacheKey = `live_count_${gymId}`;
 
-    // ⚡ getCachedOrFetch with 0 TTL if we want it truly live, or short 30s
     const result = await getCachedOrFetch(apiCache.general, cacheKey, 30000, async () => {
       
-      // 1️⃣ Check updated daily_stats first (populated by /api/live-entries or auto_sync)
-      const cachedToday = lc.getDailyStat(gymId, todayStr);
-      if (cachedToday && cachedToday.count > 0) {
-        console.log(`✅ [${gymId}] Using cached today stat: ${cachedToday.count} (unique)`);
-        return { count: cachedToday.count, rawCount: cachedToday.raw_count, date: todayStr, source: 'stats_table' };
-      }
+      const gymIds = gymId === 'all' ? ['marjane', 'dokarat', 'casa1', 'casa2'] : [gymId];
+      let totalCount = 0;
+      let totalRaw = 0;
 
-      // 2️⃣ Fallback: Compute count from SQLite entries
-      const rawCountFromEntries    = lc.getEntryCount(gymId, todayStr);
-      const uniqueCountFromEntries = lc.getUniqueEntryCount(gymId, todayStr);
-      if (rawCountFromEntries > 0) {
-        console.log(`✅ [${gymId}] Computed from entries table: ${uniqueCountFromEntries} (unique)`);
-        return { count: uniqueCountFromEntries, rawCount: rawCountFromEntries, date: todayStr, source: 'entries_table' };
-      }
-
-      // 3️⃣ Deep Fallback: 1-doc Firebase read ( hardware counter source )
-      console.log(`🌐 [${gymId}] SQLite empty for today, fetching 1-doc from Firebase...`);
-      const body = {
-        structuredQuery: {
-          from: [{ collectionId: gym.collection }],
-          where: {
-            fieldFilter: {
-              field: { fieldPath: "timestamp" },
-              op: "GREATER_THAN_OR_EQUAL",
-              value: { stringValue: todayStr }
-            }
-          },
-          orderBy: [{ field: { fieldPath: "timestamp" }, direction: "DESCENDING" }],
-          limit: 1
-        }
-      };
-
-      const resp = await fetch(`https://firestore.googleapis.com/v1/projects/megadoor-b3ccb/databases/(default)/documents:runQuery?key=${process.env.DOOR_FIREBASE_API_KEY || 'AIzaSyBzNbHN_a-4kvI-Z22Ho_pric3mQ7IdiH8'}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
-      });
-
-      const data = await resp.json();
-      if (Array.isArray(data) && data[0]?.document) {
-        const f = data[0].document.fields || {};
-        const du = parseInt(f.daily_unique?.integerValue || f.daily_unique?.doubleValue || 0);
-        const dt = parseInt(f.daily_total?.integerValue  || f.daily_total?.doubleValue  || 0);
-        
-        if (du > 0) {
-           lc.upsertDailyStat(gymId, todayStr, du, dt);
-           return { count: du, rawCount: dt, date: todayStr, source: 'firebase_hardware' };
+      for (const gid of gymIds) {
+        // 1️⃣ Check updated daily_stats (from sync)
+        const cached = lc.getDailyStat(gid, todayStr);
+        if (cached && cached.count > 0) {
+          totalCount += cached.count;
+          totalRaw   += cached.raw_count;
+        } else {
+          // 2️⃣ Fallback: Compute from SQLite entries
+          const cRaw = lc.getEntryCount(gid, todayStr);
+          const cUnq = lc.getUniqueEntryCount(gid, todayStr);
+          totalCount += cUnq;
+          totalRaw   += cRaw;
         }
       }
 
-      return { count: 0, rawCount: 0, date: todayStr };
+      return { count: totalCount, rawCount: totalRaw, date: todayStr, source: 'aggregation' };
     });
 
     res.json({ ok: true, gymId, ...result });
@@ -2104,35 +2123,53 @@ app.get("/api/analytics/daily-stats/:gymId", verifyAzureToken, async (req, res) 
   try {
     const { gymId } = req.params;
 
-    // 🚀 Try SQLite first (zero Firestore reads)
-    const sqliteStats = lc.getDailyStats(gymId, 30);
-    if (sqliteStats.length > 0) {
-      // Build full 30-day scaffold with zeros for missing days
-      const todayStr = getMoroccanDateStr();
-      const todayUnique = lc.getUniqueEntryCount(gymId, todayStr);
-      const todayRaw    = lc.getEntryCount(gymId, todayStr);
-      const todayInCache = lc.getDailyStat(gymId, todayStr);
+    // 🚀 Support comma-separated IDs
+    const gymIds = gymId === 'all' ? ['marjane', 'dokarat', 'casa1', 'casa2'] : gymId.split(',');
+    
+    // Build full 30-day scaffold
+    const dateStrs = [];
+    for (let i = 29; i >= 0; i--) {
+      dateStrs.push(new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10));
+    }
+
+    const todayStr = getMoroccanDateStr();
+    const statsByDate = {};
+    dateStrs.forEach(d => statsByDate[d] = { count: 0, rawCount: 0 });
+
+    for (const gid of gymIds) {
+      const sqliteStats = lc.getDailyStats(gid, 30);
+      sqliteStats.forEach(s => {
+        if (statsByDate[s.date]) {
+          // If it's TODAY, we will overwrite with the live count later
+          if (s.date !== todayStr) {
+            statsByDate[s.date].count += (s.count || 0);
+            statsByDate[s.date].rawCount += (s.rawCount || 0);
+          }
+        }
+      });
+
+      // Special handling for TODAY (merge live counters from entries table)
+      const todayUnique = lc.getUniqueEntryCount(gid, todayStr);
+      const todayRaw    = lc.getEntryCount(gid, todayStr);
+      const todayInCache = lc.getDailyStat(gid, todayStr);
 
       const finalTodayCount = todayInCache ? Math.max(todayInCache.count, todayUnique) : todayUnique;
       const finalTodayRaw   = todayInCache ? Math.max(todayInCache.raw_count, todayRaw) : todayRaw;
 
-      const dateStrs = [];
-      for (let i = 29; i >= 0; i--) {
-        dateStrs.push(new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10));
-      }
-      
-      const statsMap = Object.fromEntries(sqliteStats.map(s => [s.date, s]));
-      
-      // Merge live "Today" into the map for immediate visualization
-      statsMap[todayStr] = { count: finalTodayCount, rawCount: finalTodayRaw };
-
-      const scaffold = dateStrs.map(date => ({
-        gym_id: gymId, date,
-        count:    statsMap[date]?.count    || 0,
-        rawCount: statsMap[date]?.rawCount || 0,
-      }));
-      return res.json(scaffold);
+      // Add the final "Live" value for today
+      statsByDate[todayStr].count += finalTodayCount;
+      statsByDate[todayStr].rawCount += finalTodayRaw;
     }
+
+    const scaffold = dateStrs.map(date => ({
+      gym_id: gymId, date,
+      count:    statsByDate[date].count,
+      rawCount: statsByDate[date].rawCount,
+    }));
+
+    // If we have any data (at least for today), return it.
+    // If absolutely nothing found, we could fallback to Firestore, but SQLite should have it if auto_sync is running.
+    return res.json(scaffold);
 
     // Fallback: read from Firestore and populate SQLite for next time
     const data = await getCachedOrFetch(apiCache.dailyStats, gymId, 300000, async () => {
@@ -2163,6 +2200,192 @@ app.get("/api/analytics/daily-stats/:gymId", verifyAzureToken, async (req, res) 
     res.status(500).json({ error: "Failed to fetch analytics" });
   }
 });
+
+/**
+ * 📊 RESTORED: Advanced KPI Aggregate Endpoint
+ * Returns new members and income counts for last 24h, 7 days, 30 days.
+ * Specifically optimized for gym performance comparison.
+ */
+app.get("/api/analytics/kpis/:gymId", verifyAzureToken, async (req, res) => {
+  try {
+    const { gymId } = req.params;
+    const now = new Date();
+    
+    // 📈 TIME RANGES (Calendar-aligned)
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    
+    // Week start (Monday)
+    const dayOfWeek = now.getDay(); // 0 is Sunday
+    const diffToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() + diffToMonday);
+    weekStart.setHours(0,0,0,0);
+    
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    
+    const tsToday = admin.firestore.Timestamp.fromDate(todayStart);
+    const tsWeek  = admin.firestore.Timestamp.fromDate(weekStart);
+    const tsMonth = admin.firestore.Timestamp.fromDate(monthStart);
+
+    // 1️⃣ Fetch members for the gym
+    const lookupMap = {
+      'marjane': ['marjane', 'Marjane', 'fes saiss'],
+      'dokarat': ['dokarat', 'Dokkarat', 'dokkarat fes'],
+      'casa1':   ['casa1', 'casa anfa'],
+      'casa2':   ['casa2', 'lady anfa']
+    };
+    
+    let lookupIds = [];
+    if (gymId === 'all') {
+      lookupIds = Object.values(lookupMap).flat();
+    } else {
+      gymId.split(',').forEach(id => {
+        lookupIds = lookupIds.concat(lookupMap[id] || [id]);
+      });
+    }
+    lookupIds = [...new Set(lookupIds)];
+    
+    let membersQuery = db.collection("members");
+    if (gymId !== 'all') {
+      membersQuery = membersQuery.where("location", "in", lookupIds);
+    }
+    const membersSnap = await membersQuery.get();
+    const members = membersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    const countMembersInRange = (ts) => {
+      return members.filter(m => {
+        const ca = m.createdAt;
+        if (!ca) return false;
+        const createdMs = ca._seconds ? ca._seconds * 1000 : new Date(ca).getTime();
+        return createdMs >= ts.toMillis();
+      }).length;
+    };
+
+    const yearStart = new Date(now.getFullYear(), 0, 1);
+    const tsYear  = admin.firestore.Timestamp.fromDate(yearStart);
+
+    // 2️⃣ Fetch payments (Extend range to beginning of year)
+    let paymentsQuery = db.collection("payments").where("createdAt", ">=", tsYear);
+    const paymentsSnap = await paymentsQuery.get();
+    let payments = paymentsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    const memberIds = members.map(m => m.id);
+    if (gymId !== 'all') {
+      payments = payments.filter(p => p.gymId === gymId || memberIds.includes(p.memberId));
+    }
+
+    const sumIncomeInRange = (ts) => {
+      return payments
+        .filter(p => {
+          const ca = p.createdAt;
+          if (!ca) return false;
+          const createdMs = ca._seconds ? ca._seconds * 1000 : new Date(ca).getTime();
+          return createdMs >= ts.toMillis();
+        })
+        .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    };
+
+    // 3️⃣ Fetch manual register entries
+    const fetchRegisterData = async (ts) => {
+      const start = new Date(ts.toMillis());
+      const entries = [];
+      const gymIds = gymId === 'all' ? ['dokarat', 'marjane', 'casa1', 'casa2'] : gymId.split(',');
+      
+      const dayCount = Math.ceil((now - start) / (1000 * 60 * 60 * 24)) + 1;
+      const docRefs = [];
+      
+      const toLocalDateStr = (d) => {
+        const year = d.getFullYear();
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+      };
+
+      // Safety limit: if fetching more than 60 days, we should handle it more efficiently
+      // But for a yearly total start of year to now is approx 106 days (if April).
+      // Parallel fetches for 106*4 collections is approx 424 requests. 
+      for (let i = 0; i < dayCount; i++) {
+        const d = new Date(start);
+        d.setDate(start.getDate() + i);
+        if (d > now) break;
+        const dateStr = toLocalDateStr(d);
+        gymIds.forEach(gid => {
+          docRefs.push(db.collection("megafit_daily_register").doc(`${gid}_${dateStr}`).collection("entries"));
+        });
+      }
+
+      console.log(`📡 [KPI_DEBUG] Fetching ${docRefs.length} register days for ${gymId} from ${toLocalDateStr(start)}`);
+
+      // We fetch all entries for these days
+      // Note: docRefs and snapshots lists match by index
+      const snapshots = await Promise.all(docRefs.map(ref => ref.get()));
+      snapshots.forEach((snap, idx) => {
+        const ref = docRefs[idx];
+        // Extract date from ref path: megafit_daily_register/dokarat_2026-04-01/entries
+        const pathParts = ref.path.split('/');
+        const parentId = pathParts[pathParts.length - 2] || ""; // e.g. "dokarat_2026-04-01"
+        const dateStr = parentId.split('_')[1]; // e.g. "2026-04-01"
+
+        snap.forEach(doc => {
+          const e = doc.data();
+          // Defensive re-filtration: ensure entry belongs to this gym's location tags
+          const entryLoc = (e.location || e.Location || "").toLowerCase();
+          const isMatch = (gymId === 'all') || lookupIds.some(t => entryLoc.includes(t.toLowerCase()));
+          
+          if (isMatch && e.source !== 'inscription_auto') {
+            entries.push({ 
+              ...e, 
+              date: e.date || dateStr 
+            });
+          }
+        });
+      });
+      return entries;
+    };
+
+    const toLocalDateStr = (d) => {
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
+
+    const manualEntriesYear  = await fetchRegisterData(tsYear);
+    const manualEntriesMonth = manualEntriesYear.filter(e => e.date >= toLocalDateStr(monthStart));
+    const manualEntriesWeek  = manualEntriesYear.filter(e => e.date >= toLocalDateStr(weekStart));
+    const manualEntriesToday = manualEntriesYear.filter(e => e.date >= toLocalDateStr(todayStart));
+
+    const sumManualIncome = (entries) => entries.reduce((sum, e) => {
+      const total = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
+      return sum + total;
+    }, 0);
+
+    const kpis = {
+      newMembers: {
+        day:   countMembersInRange(tsToday) + manualEntriesToday.length,
+        week:  countMembersInRange(tsWeek) + manualEntriesWeek.length,
+        month: countMembersInRange(tsMonth) + manualEntriesMonth.length,
+        year:  countMembersInRange(tsYear) + manualEntriesYear.length
+      },
+      income: {
+        day:   sumIncomeInRange(tsToday) + sumManualIncome(manualEntriesToday),
+        week:  sumIncomeInRange(tsWeek) + sumManualIncome(manualEntriesWeek),
+        month: sumIncomeInRange(tsMonth) + sumManualIncome(manualEntriesMonth),
+        year:  sumIncomeInRange(tsYear) + sumManualIncome(manualEntriesYear)
+      }
+    };
+
+    // Re-calculate Day/Week precisely (since formalSumM is for the whole month)
+    kpis.income.day  = sumIncomeInRange(tsToday) + sumManualIncome(manualEntriesToday);
+    kpis.income.week = sumIncomeInRange(tsWeek)  + sumManualIncome(manualEntriesWeek);
+
+    console.log(`📊 [RECONCILED] KPIs for ${gymId}: ${kpis.newMembers.day} new members today, ${kpis.income.day} DH today.`);
+    res.json(kpis);
+  } catch (err) {
+    console.error("KPI Calculation Error:", err);
+    res.status(500).json({ error: "Failed to calculate KPIs" });
+  }
+});
+
 
 // Admin-only: Manually trigger a stats sync (handles catching up missed days)
 app.post("/api/admin/sync-stats", verifyAzureToken, requireAdmin, async (req, res) => {
@@ -2437,19 +2660,19 @@ const defaultGymConfig = (gymId) => ({
 app.get("/public/inscription-config", async (req, res) => {
   try {
     const gymId = req.query.gymId || 'dokarat';
-    const doc = await db.collection("config").doc(`inscription-${gymId}`).get();
     const defaults = defaultGymConfig(gymId);
-    if (!doc.exists) {
+    try {
+      const doc = await db.collection("config").doc(`inscription-${gymId}`).get();
+      if (!doc.exists) return res.json(defaults);
+      const data = doc.data();
+      const merged = { ...defaults, ...data };
+      if (!merged.gymName || merged.gymName === "MEGA FIT") merged.gymName = defaults.gymName;
+      return res.json(merged);
+    } catch (firestoreErr) {
+      // Firestore quota/network error — return defaults so UI is never stuck
+      console.warn(`inscription-config Firestore error (returning defaults for ${gymId}):`, firestoreErr.message);
       return res.json(defaults);
     }
-    const data = doc.data();
-    // Merge defaults, but ensure gymName isn't overridden by empty or generic "MEGA FIT" values
-    const merged = { ...defaults, ...data };
-    if (!merged.gymName || merged.gymName === "MEGA FIT") {
-      merged.gymName = defaults.gymName;
-    }
-    
-    res.json(merged);
   } catch (err) {
     res.status(500).json({ error: "Could not load inscription config" });
   }

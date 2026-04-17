@@ -6,9 +6,14 @@
 const Database = require('better-sqlite3');
 const path     = require('path');
 
-// Store the DB file next to server.js (persists between Render restarts)
-const DB_PATH = path.join(__dirname, 'megafit_cache.db');
-const db      = new Database(DB_PATH);
+const fs       = require('fs');
+
+// 🚀 Production Persistence: Use /var/data (Render Disk) if available, otherwise fallback to local
+const DATA_DIR = fs.existsSync('/var/data') ? '/var/data' : __dirname;
+const DB_PATH  = path.join(DATA_DIR, 'megafit_cache.db');
+
+console.log(`📡 SQLite database target: ${DB_PATH}`);
+const db = new Database(DB_PATH);
 
 // ── Performance pragmas ─────────────────────────────────────────────────────
 db.pragma('journal_mode = WAL');   // concurrent reads + writes
@@ -75,6 +80,20 @@ db.exec(`
 
 console.log(`💾 SQLite cache initialised → ${DB_PATH}`);
 
+// ── HELPERS ──────────────────────────────────────────────────────────────────
+
+function getGymIds(gymId) {
+  if (!gymId || gymId === 'all') return [];
+  if (Array.isArray(gymId)) return gymId;
+  return String(gymId).split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function buildInClause(gymIds, prefix = 'gym_id') {
+  if (gymIds.length === 0) return { sql: '1=1', params: [] }; // match all if empty
+  const placeholders = gymIds.map(() => '?').join(',');
+  return { sql: `${prefix} IN (${placeholders})`, params: gymIds };
+}
+
 // ── ENTRIES ─────────────────────────────────────────────────────────────────
 
 const insertEntry = db.prepare(`
@@ -99,27 +118,32 @@ function upsertEntries(gymId, entriesArr) {
 }
 
 function getEntries(gymId, date, limit = 50) {
+  const g = buildInClause(getGymIds(gymId));
+  let sql = `SELECT * FROM entries WHERE ${g.sql}`;
+  let params = [...g.params];
+
   if (date) {
-    return db.prepare(
-      'SELECT * FROM entries WHERE gym_id=? AND date=? ORDER BY timestamp DESC LIMIT ?'
-    ).all(gymId, date, limit);
+    sql += ` AND date=?`;
+    params.push(date);
   }
-  return db.prepare(
-    'SELECT * FROM entries WHERE gym_id=? ORDER BY timestamp DESC LIMIT ?'
-  ).all(gymId, limit);
+
+  sql += ` ORDER BY timestamp DESC LIMIT ?`;
+  params.push(limit);
+
+  return db.prepare(sql).all(...params);
 }
 
 function getEntryCount(gymId, date) {
-  const row = db.prepare(
-    'SELECT COUNT(*) as cnt FROM entries WHERE gym_id=? AND date=?'
-  ).get(gymId, date);
+  const g = buildInClause(getGymIds(gymId));
+  const sql = `SELECT COUNT(*) as cnt FROM entries WHERE ${g.sql} AND date=?`;
+  const row = db.prepare(sql).get(...g.params, date);
   return row?.cnt || 0;
 }
 
 function getUniqueEntryCount(gymId, date) {
-  const row = db.prepare(
-    'SELECT COUNT(DISTINCT name) as cnt FROM entries WHERE gym_id=? AND date=? AND name != \'\''
-  ).get(gymId, date);
+  const g = buildInClause(getGymIds(gymId));
+  const sql = `SELECT COUNT(DISTINCT name) as cnt FROM entries WHERE ${g.sql} AND date=? AND name != ''`;
+  const row = db.prepare(sql).get(...g.params, date);
   return row?.cnt || 0;
 }
 
@@ -135,16 +159,28 @@ function upsertDailyStat(gymId, date, count, rawCount) {
 }
 
 function getDailyStats(gymId, days = 30) {
-  const results = db.prepare(
-    'SELECT date, count, raw_count FROM daily_stats WHERE gym_id=? ORDER BY date DESC LIMIT ?'
-  ).all(gymId, days);
+  const g = buildInClause(getGymIds(gymId));
+  let sql = '';
+  if (getGymIds(gymId).length <= 1 && gymId !== 'all') {
+    sql = `SELECT date, count, raw_count FROM daily_stats WHERE ${g.sql} ORDER BY date DESC LIMIT ?`;
+  } else {
+    // Aggregation mode
+    sql = `SELECT date, SUM(count) as count, SUM(raw_count) as raw_count 
+           FROM daily_stats WHERE ${g.sql} 
+           GROUP BY date ORDER BY date DESC LIMIT ?`;
+  }
+  
+  const results = db.prepare(sql).all(...g.params, days);
   return results.map(r => ({ date: r.date, count: r.count, rawCount: r.raw_count }));
 }
 
 function getDailyStat(gymId, date) {
-  return db.prepare(
-    'SELECT * FROM daily_stats WHERE gym_id=? AND date=?'
-  ).get(gymId, date);
+  const g = buildInClause(getGymIds(gymId));
+  if (getGymIds(gymId).length <= 1 && gymId !== 'all') {
+    return db.prepare(`SELECT * FROM daily_stats WHERE ${g.sql} AND date=?`).get(...g.params, date);
+  }
+  // Aggregated
+  return db.prepare(`SELECT SUM(count) as count, SUM(raw_count) as raw_count FROM daily_stats WHERE ${g.sql} AND date=?`).get(...g.params, date);
 }
 
 // ── MEMBERS ──────────────────────────────────────────────────────────────────
@@ -179,10 +215,9 @@ function upsertMembers(gymId, membersArr) {
 }
 
 function getMembers(gymId) {
-  if (!gymId || gymId === 'all') {
-    return db.prepare('SELECT * FROM members_cache ORDER BY full_name').all();
-  }
-  return db.prepare('SELECT * FROM members_cache WHERE gym_id=? ORDER BY full_name').all(gymId);
+  const g = buildInClause(getGymIds(gymId));
+  const sql = `SELECT * FROM members_cache WHERE ${g.sql} ORDER BY full_name`;
+  return db.prepare(sql).all(...g.params);
 }
 
 // ── PAYMENTS ─────────────────────────────────────────────────────────────────
@@ -210,12 +245,9 @@ function upsertPayments(gymId, paymentsArr) {
 }
 
 function getPayments(gymId, limit = 200) {
-  if (!gymId || gymId === 'all') {
-    return db.prepare('SELECT * FROM payments_cache ORDER BY date DESC LIMIT ?').all(limit);
-  }
-  return db.prepare(
-    'SELECT * FROM payments_cache WHERE gym_id=? ORDER BY date DESC LIMIT ?'
-  ).all(gymId, limit);
+  const g = buildInClause(getGymIds(gymId));
+  const sql = `SELECT * FROM payments_cache WHERE ${g.sql} ORDER BY date DESC LIMIT ?`;
+  return db.prepare(sql).all(...g.params, limit);
 }
 
 // ── META ─────────────────────────────────────────────────────────────────────
@@ -261,3 +293,4 @@ module.exports = {
   // info
   getCacheStats,
 };
+
