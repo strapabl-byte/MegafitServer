@@ -165,6 +165,7 @@ const apiCache = {
   general: {},      // for generic counts and simple flags
   profiles: {},     // keyed by memberId — 60s TTL
   calendar: {},     // keyed by gymId_year — 10min TTL (expensive sub-collection read)
+  kpis: {},         // keyed by gymId — 2min TTL (protects register subcollection reads)
 };
 
 async function getCachedOrFetch(cacheObj, key, ttlMs, fetchFn) {
@@ -2228,9 +2229,18 @@ app.get("/api/analytics/daily-stats/:gymId", verifyAzureToken, async (req, res) 
  * Returns new members and income counts for last 24h, 7 days, 30 days.
  * Specifically optimized for gym performance comparison.
  */
+const TTL_2MIN = 2 * 60 * 1000;
 app.get("/api/analytics/kpis/:gymId", verifyAzureToken, async (req, res) => {
   try {
     const { gymId } = req.params;
+
+    // ⚡ 2-minute RAM cache — protects Firestore register subcollection reads
+    const kpiCacheKey = gymId;
+    const kpiCached = apiCache.kpis[kpiCacheKey];
+    if (kpiCached && (Date.now() - kpiCached.ts < TTL_2MIN)) {
+      console.log(`⚡ [CACHE HIT] KPIs for '${gymId}' returned from RAM (saved Firestore reads)`);
+      return res.json(kpiCached.data);
+    }
     const now = new Date();
     
     // 📈 TIME RANGES (Calendar-aligned)
@@ -2388,6 +2398,8 @@ app.get("/api/analytics/kpis/:gymId", verifyAzureToken, async (req, res) => {
     kpis.income.day  = sumIncomeInRange(tsToday) + sumManualIncome(manualEntriesToday);
     kpis.income.week = sumIncomeInRange(tsWeek)  + sumManualIncome(manualEntriesWeek);
 
+    // 💾 Store in RAM cache before responding
+    apiCache.kpis[kpiCacheKey] = { data: kpis, ts: Date.now() };
     console.log(`📊 [RECONCILED] KPIs for ${gymId}: ${kpis.newMembers.day} new members today, ${kpis.income.day} DH today.`);
     res.json(kpis);
   } catch (err) {
