@@ -2850,14 +2850,11 @@ async function seedSQLiteHistoricalStats() {
       });
     }
     console.log(`  📊 Daily stats cached.`);
+    console.log(`✨ SQLite cache seeding complete. Daily stats view is now ready.`);
   } catch (err) {
     if (err.code === 8) setQuotaExceeded();
-    console.error('❌  seedSQLiteHistoricalStats Error:', err.message);
-  }
-}
-    console.log(`✨ SQLite cache seeding complete. REAL data is now ready for display.`);
-  } catch (err) {
     console.warn(`⚠️ SQLite seed skipped or partial:`, err.message);
   }
 }
+
 
