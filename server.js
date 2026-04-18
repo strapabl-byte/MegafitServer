@@ -86,8 +86,9 @@ function verifyAzureToken(req, res, next) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
 
-  // 🛠️ DEVELOPMENT BYPASS: Support for Dashboard's Local RBAC Demo mode
-  if (token === "demo-token") {
+  // 🛠️ DEVELOPMENT BYPASS: Only allowed in non-production environments
+  if (token === "demo-token" && process.env.NODE_ENV !== "production") {
+    console.warn("⚠️ [DEV ONLY] demo-token bypass active. Disable in production!");
     req.user = { 
       name: "Super Admin (Bypass)", 
       oid: "demo-admin-oid",
@@ -99,6 +100,11 @@ function verifyAzureToken(req, res, next) {
     req.assignedGyms = ["all"];
     req.hasAccessToGym = () => true;
     return next();
+  }
+  // 🔒 Block demo-token in production
+  if (token === "demo-token" && process.env.NODE_ENV === "production") {
+    console.warn("🚫 demo-token rejected in production mode.");
+    return res.status(401).json({ error: "demo-token not allowed in production" });
   }
 
   if (!token) {
