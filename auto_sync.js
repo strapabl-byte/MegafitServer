@@ -155,7 +155,11 @@ const parseNum = (field) => {
   return null;
 };
 
-async function syncGymCounts(db, apiCache, daysBack = 1) {
+async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => false) {
+  if (checkQuota()) {
+    console.warn("⚠️ [SYNC SKIPPED] Quota exceeded. Silence mode active.");
+    return;
+  }
   const admin = require("firebase-admin");
   const today = moroccoDateStr();
 
@@ -235,7 +239,7 @@ async function syncGymCounts(db, apiCache, daysBack = 1) {
 /**
  * Schedule: hourly during the day (08:00–23:00 Morocco) + nightly at 00:05
  */
-function scheduleNightlySync(db, apiCache) {
+function scheduleNightlySync(db, apiCache, checkQuota = () => false) {
   // ── Nightly full sync at 00:05 Morocco ──────────────────────────────────
   const moroccoNow = new Date(Date.now() + 3600000);
   const nextNight  = new Date(moroccoNow);
@@ -245,8 +249,8 @@ function scheduleNightlySync(db, apiCache) {
 
   console.log(`⏰ Nightly sync scheduled in ${Math.round(msToNight / 60000)} min (00:05 Morocco)`);
   setTimeout(() => {
-    syncGymCounts(db, apiCache, 7).catch(e => console.error("❌ Nightly sync error:", e));
-    scheduleNightlySync(db, apiCache); // reschedule for next night
+    syncGymCounts(db, apiCache, 7, checkQuota).catch(e => console.error("❌ Nightly sync error:", e));
+    scheduleNightlySync(db, apiCache, checkQuota); // reschedule for next night
   }, msToNight);
 
   // ── Hourly today-only sync ───────────────────────────────────────────────
@@ -255,7 +259,7 @@ function scheduleNightlySync(db, apiCache) {
     const h = new Date(Date.now() + 3600000).getHours(); // Morocco hour
     if (h >= 7 && h <= 23) { // Only during gym hours
       console.log(`⏱️  Hourly sync triggered (${h}:xx Morocco)`);
-      syncGymCounts(db, apiCache, 0).catch(e => console.error("❌ Hourly sync error:", e));
+      syncGymCounts(db, apiCache, 0, checkQuota).catch(e => console.error("❌ Hourly sync error:", e));
     }
   }, 60 * 60 * 1000); // every 60 minutes
 

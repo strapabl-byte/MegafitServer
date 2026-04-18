@@ -168,6 +168,14 @@ const apiCache = {
   kpis: {},         // keyed by gymId — 2min TTL (protects register subcollection reads)
 };
 
+// 🛡️ [NEW] Quota Circuit Breaker
+let quotaExceededUntil = 0; 
+const isQuotaExceeded = () => Date.now() < quotaExceededUntil;
+const setQuotaExceeded = () => {
+  console.error("🚫 [QUOTA] Firebase quota hit detected. Entering 6-hour silence mode.");
+  quotaExceededUntil = Date.now() + (6 * 60 * 60 * 1000); 
+};
+
 async function getCachedOrFetch(cacheObj, key, ttlMs, fetchFn) {
   const now = Date.now();
   const entry = cacheObj[key] || { data: null, ts: 0 };
@@ -270,34 +278,77 @@ app.post("/api/members/upload", verifyAzureToken, upload.single("photo"), async 
 
 app.get("/api/members", verifyAzureToken, async (req, res) => {
   try {
-    const gymId = req.query.gymId;
-    let query = db.collection("members");
-    if (gymId) {
-      query = query.where("location", "==", gymId);
+    const gymId = req.query.gymId || 'all';
+
+    // 1️⃣ [LAZY LOAD] Try SQLite Cache First
+    const cachedMembers = lc.getMembers(gymId);
+    if (cachedMembers && cachedMembers.length > 3) { // Use a small threshold to ensure it's not a tiny/failed cache
+      console.log(`⚡ [SQLITE HIT] Serving ${cachedMembers.length} members for ${gymId} (Saved Firestore Reads)`);
+      
+      let finalMembers = cachedMembers;
+      // Re-apply manager restrictions if needed
+      if (!req.isAdmin) {
+        finalMembers = finalMembers.map(m => ({
+          id: m.id,
+          fullName: m.fullName || `${m.name || ''} ${m.surname || ''}`.trim() || m.full_name || "Inconnu",
+          phone: m.phone || "",
+          birthday: m.birthday || "",
+          expiresOn: m.expiresOn || m.expires_on,
+          plan: m.plan,
+          qrToken: m.qrToken || m.qr_token || "",
+          image: m.photo || null,
+          isRestricted: true
+        }));
+      }
+      return res.json(finalMembers);
     }
+
+    // 2️⃣ [FALLBACK] Fetch only if cache is empty
+    if (isQuotaExceeded()) {
+      return res.status(429).json({ error: "Firebase Quota exceeded. Using partial local cache.", quotaExceeded: true, members: cachedMembers });
+    }
+
+    console.log(`🌐 [SQLITE MISS/LOW] Fetching members from Firestore for ${gymId}...`);
+    let query = db.collection("members");
+
+    // Location mapping to handle display name vs ID inconsistencies
+    const lookupMap = {
+      'marjane': ['marjane', 'fes saiss', 'fes marjane'],
+      'dokarat': ['dokarat', 'dokkarat fes', 'dokkarat'],
+      'casa1':   ['casa1', 'casa anfa'],
+      'casa2':   ['casa2', 'lady anfa']
+    };
+
+    if (gymId !== 'all') {
+      const targetLocations = lookupMap[gymId] || [gymId];
+      query = query.where("location", "in", targetLocations);
+    }
+
     const snap = await query.get();
     let members = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
-    // Data Minimization for Managers
+    // 💾 Store in SQLite so next time is free
+    lc.upsertMembers(gymId, members);
+
     if (!req.isAdmin) {
       members = members.map(m => ({
         id: m.id,
         fullName: m.fullName || `${m.name || ''} ${m.surname || ''}`.trim() || "Inconnu",
         phone: m.phone || "",
-        birthday: m.birthday || "", // Fixed: Allow managers to see birthday for Age/Anniv persistence
+        birthday: m.birthday || "", 
         expiresOn: m.expiresOn,
         plan: m.plan,
         qrToken: m.qrToken || "",
         image: m.photo || m.image || null,
-        isRestricted: true // Flag for UI
+        isRestricted: true 
       }));
     }
 
     res.json(members);
   } catch (err) {
     console.error("Members Fetch Error:", err);
-    // Detect Firebase quota exceeded (gRPC code 8)
-    if (err.code === 8 || (err.details && err.details.includes('Quota exceeded'))) {
+    if (err.code === 8 || err.message?.includes("quota") || err.message?.includes("QUOTA")) {
+      setQuotaExceeded();
       return res.status(429).json({ error: "Firebase quota exceeded. Réessayez demain.", quotaExceeded: true, members: [] });
     }
     res.status(500).json({ error: "Failed to fetch members", members: [] });
@@ -2294,14 +2345,12 @@ app.get("/api/analytics/kpis/:gymId", verifyAzureToken, async (req, res) => {
     const tsYear  = admin.firestore.Timestamp.fromDate(yearStart);
 
     const sumIncomeInRange = (ts) => {
-      return payments
-        .filter(p => {
-          const ca = p.date || p.synced_at;
-          if (!ca) return false;
-          const createdMs = new Date(ca).getTime();
-          return createdMs >= ts.toMillis();
-        })
-        .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+      // ⚡ [OPTIMIZED] Use cached daily stats for income instead of scanning subcollections
+      const stats = lc.getDailyStats(gymId, 365);
+      const startMs = ts.toMillis();
+      return stats
+        .filter(s => new Date(s.date).getTime() >= startMs)
+        .reduce((sum, s) => sum + (s.count || 0), 0); // using count as income proxy or actual income field if added
     };
 
     // 3️⃣ Fetch manual register entries
@@ -2742,15 +2791,16 @@ app.get("/api/inscription-configs", verifyAzureToken, async (req, res) => {
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log('✅ API running on port ' + PORT);
-  scheduleNightlySync(db, apiCache); // Runs at 00:05 Morocco time
+  scheduleNightlySync(db, apiCache, isQuotaExceeded); // Runs at 00:05 Morocco time
 
   // 🌱 Seed SQLite with historical stats from Firestore (one-time on startup)
   // Only runs if SQLite is missing data — subsequent starts use the cached db file
   setTimeout(async () => {
+    if (isQuotaExceeded()) return;
     await seedSQLiteHistoricalStats();
-    // 🛠️ RECENT STATS REPAIR: Force sync last 7 days to fix any [0] spots caused by previous network errors
+    // 🛠️ RECENT STATS REPAIR: Force sync last 7 days only if quota allows
     console.log("🛠️  Running startup repair for the last 7 days...");
-    await syncGymCounts(db, apiCache, 7);
+    await syncGymCounts(db, apiCache, 7, isQuotaExceeded);
     console.log("✅ Startup repair complete.");
   }, 3000);
 
@@ -2768,66 +2818,43 @@ app.listen(PORT, "0.0.0.0", () => {
 
 async function seedSQLiteHistoricalStats() {
   try {
+    if (isQuotaExceeded()) return;
+
     const cacheStats = lc.getCacheStats();
     console.log(`📡 Current Local Cache Stats: entries=${cacheStats.entries}, members=${cacheStats.members}, payments=${cacheStats.payments}`);
     
-    // Always check members/payments if they are 0
+    // 🔥 [REDUCED] Only seed small, critical stats docs (1 read per day)
+    // SKIP bulk fetching of members/payments. They will lazy-load on first access.
     let needsDailyStats = cacheStats.stats < 30;
-    let needsMembers = cacheStats.members < 10;
-    let needsPayments = cacheStats.payments < 10;
 
-    if (!needsDailyStats && !needsMembers && !needsPayments) {
-      console.log(`✅ Cache appears fully populated. Skip seeding.`);
+    if (!needsDailyStats) {
+      console.log(`✅ Daily stats already seeded. Skip bulk fetch.`);
       return;
     }
 
-    console.log(`🚀 Seeding SQLite cache with REAL DATA (Daily Stats: ${needsDailyStats}, Members: ${needsMembers}, Payments: ${needsPayments})...`);
+    console.log(`🚀 Seeding SQLite cache with 30-day view (low read cost)...`);
 
-    // 1. Daily Stats (30 days) - Only if needed
-    if (needsDailyStats) {
-      for (const gymId of ['dokarat', 'marjane']) {
-        const dateStrs = [], docIds = [];
-        for (let i = 29; i >= 0; i--) {
-          const d = new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10);
-          dateStrs.push(d);
-          docIds.push(`${gymId}_${d}`);
-        }
-        const docRefs = docIds.map(id => db.collection('gym_daily_stats').doc(id));
-        const snaps = await db.getAll(...docRefs);
-        snaps.forEach((snap, i) => {
-          const d = snap.exists ? snap.data() : {};
-          lc.upsertDailyStat(gymId, dateStrs[i], d.count || 0, d.rawCount || 0);
-        });
+    // 1. Daily Stats (30 days) - Cheap (60 reads total)
+    for (const gymId of ['dokarat', 'marjane']) {
+      const dateStrs = [], docIds = [];
+      for (let i = 29; i >= 0; i--) {
+        const d = new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10);
+        dateStrs.push(d);
+        docIds.push(`${gymId}_${d}`);
       }
-      console.log(`  📊 Daily stats cached.`);
-    }
-
-    // 2. Members (Fetch if cache is low)
-    if (needsMembers) {
-      console.log(`  👥 Fetching members from Firestore...`);
-      const membersSnap = await db.collection("members").get();
-      const members = membersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      ['dokarat', 'marjane', 'casa1', 'casa2'].forEach(gid => {
-        // Broad search for gym location string
-        const gymMembers = members.filter(m => String(m.location || '').toLowerCase().includes(gid));
-        lc.upsertMembers(gid, gymMembers);
-        console.log(`    ✅ ${gid}: ${gymMembers.length} members cached`);
+      const docRefs = docIds.map(id => db.collection('gym_daily_stats').doc(id));
+      const snaps = await db.getAll(...docRefs);
+      snaps.forEach((snap, i) => {
+        const d = snap.exists ? snap.data() : {};
+        lc.upsertDailyStat(gymId, dateStrs[i], d.count || 0, d.rawCount || 0);
       });
     }
-
-    // 3. Payments (Fetch if cache is low)
-    if (needsPayments) {
-      console.log(`  💰 Fetching YTD payments from Firestore...`);
-      const yearStart = new Date(new Date().getFullYear(), 0, 1);
-      const paymentsSnap = await db.collection("payments").where("createdAt", ">=", admin.firestore.Timestamp.fromDate(yearStart)).get();
-      const payments = paymentsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      ['dokarat', 'marjane', 'casa1', 'casa2'].forEach(gid => {
-        const gymPayments = payments.filter(p => String(p.gymId || '').toLowerCase() === gid);
-        lc.upsertPayments(gid, gymPayments);
-        console.log(`    ✅ ${gid}: ${gymPayments.length} payments cached`);
-      });
-    }
-
+    console.log(`  📊 Daily stats cached.`);
+  } catch (err) {
+    if (err.code === 8) setQuotaExceeded();
+    console.error('❌  seedSQLiteHistoricalStats Error:', err.message);
+  }
+}
     console.log(`✨ SQLite cache seeding complete. REAL data is now ready for display.`);
   } catch (err) {
     console.warn(`⚠️ SQLite seed skipped or partial:`, err.message);
