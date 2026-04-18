@@ -86,6 +86,21 @@ function verifyAzureToken(req, res, next) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
 
+  // 🛠️ DEVELOPMENT BYPASS: Support for Dashboard's Local RBAC Demo mode
+  if (token === "demo-token") {
+    req.user = { 
+      name: "Super Admin (Bypass)", 
+      oid: "demo-admin-oid",
+      roles: ["Admin"],
+      preferred_username: "admin@local.dev"
+    };
+    req.isAdmin = true;
+    req.isManager = false;
+    req.assignedGyms = ["all"];
+    req.hasAccessToGym = () => true;
+    return next();
+  }
+
   if (!token) {
     console.warn("⚠️ verifyAzureToken: Missing token in header");
     return res.status(401).json({ error: "Missing token" });
@@ -1682,6 +1697,7 @@ app.post("/api/register/entry", verifyAzureToken, requireAdmin, async (req, res)
       .collection("entries")
       .add({
         ...entry,
+        location: gymId, // 🛡️ Permanent Fix: Ensures entry is always captured in revenue totals
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         createdBy: req.user?.preferred_username || req.user?.name || "system"
       });
