@@ -160,15 +160,11 @@ module.exports = function inscriptionsRouter({ db, admin, apiCache, uploadBase64
       else if (sName.includes('trim') || sName.includes('3 mois')) plan = 'Quarterly';
       else if (sName.includes('sem') || sName.includes('6 mois')) plan = 'Semi-Annual';
 
-      // Search existing member by phone or CIN
+      // Only link if explicitly selected via autocomplete in the form
       let existingMember = null;
-      if (ins.telephone) {
-        const q = await db.collection('members').where('phone', '==', ins.telephone).limit(1).get();
-        if (!q.empty) existingMember = q.docs[0];
-      }
-      if (!existingMember && ins.cin) {
-        const q = await db.collection('members').where('cin', '==', ins.cin).limit(1).get();
-        if (!q.empty) existingMember = q.docs[0];
+      if (ins.selectedMemberId) {
+        const doc = await db.collection('members').doc(ins.selectedMemberId).get();
+        if (doc.exists) existingMember = doc;
       }
 
       const memberData = {
