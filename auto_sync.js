@@ -177,36 +177,47 @@ async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => fals
         let unique, raw;
 
         if (dateStr === today && !gym.forceManualCount) {
-          // ✅ TODAY: Use new fast path — fetch 1 doc, read device counters
-          const latestDoc = await fetchLatestDoc(gym.collection, dateStr);
+          // ✅ TODAY: Fetch ALL entries from Firestore REST → upsert to SQLite → count from SQLite
+          // Handles: device restarts (daily_unique resets), late-arriving buffered entries
+          const DOOR_URL = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT}/databases/(default)/documents:runQuery?key=${DOOR_API_KEY}`;
+          const allCollections = gym.collections || [gym.collection];
+          const todayEntries = [];
+          const tags = (gym.locationTags || [gym.locationTag]).map(t => t.toLowerCase().trim());
 
-          if (latestDoc) {
-            const f = latestDoc.fields || {};
-            const loc = (f.location?.stringValue || "").toLowerCase().trim();
-            const tags = (gym.locationTags || [gym.locationTag]).map(t => t.toLowerCase().trim());
-            const locationOk = tags.some(t => loc === t || loc.includes(t) || t.includes(loc));
+          for (const coll of allCollections) {
+            try {
+              const body = { structuredQuery: { from: [{ collectionId: coll }], where: { fieldFilter: { field: { fieldPath: 'timestamp' }, op: 'GREATER_THAN_OR_EQUAL', value: { stringValue: dateStr } } }, orderBy: [{ field: { fieldPath: 'timestamp' }, direction: 'ASCENDING' }], limit: 500 } };
+              const resp = await fetch(DOOR_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+              const data = await resp.json();
+              if (!Array.isArray(data)) continue;
+              data.filter(d => d.document).forEach(d => {
+                const f = d.document.fields || {};
+                const ts = f.timestamp?.stringValue || '';
+                if (!ts.startsWith(dateStr)) return;
+                const loc = (f.location?.stringValue || '').toLowerCase();
+                if (!tags.some(t => loc === t || loc.includes(t) || t.includes(loc))) return;
+                todayEntries.push({ id: d.document.name?.split('/').pop() || ts, gym_id: gym.id, date: dateStr, timestamp: ts, name: f.name?.stringValue || '', method: f.method?.stringValue || '', status: f.status?.stringValue || 'Entrée', is_face: (f.method?.stringValue || '').toLowerCase().includes('face') ? 1 : 0 });
+              });
+            } catch (e) { console.warn(`  ❌ REST Fetch failed for ${coll}:`, e.message); }
+          }
 
-            const dailyUnique = parseNum(f.daily_unique);
-            const dailyTotal  = parseNum(f.daily_total);
+          // Save ALL today's entries into SQLite entries table
+          if (todayEntries.length > 0) getLC().upsertEntries(gym.id, todayEntries);
 
-            if (locationOk && dailyUnique !== null && dailyTotal !== null) {
-              // New format ✅ — device-computed, 1 read
-              unique = dailyUnique;
-              raw    = dailyTotal;
-              console.log(`  ⚡ ${gym.id} / ${dateStr}: ${unique} unique, ${raw} raw (fast path)`);
-            } else {
-              // Old format fallback — manual count across one or more collections
-              console.log(`  ⚠️  ${gym.id}: daily_unique missing or location mismatch, using fallback count`);
-              const allDocs = await fetchRecentLogsFromCollections(gym.collections || [gym.collection], dateStr);
-              ({ unique, raw } = deduplicateForDate(allDocs, gym.locationTags || [gym.locationTag], dateStr));
-              console.log(`  📊 ${gym.id} / ${dateStr}: ${unique} unique, ${raw} raw (fallback)`);
-            }
+          // Count from SQLite — always accurate regardless of device restarts
+          const sqliteUnique = getLC().getUniqueEntryCount(gym.id, dateStr);
+          const sqliteRaw    = getLC().getEntryCount(gym.id, dateStr);
+
+          unique = sqliteUnique;
+          raw    = sqliteRaw;
+
+          if (unique > 0) {
+            console.log(`  ✅ ${gym.id} / ${dateStr}: ${unique} unique, ${raw} raw (${todayEntries.length} fetched from Firestore)`);
           } else {
-            unique = 0; raw = 0;
             console.log(`  ℹ️  ${gym.id}: No entries today yet`);
           }
         } else {
-          // 📅 PAST DAYS: Use old method (daily_unique not reliable for past docs)
+          // 📅 PAST DAYS: fetch and count from REST
           const allDocs = await fetchRecentLogsFromCollections(gym.collections || [gym.collection], dateStr);
           ({ unique, raw } = deduplicateForDate(allDocs, gym.locationTags || [gym.locationTag], dateStr));
           console.log(`  📅 ${gym.id} / ${dateStr}: ${unique} unique, ${raw} raw (historical)`);
@@ -231,6 +242,37 @@ async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => fals
       } catch (err) {
         console.error(`  ❌ Sync failed for ${gym.id} / ${dateStr}:`, err.message);
       }
+    }
+    
+    // 💸 SYNC DAILY REGISTER (Payments)
+    try {
+      for (const dateStr of dates) {
+        const gymId = gym.id;
+        const docId = `${gymId}_${dateStr}`;
+        const snap = await db.collection("megafit_daily_register")
+          .doc(docId)
+          .collection("entries")
+          .orderBy("createdAt", "asc")
+          .get();
+        
+        if (!snap.empty) {
+          const entries = snap.docs.map(d => {
+            const data = d.data();
+            // Convert Firestore timestamps to ISO strings for SQLite
+            const createdAtStr = data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : 
+                                 (data.createdAt || new Date().toISOString());
+            return { 
+              id: d.id, 
+              ...data, 
+              createdAt: createdAtStr 
+            };
+          });
+          getLC().upsertRegister(gymId, dateStr, entries);
+          console.log(`  💸 Synced ${entries.length} register entries for ${gymId} / ${dateStr}`);
+        }
+      }
+    } catch (err) {
+      console.error(`  ❌ Register sync failed for ${gym.id}:`, err.message);
     }
   }
   console.log("✨ Auto-sync complete.");

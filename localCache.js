@@ -54,10 +54,30 @@ db.exec(`
     birthday    TEXT,
     qr_token    TEXT,
     photo       TEXT,
+    pdf_url     TEXT,
     synced_at   TEXT,
+    balance     REAL DEFAULT 0,
     PRIMARY KEY (id, gym_id)
   );
   CREATE INDEX IF NOT EXISTS idx_members_gym ON members_cache(gym_id);
+
+  CREATE TABLE IF NOT EXISTS register_cache (
+    id          TEXT NOT NULL,
+    gym_id      TEXT NOT NULL,
+    date        TEXT NOT NULL,
+    nom         TEXT,
+    contrat     TEXT,
+    commercial  TEXT,
+    tpe         REAL DEFAULT 0,
+    espece      REAL DEFAULT 0,
+    virement    REAL DEFAULT 0,
+    cheque      REAL DEFAULT 0,
+    abonnement  TEXT,
+    created_at  TEXT,
+    synced_at   TEXT,
+    PRIMARY KEY (id, gym_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_register_gym_date ON register_cache(gym_id, date);
 
   CREATE TABLE IF NOT EXISTS payments_cache (
     id          TEXT NOT NULL,
@@ -77,6 +97,18 @@ db.exec(`
     value       TEXT
   );
 `);
+
+// ── Migrations ──────────────────────────────────────────────────────────────
+try {
+  db.exec("ALTER TABLE members_cache ADD COLUMN pdf_url TEXT;");
+} catch (e) { /* already exists */ }
+try { db.exec("ALTER TABLE members_cache ADD COLUMN balance REAL DEFAULT 0;"); } catch (e) {}
+try { db.exec("ALTER TABLE register_cache ADD COLUMN cin TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE register_cache ADD COLUMN tel TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE register_cache ADD COLUMN prix REAL DEFAULT 0;"); } catch (e) {}
+try { db.exec("ALTER TABLE register_cache ADD COLUMN reste REAL DEFAULT 0;"); } catch (e) {}
+try { db.exec("ALTER TABLE register_cache ADD COLUMN note_reste TEXT;"); } catch (e) {}
+
 
 console.log(`💾 SQLite cache initialised → ${DB_PATH}`);
 
@@ -187,15 +219,17 @@ function getDailyStat(gymId, date) {
 
 const insertMember = db.prepare(`
   INSERT OR REPLACE INTO members_cache
-    (id, gym_id, full_name, phone, plan, expires_on, status, birthday, qr_token, photo, synced_at)
+    (id, gym_id, full_name, phone, plan, expires_on, status, birthday, qr_token, photo, pdf_url, synced_at, balance)
   VALUES
-    (@id, @gym_id, @full_name, @phone, @plan, @expires_on, @status, @birthday, @qr_token, @photo, @synced_at)
+    (@id, @gym_id, @full_name, @phone, @plan, @expires_on, @status, @birthday, @qr_token, @photo, @pdf_url, @synced_at, @balance)
 `);
 
 function upsertMembers(gymId, membersArr) {
   const upsert = db.transaction((rows) => {
-    // Clear stale members for this gym first
-    db.prepare('DELETE FROM members_cache WHERE gym_id=?').run(gymId);
+    // Only clear if we are doing a full sync (not a small update)
+    if (rows.length > 50) {
+      db.prepare('DELETE FROM members_cache WHERE gym_id=?').run(gymId);
+    }
     for (const m of rows) insertMember.run(m);
   });
   const now = new Date().toISOString();
@@ -209,8 +243,10 @@ function upsertMembers(gymId, membersArr) {
     status:     m.status || '',
     birthday:   m.birthday || '',
     qr_token:   m.qrToken || '',
-    photo:      null, // never cache photos in SQLite
+    photo:      m.photo || m.image || null,
+    pdf_url:    m.pdfUrl || null,
     synced_at:  now,
+    balance:    Number(m.balance) || 0,
   })));
 }
 
@@ -218,6 +254,55 @@ function getMembers(gymId) {
   const g = buildInClause(getGymIds(gymId));
   const sql = `SELECT * FROM members_cache WHERE ${g.sql} ORDER BY full_name`;
   return db.prepare(sql).all(...g.params);
+}
+
+// ── REGISTER ─────────────────────────────────────────────────────────────────
+
+const insertRegister = db.prepare(`
+  INSERT OR REPLACE INTO register_cache 
+    (id, gym_id, date, nom, cin, tel, contrat, commercial, prix, tpe, espece, virement, cheque, reste, note_reste, abonnement, created_at, synced_at)
+  VALUES 
+    (@id, @gym_id, @date, @nom, @cin, @tel, @contrat, @commercial, @prix, @tpe, @espece, @virement, @cheque, @reste, @note_reste, @abonnement, @created_at, @synced_at)
+`);
+
+function upsertRegister(gymId, date, entriesArr) {
+  const upsert = db.transaction((rows) => {
+    // We don't delete everything, so we can keep partial data if sync fails
+    for (const e of rows) insertRegister.run(e);
+  });
+  const now = new Date().toISOString();
+  upsert(entriesArr.map(e => ({
+    id:         e.id,
+    gym_id:     gymId,
+    date:       date,
+    nom:        e.nom || '',
+    cin:        e.cin || '',
+    tel:        e.tel || '',
+    contrat:    e.contrat || '',
+    commercial: e.commercial || '',
+    prix:       Number(e.prix) || 0,
+    tpe:        Number(e.tpe) || 0,
+    espece:     Number(e.espece) || 0,
+    virement:   Number(e.virement) || 0,
+    cheque:     Number(e.cheque) || 0,
+    reste:      Number(e.reste) || 0,
+    note_reste: e.note_reste || '',
+    abonnement: e.abonnement || '',
+    created_at: typeof e.createdAt === 'string' ? e.createdAt : 
+               (e.createdAt && typeof e.createdAt.toDate === 'function') ? e.createdAt.toDate().toISOString() :
+               (e.createdAt?.toISOString ? e.createdAt.toISOString() : now),
+    synced_at:  now
+  })));
+}
+
+function getRegister(gymId, date) {
+  const g = buildInClause(getGymIds(gymId));
+  const sql = `SELECT * FROM register_cache WHERE ${g.sql} AND date=? ORDER BY created_at ASC`;
+  return db.prepare(sql).all(...g.params, date);
+}
+
+function deleteRegisterEntry(gymId, date, entryId) {
+  db.prepare('DELETE FROM register_cache WHERE id=? AND gym_id=? AND date=?').run(entryId, gymId, date);
 }
 
 // ── PAYMENTS ─────────────────────────────────────────────────────────────────
@@ -248,6 +333,10 @@ function getPayments(gymId, limit = 200) {
   const g = buildInClause(getGymIds(gymId));
   const sql = `SELECT * FROM payments_cache WHERE ${g.sql} ORDER BY date DESC LIMIT ?`;
   return db.prepare(sql).all(...g.params, limit);
+}
+
+function deletePayment(gymId, paymentId) {
+  db.prepare('DELETE FROM payments_cache WHERE id=? AND gym_id=?').run(paymentId, gymId);
 }
 
 // ── META ─────────────────────────────────────────────────────────────────────
@@ -286,8 +375,10 @@ module.exports = {
   upsertDailyStat, getDailyStats, getDailyStat,
   // members
   upsertMembers, getMembers,
+  // register
+  upsertRegister, getRegister, deleteRegisterEntry,
   // payments
-  upsertPayments, getPayments,
+  upsertPayments, getPayments, deletePayment,
   // meta
   getMeta, setMeta, getLastSync, setLastSync,
   // info

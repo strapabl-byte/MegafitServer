@@ -1,0 +1,225 @@
+'use strict';
+// routes/members.js
+
+const { Router } = require('express');
+const crypto     = require('crypto');
+const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
+
+module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuotaExceeded, uploadBase64ToStorage, upload }) {
+  const router = Router();
+
+  // ── Photo Upload (multipart) ──────────────────────────────────────────────
+  router.post('/upload', verifyAzureToken, upload.single('photo'), async (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+      const memberId = req.body.memberId || 'unknown';
+      const destination = `members/${memberId}/profile_${Date.now()}.jpg`;
+      const file = bucket.file(destination);
+      await file.save(req.file.buffer, { metadata: { contentType: req.file.mimetype }, resumable: false });
+      const [url] = await file.getSignedUrl({ action: 'read', expires: '2100-01-01' });
+      res.json({ url });
+    } catch (err) {
+      console.error('Photo Upload Error:', err);
+      res.status(500).json({ error: 'Upload failed' });
+    }
+  });
+
+  // ── GET /api/members ──────────────────────────────────────────────────────
+  router.get('/', verifyAzureToken, async (req, res) => {
+    try {
+      const gymId      = req.query.gymId || 'all';
+      const searchQuery = req.query.search || '';
+
+      let finalMembers = lc.getMembers(gymId);
+
+      if (searchQuery) {
+        const q = searchQuery.toLowerCase();
+        finalMembers = finalMembers.filter(m =>
+          (m.full_name || '').toLowerCase().includes(q) ||
+          (m.phone || '').includes(q)
+        );
+      }
+
+      if (finalMembers && finalMembers.length >= 50 && !searchQuery) {
+        console.log(`⚡ [SQLITE HIT] ${finalMembers.length} members for ${gymId}`);
+        if (!req.isAdmin) {
+          finalMembers = finalMembers.map(m => ({
+            id: m.id, fullName: m.full_name || 'Inconnu',
+            phone: m.phone || '', birthday: m.birthday || '',
+            expiresOn: m.expires_on, plan: m.plan,
+            qrToken: m.qr_token || '',
+            image: m.photo || null, pdfUrl: m.pdf_url || null, isRestricted: true,
+          }));
+        }
+        return res.json(finalMembers);
+      }
+
+      if (isQuotaExceeded()) return res.json(finalMembers);
+
+      if (searchQuery && finalMembers.length === 0) {
+        const searchSnap = await db.collection('members')
+          .where('fullName', '>=', searchQuery)
+          .where('fullName', '<=', searchQuery + '\uf8ff')
+          .limit(10).get();
+        const found = searchSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        if (found.length > 0) { lc.upsertMembers(gymId, found); finalMembers = found; }
+      } else if (!searchQuery && finalMembers.length < 50) {
+        const lookupMap = {
+          marjane: ['marjane', 'fes saiss', 'fes marjane'],
+          dokarat: ['dokarat', 'dokkarat fes', 'dokkarat'],
+          casa1:   ['casa1', 'casa anfa'],
+          casa2:   ['casa2', 'lady anfa'],
+        };
+        let q = db.collection('members');
+        if (gymId !== 'all') q = q.where('location', 'in', lookupMap[gymId] || [gymId]);
+        const snap = await q.limit(500).get();
+        const members = snap.docs
+          .map(d => ({ id: d.id, ...d.data() }))
+          .sort((a, b) => {
+            const ta = a.createdAt?._seconds || a.createdAt?.seconds || 0;
+            const tb = b.createdAt?._seconds || b.createdAt?.seconds || 0;
+            return tb - ta;
+          });
+        lc.upsertMembers(gymId, members);
+        finalMembers = members;
+        console.log(`✅ [FIRESTORE] Fetched ${members.length} members for ${gymId} → cached`);
+      }
+
+      if (!req.isAdmin) {
+        finalMembers = finalMembers.map(m => ({
+          id: m.id,
+          fullName: m.fullName || m.full_name || 'Inconnu',
+          phone: m.phone || '', birthday: m.birthday || '',
+          expiresOn: m.expiresOn || m.expires_on, plan: m.plan,
+          qrToken: m.qrToken || m.qr_token || '',
+          image: m.photo || null, pdfUrl: m.pdf_url || m.pdfUrl || null, isRestricted: true,
+        }));
+      }
+
+      res.json(finalMembers);
+    } catch (err) {
+      console.error('Members Fetch Error:', err);
+      res.status(500).json({ error: 'Failed to fetch members', members: [] });
+    }
+  });
+
+  // ── POST /api/members ─────────────────────────────────────────────────────
+  router.post('/', verifyAzureToken, async (req, res) => {
+    try {
+      const { fullName, phone, plan, birthday, expiresOn, photo, email, location } = req.body;
+      if (phone) {
+        const existing = await db.collection('members').where('phone', '==', phone).limit(1).get();
+        if (!existing.empty) {
+          return res.status(409).json({ error: 'Ce numéro de téléphone est déjà associé à un membre.', member: { id: existing.docs[0].id, ...existing.docs[0].data() } });
+        }
+      }
+      const qrToken = crypto.randomBytes(16).toString('hex');
+      const docRef = await db.collection('members').add({
+        fullName, phone: phone || null, plan: plan || 'Monthly',
+        birthday: birthday || null,
+        expiresOn: expiresOn || new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0],
+        photo: photo || null, email: email || null, location: location || 'dokarat',
+        qrToken, createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      const snap = await docRef.get();
+      res.json({ id: docRef.id, ...snap.data() });
+    } catch (err) {
+      console.error('Create Member Error:', err);
+      res.status(500).json({ error: 'Failed to create member' });
+    }
+  });
+
+  // ── GET /api/members/:id ──────────────────────────────────────────────────
+  router.get('/:id', verifyAzureToken, async (req, res) => {
+    try {
+      const doc = await db.collection('members').doc(req.params.id).get();
+      if (!doc.exists) return res.status(404).json({ error: 'Member not found' });
+      res.json({ id: doc.id, ...doc.data() });
+    } catch (err) { res.status(500).json({ error: 'Failed to fetch member' }); }
+  });
+
+  // ── GET /api/members/:id/profile ──────────────────────────────────────────
+  router.get('/:id/profile', verifyAzureToken, async (req, res) => {
+    const memberId = req.params.id;
+    try {
+      const cached = apiCache.profiles[memberId];
+      if (cached && Date.now() - cached.ts < 60000) {
+        if (!req.isAdmin && cached.data.location && !req.hasAccessToGym(cached.data.location))
+          return res.status(403).json({ error: 'Access denied to this member' });
+        return res.json(cached.data);
+      }
+      const memberDoc = await db.collection('members').doc(memberId).get();
+      if (!memberDoc.exists) return res.status(404).json({ error: 'Member not found' });
+      const member = { id: memberDoc.id, ...memberDoc.data() };
+      if (!req.isAdmin && member.location && !req.hasAccessToGym(member.location)) {
+        console.warn(`🚫 Manager ${req.user?.name} tried to access member ${memberId} from gym ${member.location}`);
+        return res.status(403).json({ error: 'Access denied: member belongs to a different gym' });
+      }
+      let inscription = null;
+      if (member.inscriptionId) {
+        const insDoc = await db.collection('pending_members').doc(member.inscriptionId).get();
+        if (insDoc.exists) {
+          const ins = insDoc.data();
+          inscription = {
+            cin: ins.cin, adresse: ins.adresse, ville: ins.ville, email: ins.email,
+            commercial: ins.commercial, subscriptionName: ins.subscriptionName,
+            contractNumber: ins.contractNumber || member.contractNumber,
+            pdfUrl: ins.pdfUrl || member.pdfUrl,
+            gymId: ins.gymId || member.location,
+            periodFrom: ins.periodFrom, periodTo: ins.periodTo || member.expiresOn,
+            totals: ins.totals, payments: ins.payments,
+            balance: ins.totals?.balance ?? member.balance ?? 0,
+            source: ins.source || 'web',
+          };
+        }
+      }
+      
+      let createdAtStr = null;
+      if (member.createdAt && member.createdAt._seconds) {
+        createdAtStr = new Date(member.createdAt._seconds * 1000).toISOString().split('T')[0];
+      }
+      
+      const payload = { ...member, createdAtStr, inscription };
+      apiCache.profiles[memberId] = { data: payload, ts: Date.now() };
+      res.json(payload);
+    } catch (err) {
+      console.error('Profile fetch error:', err);
+      res.status(500).json({ error: 'Failed to fetch member profile' });
+    }
+  });
+
+  // ── PUT /api/members/:id ──────────────────────────────────────────────────
+  router.put('/:id', verifyAzureToken, async (req, res) => {
+    try {
+      const ref = db.collection('members').doc(req.params.id);
+      const allowed = ['fullName', 'phone', 'plan', 'birthday', 'expiresOn', 'photo', 'status'];
+      const update  = Object.fromEntries(allowed.filter(k => req.body[k] !== undefined).map(k => [k, req.body[k]]));
+      update.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+      await ref.update(update);
+      delete apiCache.profiles[req.params.id]; // invalidate profile cache
+      const snap = await ref.get();
+      res.json({ id: snap.id, ...snap.data() });
+    } catch (err) { res.status(500).json({ error: 'Failed to update member' }); }
+  });
+
+  // ── DELETE /api/members/:id ───────────────────────────────────────────────
+  router.delete('/:id', verifyAzureToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+      const ref  = db.collection('members').doc(id);
+      const snap = await ref.get();
+      if (!snap.exists) return res.status(404).json({ ok: false, error: 'Member not found' });
+      const data      = snap.data();
+      const deletedBy = req.user?.preferred_username || req.user?.name || 'Admin';
+      const record    = { ...data, memberId: id, deletedAt: admin.firestore.FieldValue.serverTimestamp(), deletedBy };
+      await db.collection('deleted_members').doc(id).set(record);
+      await db.collection('users_deleted').add(record);
+      await ref.delete();
+      await db.collection('access_logs').add({ memberId: id, usedAt: admin.firestore.FieldValue.serverTimestamp(), type: 'delete', actor: deletedBy });
+      delete apiCache.profiles[id];
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ ok: false, error: 'Failed to delete' }); }
+  });
+
+  return router;
+};
