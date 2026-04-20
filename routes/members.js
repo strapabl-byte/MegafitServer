@@ -49,6 +49,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
             expiresOn: m.expires_on, plan: m.plan,
             qrToken: m.qr_token || '',
             image: m.photo || null, pdfUrl: m.pdf_url || null, isRestricted: true,
+            createdAt: m.created_at || null,
           }));
         }
         return res.json(finalMembers);
@@ -93,6 +94,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           expiresOn: m.expiresOn || m.expires_on, plan: m.plan,
           qrToken: m.qrToken || m.qr_token || '',
           image: m.photo || null, pdfUrl: m.pdf_url || m.pdfUrl || null, isRestricted: true,
+          createdAt: m.createdAt || m.created_at || null,
         }));
       }
 
@@ -219,6 +221,90 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       delete apiCache.profiles[id];
       res.json({ ok: true });
     } catch (err) { res.status(500).json({ ok: false, error: 'Failed to delete' }); }
+  });
+
+  // ── POST /api/members/:id/freeze ──────────────────────────────────────────
+  router.post('/:id/freeze', verifyAzureToken, async (req, res) => {
+    try {
+      const ref = db.collection('members').doc(req.params.id);
+      const snap = await ref.get();
+      if (!snap.exists) return res.status(404).json({ error: 'Member not found' });
+      const member = snap.data();
+      
+      if (member.isFrozen) {
+        return res.status(400).json({ error: 'Subscription is already frozen' });
+      }
+
+      await ref.update({
+        isFrozen: true,
+        frozenAt: admin.firestore.FieldValue.serverTimestamp(),
+        freezeReason: req.body.reason || null,
+        freezeProofUrl: req.body.proofUrl || null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      delete apiCache.profiles[req.params.id]; // invalidate profile cache
+
+      // Re-fetch to return latest data
+      const updatedSnap = await ref.get();
+      res.json({ id: updatedSnap.id, ...updatedSnap.data() });
+    } catch (err) {
+      console.error('Freeze Error:', err);
+      res.status(500).json({ error: 'Failed to freeze subscription' });
+    }
+  });
+
+  // ── POST /api/members/:id/unfreeze ────────────────────────────────────────
+  router.post('/:id/unfreeze', verifyAzureToken, async (req, res) => {
+    try {
+      const ref = db.collection('members').doc(req.params.id);
+      const snap = await ref.get();
+      if (!snap.exists) return res.status(404).json({ error: 'Member not found' });
+      const member = snap.data();
+      
+      if (!member.isFrozen || !member.frozenAt) {
+        return res.status(400).json({ error: 'Subscription is not frozen' });
+      }
+
+      const frozenAtDate = member.frozenAt.toDate ? member.frozenAt.toDate() : new Date(member.frozenAt);
+      const now = new Date();
+      const diffTime = Math.abs(now - frozenAtDate);
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+      // Calculate new expiresOn date
+      let newExpiresOn = member.expiresOn;
+      if (member.expiresOn) {
+        const expDate = new Date(member.expiresOn + 'T00:00:00');
+        expDate.setDate(expDate.getDate() + diffDays);
+        newExpiresOn = expDate.toISOString().split('T')[0];
+      }
+
+      const freezeLog = {
+        frozenAt: frozenAtDate.toISOString(),
+        unfrozenAt: now.toISOString(),
+        durationDays: diffDays,
+        reason: member.freezeReason || null,
+        proofUrl: member.freezeProofUrl || null,
+        actor: req.user?.preferred_username || req.user?.name || 'Admin'
+      };
+
+      await ref.update({
+        isFrozen: false,
+        frozenAt: null,
+        freezeReason: null,
+        freezeProofUrl: null,
+        expiresOn: newExpiresOn,
+        freezeLogs: admin.firestore.FieldValue.arrayUnion(freezeLog),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      delete apiCache.profiles[req.params.id]; // invalidate profile cache
+
+      // Re-fetch to return latest data
+      const updatedSnap = await ref.get();
+      res.json({ id: updatedSnap.id, ...updatedSnap.data() });
+    } catch (err) {
+      console.error('Unfreeze Error:', err);
+      res.status(500).json({ error: 'Failed to unfreeze subscription' });
+    }
   });
 
   return router;

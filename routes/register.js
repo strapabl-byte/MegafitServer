@@ -15,12 +15,15 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
 
       const gymIds = gymId === 'all' ? ['marjane', 'dokarat', 'casa1', 'casa2'] : [gymId];
       let entries = [];
+      let decaissements = [];
 
       // 1️⃣ Try SQLite cache first
       const cached = lc.getRegister(gymId, date);
+      const cachedDec = lc.getDecaissements(gymId, date);
       if (cached && cached.length > 0) {
         console.log(`⚡ [SQLITE HIT] ${cached.length} register entries for ${date}`);
         entries = cached.map(e => ({ ...e, createdAt: e.created_at }));
+        decaissements = cachedDec.map(d => ({ ...d, createdAt: d.created_at }));
       } else {
         // 2️⃣ Firestore fallback
         if (isQuotaExceeded()) return res.status(429).json({ error: 'Quota exceeded. No local cache for this date.', quotaExceeded: true, entries: [] });
@@ -30,6 +33,11 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
           const fetched = snap.docs.map(d => ({ id: d.id, gymId: gid, ...d.data() }));
           entries = entries.concat(fetched);
           if (fetched.length > 0) lc.upsertRegister(gid, date, fetched);
+
+          const decSnap = await db.collection('megafit_daily_register').doc(`${gid}_${date}`).collection('decaissements').orderBy('createdAt', 'asc').get();
+          const fetchedDec = decSnap.docs.map(d => ({ id: d.id, gymId: gid, ...d.data() }));
+          decaissements = decaissements.concat(fetchedDec);
+          if (fetchedDec.length > 0) lc.upsertDecaissements(gid, date, fetchedDec);
         }));
       }
 
@@ -55,7 +63,7 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
         byCommercial[name].total    += (Number(e.tpe) || 0) + (Number(e.espece) || 0) + (Number(e.virement) || 0) + (Number(e.cheque) || 0);
       });
 
-      res.json({ ok: true, date, gymId, entries, totals, byCommercial });
+      res.json({ ok: true, date, gymId, entries, decaissements, totals, byCommercial });
     } catch (err) {
       console.error('GET /api/register error:', err);
       res.status(500).json({ error: 'Failed to fetch register' });
@@ -166,6 +174,87 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
     } catch (err) {
       console.error('GET /api/register/calendar error:', err);
       res.status(500).json({ error: 'Failed to fetch calendar' });
+    }
+  });
+
+  // ── GET /api/register/search?gymId=dokarat&name=Boulaghnoud ─────────────
+  // Returns all register entries matching a member name across all dates.
+  // Used by the "Pay Rest" modal to show full payment history.
+  router.get('/search', verifyAzureToken, async (req, res) => {
+    try {
+      const { gymId = 'dokarat', name = '' } = req.query;
+      if (!name.trim()) return res.json({ ok: true, entries: [] });
+
+      const searchTerm = `%${name.trim().toLowerCase()}%`;
+      const rows = lc.db.prepare(`
+        SELECT * FROM register_entries
+        WHERE gym_id = ?
+          AND LOWER(nom) LIKE ?
+        ORDER BY date DESC
+        LIMIT 30
+      `).all(gymId, searchTerm);
+
+      const entries = rows.map(r => ({
+        id: r.id,
+        date: r.date,
+        gymId: r.gym_id,
+        nom: r.nom,
+        contrat: r.contrat,
+        commercial: r.commercial,
+        cin: r.cin,
+        tel: r.tel,
+        prix: r.prix,
+        tpe: r.tpe,
+        espece: r.espece,
+        virement: r.virement,
+        cheque: r.cheque,
+        reste: r.reste,
+        note_reste: r.note_reste,
+        abonnement: r.abonnement
+      }));
+
+      res.json({ ok: true, entries });
+    } catch (err) {
+      console.error('GET /api/register/search error:', err);
+      res.status(500).json({ error: 'Search failed', entries: [] });
+    }
+  });
+
+  // ── DÉCAISSEMENTS ──────────────────────────────────────────────────────────
+  
+  router.post('/decaissement', async (req, res) => {
+    try {
+      const { date, gymId = 'dokarat', ...decData } = req.body;
+      if (!date) return res.status(400).json({ error: 'date required' });
+      const docId = `${gymId}_${date}`;
+      const ref = await db.collection('megafit_daily_register').doc(docId).collection('decaissements').add({
+        ...decData, location: gymId,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdBy: req.user?.preferred_username || 'system',
+      });
+      await db.collection('megafit_daily_register').doc(docId).set({ gymId, date, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      
+      const newDoc = await ref.get();
+      lc.upsertDecaissements(gymId, date, [{ id: ref.id, ...newDoc.data() }]);
+      
+      res.json({ ok: true, id: ref.id });
+    } catch (err) {
+      console.error('POST /api/register/decaissement error:', err);
+      res.status(500).json({ error: 'Failed to save decaissement' });
+    }
+  });
+
+  router.delete('/decaissement/:id', async (req, res) => {
+    try {
+      const { date, gymId = 'dokarat' } = req.query;
+      if (!date) return res.status(400).json({ error: 'date required' });
+      await db.collection('megafit_daily_register').doc(`${gymId}_${date}`).collection('decaissements').doc(req.params.id).delete();
+      lc.deleteDecaissement(gymId, date, req.params.id);
+      
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('DELETE /api/register/decaissement error:', err);
+      res.status(500).json({ error: 'Failed to delete decaissement' });
     }
   });
 

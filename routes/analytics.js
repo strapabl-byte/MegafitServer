@@ -109,7 +109,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
       const dateStrs = Array.from({ length: 30 }, (_, i) => new Date(Date.now() + 3600000 - (29 - i) * 86400000).toISOString().slice(0, 10));
       const today = getMoroccanDateStr();
       const map = {};
-      dateStrs.forEach(d => map[d] = { count: 0, rawCount: 0 });
+      dateStrs.forEach(d => map[d] = { count: 0, rawCount: 0, revenue: 0, revPerGym: {} });
 
       for (const gid of gymIds) {
         lc.getDailyStats(gid, 30).forEach(s => {
@@ -121,7 +121,24 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
         map[today].count    += cached ? Math.max(cached.count, uniq) : uniq;
         map[today].rawCount += cached ? Math.max(cached.raw_count, raw) : raw;
       }
-      res.json(dateStrs.map(date => ({ gym_id: gymId, date, count: map[date].count, rawCount: map[date].rawCount })));
+
+      // Append Revenue calculation via seamless SQLite scan
+      dateStrs.forEach(d => {
+         let rev = 0;
+         let revPerGym = {};
+         for (const gid of gymIds) {
+            let gymRev = 0;
+            lc.getRegister(gid, d).forEach(e => {
+               gymRev += (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
+            });
+            revPerGym[gid] = gymRev;
+            rev += gymRev;
+         }
+         map[d].revenue = rev;
+         map[d].revPerGym = revPerGym;
+      });
+
+      res.json(dateStrs.map(date => ({ gym_id: gymId, date, count: map[date].count, rawCount: map[date].rawCount, revenue: map[date].revenue, revPerGym: map[date].revPerGym })));
     } catch (err) {
       console.error('Daily Stats Error:', err);
       res.status(500).json({ error: 'Failed to fetch analytics' });
@@ -133,7 +150,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     try {
       const { gymId } = req.params;
       const cached = apiCache.kpis[gymId];
-      if (cached && Date.now() - cached.ts < 2 * 60 * 1000) return res.json(cached.data);
+      if (cached && Date.now() - cached.ts < 30 * 1000) return res.json(cached.data);
 
       const now = new Date();
       const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -161,18 +178,33 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
       const gymIds = gymId === 'all' ? ['dokarat', 'marjane', 'casa1', 'casa2'] : gymId.split(',');
       const toLocalDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 
-      // ── Revenue from SQLite register cache (prix column, quota-free) ──
-      const sumRegisterRevenue = (fromDate) => {
-        let total = 0;
+      // ── Revenue from SQLite register cache — sum ALL payment columns ──
+      const getRevenueAndBreakdown = (fromDate) => {
+        let total = 0, espece = 0, tpe = 0, virement = 0, cheque = 0;
         const cursor = new Date(fromDate);
         while (cursor <= now) {
           const dateStr = toLocalDateStr(cursor);
           for (const gid of gymIds) {
-            lc.getRegister(gid, dateStr).forEach(e => { total += (Number(e.prix) || 0); });
+            lc.getRegister(gid, dateStr).forEach(e => {
+              const e_esp = Number(e.espece) || 0;
+              const e_tpe = Number(e.tpe) || 0;
+              const e_vir = Number(e.virement) || 0;
+              const e_che = Number(e.cheque) || 0;
+              espece += e_esp; tpe += e_tpe; virement += e_vir; cheque += e_che;
+              total += e_esp + e_tpe + e_vir + e_che;
+            });
+            const decs = lc.getDecaissements(gid, dateStr);
+            if (decs) {
+              decs.forEach(dec => {
+                const amt = Number(dec.montant) || 0;
+                espece -= amt;
+                total -= amt;
+              });
+            }
           }
           cursor.setDate(cursor.getDate() + 1);
         }
-        return total;
+        return { total, espece, tpe, virement, cheque };
       };
 
       // ── Count SQLite entries this month to decide if we need Firestore ──
@@ -192,18 +224,34 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
         const start = new Date(fromTs.toMillis());
         const dayCount = Math.ceil((now - start) / (1000 * 60 * 60 * 24)) + 1;
         const docRefs = [];
+        const decRefs = [];
         for (let i = 0; i < dayCount; i++) {
           const d = new Date(start); d.setDate(start.getDate() + i); if (d > now) break;
           const dateStr = toLocalDateStr(d);
-          gymIds.forEach(gid => docRefs.push(db.collection('megafit_daily_register').doc(`${gid}_${dateStr}`).collection('entries')));
+          gymIds.forEach(gid => {
+            docRefs.push(db.collection('megafit_daily_register').doc(`${gid}_${dateStr}`).collection('entries'));
+            decRefs.push(db.collection('megafit_daily_register').doc(`${gid}_${dateStr}`).collection('decaissements'));
+          });
         }
         const snaps = await Promise.all(docRefs.map(r => r.get()));
-        let total = 0;
+        const decSnaps = await Promise.all(decRefs.map(r => r.get()));
+        
+        let total = 0, espece = 0, tpe = 0, virement = 0, cheque = 0;
         snaps.forEach(snap => snap.forEach(doc => {
           const e = doc.data();
-          total += (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
+          const e_esp = Number(e.espece) || 0;
+          const e_tpe = Number(e.tpe) || 0;
+          const e_vir = Number(e.virement) || 0;
+          const e_che = Number(e.cheque) || 0;
+          espece += e_esp; tpe += e_tpe; virement += e_vir; cheque += e_che;
+          total += e_esp + e_tpe + e_vir + e_che;
         }));
-        return total;
+        decSnaps.forEach(snap => snap.forEach(doc => {
+          const amt = Number(doc.data().montant) || 0;
+          espece -= amt;
+          total -= amt;
+        }));
+        return { total, espece, tpe, virement, cheque };
       };
 
       const monthCachedCount = countCachedEntries(monthStart);
@@ -212,10 +260,10 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
       if (monthCachedCount >= 3) {
         // SQLite has data — use it (fast, no quota cost)
         console.log(`✅ [KPI] SQLite: ${monthCachedCount} entries for ${gymId} — reading prix from local cache`);
-        incomeDay   = sumRegisterRevenue(todayStart);
-        incomeWeek  = sumRegisterRevenue(weekStart);
-        incomeMonth = sumRegisterRevenue(monthStart);
-        incomeYear  = sumRegisterRevenue(yearStart);
+        incomeDay   = getRevenueAndBreakdown(todayStart);
+        incomeWeek  = getRevenueAndBreakdown(weekStart);
+        incomeMonth = getRevenueAndBreakdown(monthStart);
+        incomeYear  = getRevenueAndBreakdown(yearStart);
       } else {
         // Fallback to Firestore
         console.log(`📡 [KPI] SQLite sparse (${monthCachedCount} entries) for ${gymId} — falling back to Firestore`);
@@ -229,11 +277,12 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
 
       const kpis = {
         newMembers: { day: countRegisterInRange(todayStart), week: countRegisterInRange(weekStart), month: countRegisterInRange(monthStart), year: countRegisterInRange(yearStart) },
-        income:     { day: incomeDay, week: incomeWeek, month: incomeMonth, year: incomeYear },
+        income:     { day: incomeDay.total, week: incomeWeek.total, month: incomeMonth.total, year: incomeYear.total },
+        paymentMethods: { espece: incomeMonth.espece, tpe: incomeMonth.tpe, virement: incomeMonth.virement, cheque: incomeMonth.cheque }
       };
 
       apiCache.kpis[gymId] = { data: kpis, ts: Date.now() };
-      console.log(`📊 [KPI] ${gymId}: income day=${incomeDay} | week=${incomeWeek} | month=${incomeMonth} | year=${incomeYear} DH`);
+      console.log(`📊 [KPI] ${gymId}: income day=${incomeDay.total} | week=${incomeWeek.total} | month=${incomeMonth.total} | year=${incomeYear.total} DH`);
       res.json(kpis);
     } catch (err) {
       console.error('KPI Calculation Error:', err);
@@ -275,6 +324,140 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     } catch (err) {
       console.error('Log Entry Error:', err);
       res.status(500).json({ error: 'Failed to log entry' });
+    }
+  });
+
+  // ── POST /api/analytics/megaeye-chat ────────────────────────────────────────
+  // Interactive Groq chat: accepts a user question + context, returns AI answer
+  router.post('/api/analytics/megaeye-chat', verifyAzureToken, requireAdmin, async (req, res) => {
+    const { question, sector, kpis, dailyStats, liveEntries } = req.body;
+    if (!question) return res.status(400).json({ error: 'question required' });
+
+    const GROQ_KEY          = process.env.GROQ_API_KEY;
+    const GROQ_KEY_FALLBACK = process.env.GROQ_API_KEY_FALLBACK;
+
+    if (!GROQ_KEY && !GROQ_KEY_FALLBACK) {
+      return res.json({ answer: '⚠️ No GROQ_API_KEY configured on server.' });
+    }
+
+    // Helper: call Groq — models confirmed active via /openai/v1/models (April 2026)
+    const GROQ_MODEL          = 'llama-3.3-70b-versatile'; // primary
+    const GROQ_MODEL_FALLBACK = 'llama-3.1-8b-instant';    // fallback
+    const callGroq = async (key, messages, model = GROQ_MODEL) => {
+      const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, messages, max_tokens: 1200, temperature: 0.5 })
+      });
+      if (!r.ok) {
+        const errBody = await r.text();
+        console.error(`[Groq] HTTP ${r.status}:`, errBody.slice(0, 300));
+        throw new Error(`Groq HTTP ${r.status}`);
+      }
+      return r.json();
+    };
+
+    try {
+      // ── Gym name mapping ────────────────────────────────────────────────────
+      const GYM_NAMES = { all: 'ALL EMPIRE (Dokarat + Marjane + Casa Anfa + Lady Anfa)', dokarat: 'Dokarat (Fès)', marjane: 'Marjane Saiss (Fès)', casa1: 'Casa Anfa (Casablanca)', casa2: 'Lady Anfa (Casablanca)' };
+      const sectorName = GYM_NAMES[sector] || sector || 'ALL EMPIRE';
+
+      // ── KPI context ─────────────────────────────────────────────────────────
+      const kpiContext = kpis ? [
+        `GYM / SECTOR: ${sectorName}`,
+        `Revenue  → Today: ${(kpis?.income?.day||0).toLocaleString()} DH | This week: ${(kpis?.income?.week||0).toLocaleString()} DH | This month: ${(kpis?.income?.month||0).toLocaleString()} DH | This year: ${(kpis?.income?.year||0).toLocaleString()} DH`,
+        `New memberships → Today: ${kpis?.newMembers?.day||0} | This week: ${kpis?.newMembers?.week||0} | This month: ${kpis?.newMembers?.month||0}`,
+        `Total active members: ${kpis?.totalActive || 'N/A'}`,
+      ].join('\n') : `GYM / SECTOR: ${sectorName}\nNo KPI data available.`;
+
+      // ── 30-day door traffic from SQLite ─────────────────────────────────────
+      let trafficContext = '';
+      if (Array.isArray(dailyStats) && dailyStats.length > 0) {
+        const total30 = dailyStats.reduce((s, d) => s + (d.count || 0), 0);
+        const avg30   = Math.round(total30 / dailyStats.length);
+        const maxDay  = dailyStats.reduce((m, d) => (d.count||0) > (m.count||0) ? d : m, dailyStats[0]);
+        const today   = dailyStats[dailyStats.length - 1];
+        const last7   = dailyStats.slice(-7).reduce((s, d) => s + (d.count||0), 0);
+        trafficContext = [
+          `\n--- 30-DAY DOOR TRAFFIC (${sectorName}) ---`,
+          `Today (${today?.date}): ${today?.count||0} check-ins`,
+          `Last 7 days: ${last7} check-ins | 30-day avg: ${avg30}/day | 30-day total: ${total30}`,
+          `Busiest day: ${maxDay?.date} with ${maxDay?.count} check-ins`,
+          `Daily (last 10 days): ${dailyStats.slice(-10).map(d=>`${d.date.slice(5)}:${d.count||0}`).join(' | ')}`,
+        ].join('\n');
+      }
+      // ── Live door entries ────────────────────────────────────────────────────
+      let liveContext = '';
+      if (Array.isArray(liveEntries) && liveEntries.length > 0) {
+        liveContext = `\n--- LIVE ENTRIES TODAY (${sectorName}) ---\n` +
+          liveEntries.map(e => `  ${e.name||'?'} @ ${e.time ? new Date(e.time).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}) : '??:??'} (${e.source||'scan'})`).join('\n');
+      }
+
+      // ── Course & Reservation Context ─────────────────────────────────────────
+      let courseContext = '';
+      try {
+        const cSnap = await db.collection('courses').get();
+        if (!cSnap.empty) {
+           courseContext = `\n--- CURRENT SCHEDULE & RESERVATIONS ---\n`;
+           cSnap.docs.forEach(doc => {
+              const d = doc.data();
+              // Summarize course info compactly
+              courseContext += `- ${d.title} (${d.coach}) | Days: ${(d.days||[]).join(',')} | Time: ${d.time} | Booked: ${d.reserved||0}/${d.capacity}\n`;
+           });
+        }
+      } catch (err) {
+        console.error("Megaeye course context error:", err);
+      }
+
+      const fullContext = [kpiContext, trafficContext, liveContext, courseContext].filter(Boolean).join('\n');
+
+      const messages = [
+        {
+          role: 'system',
+          content: `You are MEGAEYE, an elite, hyper-intelligent tactical AI assistant for the MegaFit gym empire.
+
+IMPORTANT RULES FOR YOUR ANALYSIS:
+1. DELIVER ULTRA-CONDENSED, HIGH-DENSITY TACTICAL INTEL. Do not write long narrative paragraphs. Use extremely concise military/corporate logic. Get straight to the point.
+2. Directly answer the feasibility of goals mathematically. If we need exactly 58 members, say "TARGET: 58 CONVERSIONS REQUIRED". Do not over-explain basic math.
+3. Provide ONLY actionable, high-leverage operational directives. No generic "Marketing" fluff. Give exact mathematical targets and leverage specific pricing tiers.
+4. Format your output sharply using bullet points. Never exceed significantly long word counts. Be brutal, sharp, and accurate.
+5. Answer ONLY in French, using professional, high-impact tactical corporate terminology.
+6. End response with [+] if confident or [-] if uncertain.
+
+=== MEGAFIT PRICING SHORTCUT (DHS) ===
+Registration Fee: 3000 DHS 
+Daily Pass: 200 DHS 
+1 Month: 1000 DHS (Local) / 1200 DHS (Multi)
+3 Months: ~2200 DHS
+6 Months: ~5000 DHS
+12 Months: ~4000 DHS (Local) / 5250 DHS (Multi)
+24 Months: 5600 DHS (Local) / 6500 DHS (Multi)
+
+=== CURRENT DATA (${sectorName}) ===
+${fullContext}`
+        },
+        { role: 'user', content: question }
+      ];
+
+      // Try primary key, fall back to secondary on any error
+      let data;
+      try {
+        data = await callGroq(GROQ_KEY, messages, GROQ_MODEL);
+      } catch (primaryErr) {
+        console.warn(`[Groq] Primary key/model failed (${primaryErr.message}), trying fallback...`);
+        const fallbackKey = GROQ_KEY_FALLBACK || GROQ_KEY;
+        data = await callGroq(fallbackKey, messages, GROQ_MODEL_FALLBACK);
+      }
+
+      let raw = data?.choices?.[0]?.message?.content || 'No response from Groq.';
+      // Parse and strip the sentiment tag
+      let sentiment = 'positive';
+      if (raw.endsWith('[-]')) { sentiment = 'negative'; raw = raw.slice(0, -3).trim(); }
+      else if (raw.endsWith('[+]')) { sentiment = 'positive'; raw = raw.slice(0, -3).trim(); }
+      res.json({ answer: raw, sentiment });
+    } catch (err) {
+      console.error('Groq chat error:', err);
+      res.status(500).json({ error: 'Groq service unavailable', answer: '⚠️ Neural core offline.' });
     }
   });
 

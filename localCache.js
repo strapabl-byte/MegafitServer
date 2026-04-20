@@ -57,6 +57,7 @@ db.exec(`
     pdf_url     TEXT,
     synced_at   TEXT,
     balance     REAL DEFAULT 0,
+    created_at  TEXT,
     PRIMARY KEY (id, gym_id)
   );
   CREATE INDEX IF NOT EXISTS idx_members_gym ON members_cache(gym_id);
@@ -96,6 +97,19 @@ db.exec(`
     key         TEXT PRIMARY KEY,
     value       TEXT
   );
+  CREATE TABLE IF NOT EXISTS decaissements_cache (
+    id          TEXT NOT NULL,
+    gym_id      TEXT NOT NULL,
+    date        TEXT NOT NULL,
+    montant     REAL DEFAULT 0,
+    raison      TEXT,
+    commercial  TEXT,
+    signature   TEXT,
+    created_at  TEXT,
+    synced_at   TEXT,
+    PRIMARY KEY (id, gym_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_decaissements_gym_date ON decaissements_cache(gym_id, date);
 `);
 
 // ── Migrations ──────────────────────────────────────────────────────────────
@@ -108,6 +122,7 @@ try { db.exec("ALTER TABLE register_cache ADD COLUMN tel TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE register_cache ADD COLUMN prix REAL DEFAULT 0;"); } catch (e) {}
 try { db.exec("ALTER TABLE register_cache ADD COLUMN reste REAL DEFAULT 0;"); } catch (e) {}
 try { db.exec("ALTER TABLE register_cache ADD COLUMN note_reste TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE members_cache ADD COLUMN created_at TEXT;"); } catch (e) {}
 
 
 console.log(`💾 SQLite cache initialised → ${DB_PATH}`);
@@ -219,9 +234,9 @@ function getDailyStat(gymId, date) {
 
 const insertMember = db.prepare(`
   INSERT OR REPLACE INTO members_cache
-    (id, gym_id, full_name, phone, plan, expires_on, status, birthday, qr_token, photo, pdf_url, synced_at, balance)
+    (id, gym_id, full_name, phone, plan, expires_on, status, birthday, qr_token, photo, pdf_url, synced_at, balance, created_at)
   VALUES
-    (@id, @gym_id, @full_name, @phone, @plan, @expires_on, @status, @birthday, @qr_token, @photo, @pdf_url, @synced_at, @balance)
+    (@id, @gym_id, @full_name, @phone, @plan, @expires_on, @status, @birthday, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at)
 `);
 
 function upsertMembers(gymId, membersArr) {
@@ -247,6 +262,10 @@ function upsertMembers(gymId, membersArr) {
     pdf_url:    m.pdfUrl || null,
     synced_at:  now,
     balance:    Number(m.balance) || 0,
+    created_at: typeof m.createdAt === 'string' ? m.createdAt : 
+               (m.createdAt && typeof m.createdAt.toDate === 'function') ? m.createdAt.toDate().toISOString() :
+               (m.createdAt?._seconds ? new Date(m.createdAt._seconds * 1000).toISOString() :
+               (m.createdAt?.toISOString ? m.createdAt.toISOString() : null)),
   })));
 }
 
@@ -303,6 +322,45 @@ function getRegister(gymId, date) {
 
 function deleteRegisterEntry(gymId, date, entryId) {
   db.prepare('DELETE FROM register_cache WHERE id=? AND gym_id=? AND date=?').run(entryId, gymId, date);
+}
+
+// ── DÉCAISSEMENTS ────────────────────────────────────────────────────────────
+
+const insertDecaissement = db.prepare(`
+  INSERT OR REPLACE INTO decaissements_cache 
+    (id, gym_id, date, montant, raison, commercial, signature, created_at, synced_at)
+  VALUES 
+    (@id, @gym_id, @date, @montant, @raison, @commercial, @signature, @created_at, @synced_at)
+`);
+
+function upsertDecaissements(gymId, date, decsArr) {
+  const upsert = db.transaction((rows) => {
+    for (const d of rows) insertDecaissement.run(d);
+  });
+  const now = new Date().toISOString();
+  upsert(decsArr.map(d => ({
+    id:         d.id,
+    gym_id:     gymId,
+    date:       date,
+    montant:    Number(d.montant) || 0,
+    raison:     d.raison || '',
+    commercial: d.commercial || '',
+    signature:  d.signature || '',
+    created_at: typeof d.createdAt === 'string' ? d.createdAt : 
+               (d.createdAt && typeof d.createdAt.toDate === 'function') ? d.createdAt.toDate().toISOString() :
+               (d.createdAt?.toISOString ? d.createdAt.toISOString() : now),
+    synced_at:  now
+  })));
+}
+
+function getDecaissements(gymId, date) {
+  const g = buildInClause(getGymIds(gymId));
+  const sql = `SELECT * FROM decaissements_cache WHERE ${g.sql} AND date=? ORDER BY created_at ASC`;
+  return db.prepare(sql).all(...g.params, date);
+}
+
+function deleteDecaissement(gymId, date, id) {
+  db.prepare('DELETE FROM decaissements_cache WHERE id=? AND gym_id=? AND date=?').run(id, gymId, date);
 }
 
 // ── PAYMENTS ─────────────────────────────────────────────────────────────────
@@ -377,6 +435,8 @@ module.exports = {
   upsertMembers, getMembers,
   // register
   upsertRegister, getRegister, deleteRegisterEntry,
+  // decaissements
+  upsertDecaissements, getDecaissements, deleteDecaissement,
   // payments
   upsertPayments, getPayments, deletePayment,
   // meta

@@ -149,41 +149,62 @@ async function seedSQLiteHistoricalStats() {
     if (isQuotaExceeded()) return;
     const cacheStats = lc.getCacheStats();
     console.log(`📡 Current Local Cache Stats: entries=${cacheStats.entries}, members=${cacheStats.members}, payments=${cacheStats.payments}`);
-    if (cacheStats.stats >= 30) { console.log('✅ Daily stats already seeded. Skip bulk fetch.'); return; }
-    console.log('🚀 Seeding SQLite with 30-day stats...');
-
-    for (const gymId of ['dokarat', 'marjane']) {
-      const dateStrs = [], docIds = [];
-      for (let i = 29; i >= 0; i--) {
-        const d = new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10);
-        dateStrs.push(d); docIds.push(`${gymId}_${d}`);
+    
+    // Seed Door Stats
+    if (cacheStats.stats < 30) {
+      console.log('🚀 Seeding SQLite with 30-day stats...');
+      for (const gymId of ['dokarat', 'marjane']) {
+        const dateStrs = [], docIds = [];
+        for (let i = 29; i >= 0; i--) {
+          const d = new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10);
+          dateStrs.push(d); docIds.push(`${gymId}_${d}`);
+        }
+        const snaps = await db.getAll(...docIds.map(id => db.collection('gym_daily_stats').doc(id)));
+        snaps.forEach((snap, i) => { const d = snap.exists ? snap.data() : {}; lc.upsertDailyStat(gymId, dateStrs[i], d.count || 0, d.rawCount || 0); });
       }
-      const snaps = await db.getAll(...docIds.map(id => db.collection('gym_daily_stats').doc(id)));
-      snaps.forEach((snap, i) => { const d = snap.exists ? snap.data() : {}; lc.upsertDailyStat(gymId, dateStrs[i], d.count || 0, d.rawCount || 0); });
+      console.log('  📊 Daily stats cached.');
+    } else {
+      console.log('✅ Daily stats already seeded. Skip bulk fetch.');
     }
-    console.log('  📊 Daily stats cached.');
 
-    // Seed recent members
-    const mSnap = await db.collection('members').orderBy('createdAt', 'desc').limit(50).get();
-    if (!mSnap.empty) lc.upsertMembers('all', mSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-
-    // Seed recent register entries
-    const rSnap = await db.collectionGroup('entries').orderBy('createdAt', 'desc').limit(50).get();
-    if (!rSnap.empty) {
-      const grouped = {};
-      rSnap.docs.forEach(d => {
-        const data = d.data();
-        const date = data.createdAt?.toDate ? data.createdAt.toDate().toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
-        const key  = `${data.gymId || 'dokarat'}_${date}`;
-        if (!grouped[key]) grouped[key] = [];
-        grouped[key].push({ id: d.id, ...data, date });
-      });
-      for (const [key, entries] of Object.entries(grouped)) {
-        const [gid, d] = key.split('_');
-        lc.upsertRegister(gid, d, entries);
+    // ── Auto-sync: full current-month register for all gyms ──────────────────
+    // Fetches day-by-day from Firestore, fills SQLite gaps automatically
+    const GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
+    const now2 = new Date();
+    const toDS = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    const monthStart = new Date(now2.getFullYear(), now2.getMonth(), 1);
+    console.log('📋 Register auto-sync: pulling current month for all gyms...');
+    for (const gid of GYMS) {
+      try {
+        const cursor = new Date(monthStart);
+        let cached = 0, fetched = 0;
+        // Count current SQLite entries
+        const c1 = new Date(monthStart);
+        while (c1 <= now2) { cached += lc.getRegister(gid, toDS(c1)).length; c1.setDate(c1.getDate()+1); }
+        // Fetch full month from Firestore
+        while (cursor <= now2) {
+          const dateStr = toDS(cursor);
+          const snap = await db.collection('megafit_daily_register').doc(`${gid}_${dateStr}`).collection('entries').get();
+          if (!snap.empty) {
+            lc.upsertRegister(gid, dateStr, snap.docs.map(d => ({ id: d.id, ...d.data(), date: dateStr, gymId: gid })));
+            fetched += snap.size;
+          }
+          cursor.setDate(cursor.getDate() + 1);
+        }
+        // Compute monthly revenue from updated cache
+        let rev = 0;
+        const c2 = new Date(monthStart);
+        while (c2 <= now2) {
+          lc.getRegister(gid, toDS(c2)).forEach(e => { rev += (Number(e.tpe)||0)+(Number(e.espece)||0)+(Number(e.virement)||0)+(Number(e.cheque)||0); });
+          c2.setDate(c2.getDate()+1);
+        }
+        console.log(`  ✅ [${gid}] ${cached}→${fetched} entries | month: ${rev.toLocaleString()} DH`);
+      } catch (gErr) {
+        if (gErr.code === 8) { setQuotaExceeded(); break; }
+        console.warn(`  ⚠️ [${gid}] register sync failed:`, gErr.message);
       }
     }
-    console.log('✨ SQLite seeding complete.');
+    console.log('✨ SQLite register sync complete.');
   } catch (err) {
     if (err.code === 8) setQuotaExceeded();
     console.warn('⚠️ SQLite seed skipped or partial:', err.message);
