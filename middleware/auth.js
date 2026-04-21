@@ -47,12 +47,23 @@ function verifyAzureToken(req, res, next) {
     if (decoded.tid && decoded.tid !== tenantId)
       return res.status(401).json({ error: 'Invalid tenant' });
 
-    const adminEmails = (process.env.ADMIN_EMAILS || '')
-      .split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
-    const userEmail = (decoded.preferred_username || decoded.upn || '').toLowerCase();
+    // Accept any token from the right tenant:
+    // - api:// access token (full setup)
+    // - Graph/User.Read access token (fallback while api scope is being configured)
+    // - ID token (last resort, aud = clientId)
+    const clientId = process.env.CLIENT_ID;
+    const aud = Array.isArray(decoded.aud) ? decoded.aud : [decoded.aud];
+    const validAuds = [
+      clientId,
+      `api://${clientId}`,
+      'https://graph.microsoft.com',
+      '00000003-0000-0000-c000-000000000000' // Graph app ID
+    ];
+    const audOk = !clientId || aud.some(a => validAuds.some(v => a && a.startsWith(v)));
+    if (!audOk) return res.status(401).json({ error: 'Invalid audience' });
 
     req.user      = decoded;
-    req.isAdmin   = !decoded.extension_Gym; // true only if no gym restriction (owner)
+    req.isAdmin   = !decoded.extension_Gym;
     req.isManager = !!(decoded.roles?.includes('Manager') || decoded.extension_Role === 'manager' || decoded.extension_Gym);
     req.assignedGyms   = decoded.extension_Gym ? [decoded.extension_Gym] : ['all'];
     req.hasAccessToGym = (gymId) => {
