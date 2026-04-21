@@ -275,6 +275,10 @@ function getMembers(gymId) {
   return db.prepare(sql).all(...g.params);
 }
 
+function pruneStaleMember(memberId) {
+  db.prepare('DELETE FROM members_cache WHERE id=?').run(memberId);
+}
+
 // ── REGISTER ─────────────────────────────────────────────────────────────────
 
 const insertRegister = db.prepare(`
@@ -432,7 +436,7 @@ module.exports = {
   // daily stats
   upsertDailyStat, getDailyStats, getDailyStat,
   // members
-  upsertMembers, getMembers,
+  upsertMembers, getMembers, pruneStaleMember,
   // register
   upsertRegister, getRegister, deleteRegisterEntry,
   // decaissements

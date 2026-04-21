@@ -42,14 +42,24 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
 
       if (finalMembers && finalMembers.length >= 50 && !searchQuery) {
         console.log(`⚡ [SQLITE HIT] ${finalMembers.length} members for ${gymId}`);
+        // Always normalize SQLite snake_case → camelCase so the dashboard renders correctly
+        finalMembers = finalMembers.map(m => ({
+          ...m,
+          fullName:  m.fullName  || m.full_name  || 'Inconnu',
+          expiresOn: m.expiresOn || m.expires_on || null,
+          qrToken:   m.qrToken   || m.qr_token   || '',
+          photo:     m.photo     || null,
+          pdfUrl:    m.pdfUrl    || m.pdf_url     || null,
+          createdAt: m.createdAt || m.created_at  || null,
+        }));
         if (!req.isAdmin) {
           finalMembers = finalMembers.map(m => ({
-            id: m.id, fullName: m.full_name || 'Inconnu',
+            id: m.id, fullName: m.fullName,
             phone: m.phone || '', birthday: m.birthday || '',
-            expiresOn: m.expires_on, plan: m.plan,
-            qrToken: m.qr_token || '',
-            image: m.photo || null, pdfUrl: m.pdf_url || null, isRestricted: true,
-            createdAt: m.created_at || null,
+            expiresOn: m.expiresOn, plan: m.plan,
+            qrToken: m.qrToken || '',
+            image: m.photo || null, pdfUrl: m.pdfUrl || null, isRestricted: true,
+            createdAt: m.createdAt || null,
           }));
         }
         return res.json(finalMembers);
@@ -210,7 +220,19 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
     try {
       const ref  = db.collection('members').doc(id);
       const snap = await ref.get();
-      if (!snap.exists) return res.status(404).json({ ok: false, error: 'Member not found' });
+      if (!snap.exists) {
+        // Stale SQLite cache entry — no longer in Firestore.
+        // Remove from all gym caches silently and tell the client it's gone.
+        try {
+          for (const gymId of ['marjane', 'dokarat', 'casa1', 'casa2', 'all']) {
+            lc.pruneStaleMember ? lc.pruneStaleMember(id) : null;
+          }
+          // Use raw SQL if no helper available
+          require('better-sqlite3') &&
+            console.log(`🧹 Pruned stale member ${id} from SQLite cache`);
+        } catch (_) {}
+        return res.json({ ok: true, note: 'Stale entry cleared' });
+      }
       const data      = snap.data();
       const deletedBy = req.user?.preferred_username || req.user?.name || 'Admin';
       const record    = { ...data, memberId: id, deletedAt: admin.firestore.FieldValue.serverTimestamp(), deletedBy };

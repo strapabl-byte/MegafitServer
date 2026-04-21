@@ -52,12 +52,13 @@ function verifyAzureToken(req, res, next) {
     const userEmail = (decoded.preferred_username || decoded.upn || '').toLowerCase();
 
     req.user      = decoded;
-    // ✅ Anyone who passes Azure token verification is a trusted admin.
-    // Only users from tenant a78f9474 can produce a valid token — the owner controls who's in the tenant.
-    req.isAdmin   = true;
-    req.isManager = !!(decoded.roles?.includes('Manager') || decoded.extension_Role === 'manager');
-    req.assignedGyms   = decoded.assignedGyms || (decoded.extension_Gym ? [decoded.extension_Gym] : ['all']);
-    req.hasAccessToGym = () => true; // admin sees all gyms
+    req.isAdmin   = !decoded.extension_Gym; // true only if no gym restriction (owner)
+    req.isManager = !!(decoded.roles?.includes('Manager') || decoded.extension_Role === 'manager' || decoded.extension_Gym);
+    req.assignedGyms   = decoded.extension_Gym ? [decoded.extension_Gym] : ['all'];
+    req.hasAccessToGym = (gymId) => {
+      if (req.assignedGyms.includes('all')) return true;
+      return req.assignedGyms.includes(gymId);
+    };
     next();
   });
 }

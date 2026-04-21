@@ -15,7 +15,15 @@ const { syncGymCounts, scheduleNightlySync } = require('./auto_sync');
 // ─────────────────────────────────────────────────────────────────────────────
 const app = express();
 app.use(helmet());
-app.use(cors());
+app.use(cors({ origin: true, credentials: true }));
+// Chrome Private Network Access — allows localhost:5173 to call localhost:4000
+// without triggering the "Access other apps" permission dialog.
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS' && req.headers['access-control-request-private-network']) {
+    res.setHeader('Access-Control-Allow-Private-Network', 'true');
+  }
+  next();
+});
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 

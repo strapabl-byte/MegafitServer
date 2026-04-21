@@ -105,27 +105,43 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
   router.get('/api/analytics/daily-stats/:gymId', verifyAzureToken, async (req, res) => {
     try {
       const { gymId } = req.params;
+      const includeToday = req.query.includeToday === 'true';
       const gymIds = gymId === 'all' ? ['marjane', 'dokarat', 'casa1', 'casa2'] : gymId.split(',');
-      const dateStrs = Array.from({ length: 30 }, (_, i) => new Date(Date.now() + 3600000 - (29 - i) * 86400000).toISOString().slice(0, 10));
       const today = getMoroccanDateStr();
+
+      // Build date range:
+      // - includeToday=true  → 30 days ending AT today (home page chart, shows live)
+      // - includeToday=false → 30 days ending at YESTERDAY (Revenue Chronology, no mid-day drop)
+      const days = 30;
+      const offset = includeToday ? 0 : 1; // 0 = include today, 1 = stop at yesterday
+      const dateStrs = Array.from({ length: days }, (_, i) =>
+        new Date(Date.now() + 3600000 - (days - 1 - i + offset) * 86400000).toISOString().slice(0, 10)
+      );
+
       const map = {};
       dateStrs.forEach(d => map[d] = { count: 0, rawCount: 0, revenue: 0, revPerGym: {} });
 
       for (const gid of gymIds) {
-        lc.getDailyStats(gid, 30).forEach(s => {
-          if (map[s.date] && s.date !== today) { map[s.date].count += s.count || 0; map[s.date].rawCount += s.rawCount || 0; }
+        lc.getDailyStats(gid, 31).forEach(s => {
+          if (map[s.date] && s.date !== today) {
+            map[s.date].count    += s.count    || 0;
+            map[s.date].rawCount += s.rawCount || 0;
+          }
         });
-        const cached = lc.getDailyStat(gid, today);
-        const uniq   = lc.getUniqueEntryCount(gid, today);
-        const raw    = lc.getEntryCount(gid, today);
-        map[today].count    += cached ? Math.max(cached.count, uniq) : uniq;
-        map[today].rawCount += cached ? Math.max(cached.raw_count, raw) : raw;
+        // Merge live count for today only when requested
+        if (includeToday && map[today] !== undefined) {
+          const cached = lc.getDailyStat(gid, today);
+          const uniq   = lc.getUniqueEntryCount(gid, today);
+          const raw    = lc.getEntryCount(gid, today);
+          map[today].count    += cached ? Math.max(cached.count, uniq) : uniq;
+          map[today].rawCount += cached ? Math.max(cached.raw_count, raw) : raw;
+        }
       }
 
-      // Append Revenue calculation via seamless SQLite scan
+      // Revenue from SQLite register (completed days) + today register if requested
       dateStrs.forEach(d => {
          let rev = 0;
-         let revPerGym = {};
+         const revPerGym = {};
          for (const gid of gymIds) {
             let gymRev = 0;
             lc.getRegister(gid, d).forEach(e => {
