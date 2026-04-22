@@ -1,5 +1,5 @@
-'use strict';
-// routes/analytics.js — Daily stats, KPIs, live door entries, entry logging
+﻿'use strict';
+// routes/analytics.js ??? Daily stats, KPIs, live door entries, entry logging
 
 const { Router } = require('express');
 const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
@@ -22,7 +22,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
 
   const DOOR_URL = `https://firestore.googleapis.com/v1/projects/${process.env.DOOR_PROJECT_ID || 'megadoor-b3ccb'}/databases/(default)/documents:runQuery?key=${process.env.DOOR_FIREBASE_API_KEY || ''}`;
 
-  // ── GET /api/analytics/megaeye-registrations ──────────────────────────────
+  // ?????? GET /api/analytics/megaeye-registrations ??????????????????????????????????????????????????????????????????????????????????????????
   router.get('/api/analytics/megaeye-registrations', verifyAzureToken, async (req, res) => {
     try {
       const { gymId, timeFilter } = req.query; // 'day' or 'week'
@@ -34,7 +34,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     }
   });
 
-  // ── GET /api/live-entries ───────────────────────────────────────
+  // ?????? GET /api/live-entries ?????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
   router.get('/api/live-entries', verifyAzureToken, async (req, res) => {
     try {
       const { gymId, limit: limitParam } = req.query;
@@ -67,12 +67,12 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
                 const loc  = (f.location?.stringValue || '').toLowerCase();
                 const tags = g.locationTags.map(t => t.toLowerCase());
                 if (!tags.some(t => loc.includes(t) || t.includes(loc))) return;
-                newEntries.push({ id: d.document.name?.split('/').pop() || ts, gym_id: gid, date: today, timestamp: ts, name: f.name?.stringValue || '', method: f.method?.stringValue || '', status: f.status?.stringValue || 'Entrée', is_face: (f.method?.stringValue || '').toLowerCase().includes('face') ? 1 : 0 });
+                newEntries.push({ id: d.document.name?.split('/').pop() || ts, gym_id: gid, date: today, timestamp: ts, name: f.name?.stringValue || '', method: f.method?.stringValue || '', status: f.status?.stringValue || 'Entr??e', is_face: (f.method?.stringValue || '').toLowerCase().includes('face') ? 1 : 0 });
               });
             }
             if (newEntries.length > 0) lc.upsertEntries(gid, newEntries);
             lc.setMeta(lastSyncKey, String(Date.now()));
-          } catch (e) { console.warn(`⚠️ Sync failed for ${gid}: ${e.message}`); }
+          } catch (e) { console.warn(`?????? Sync failed for ${gid}: ${e.message}`); }
         }
       }));
 
@@ -89,7 +89,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     }
   });
 
-  // ── GET /api/live-count ────────────────────────────────────────
+  // ?????? GET /api/live-count ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
   router.get('/api/live-count', verifyAzureToken, async (req, res) => {
     try {
       const { gymId } = req.query;
@@ -113,7 +113,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     }
   });
 
-  // ── GET /api/analytics/daily-stats/:gymId ────────────────────────
+  // ?????? GET /api/analytics/daily-stats/:gymId ????????????????????????????????????????????????????????????????????????
   router.get('/api/analytics/daily-stats/:gymId', verifyAzureToken, async (req, res) => {
     try {
       const { gymId } = req.params;
@@ -122,8 +122,8 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
       const today = getMoroccanDateStr();
 
       // Build date range:
-      // - includeToday=true  → 30 days ending AT today (home page chart, shows live)
-      // - includeToday=false → 30 days ending at YESTERDAY (Revenue Chronology, no mid-day drop)
+      // - includeToday=true  ??? 30 days ending AT today (home page chart, shows live)
+      // - includeToday=false ??? 30 days ending at YESTERDAY (Revenue Chronology, no mid-day drop)
       const days = 30;
       const offset = includeToday ? 0 : 1; // 0 = include today, 1 = stop at yesterday
       const dateStrs = Array.from({ length: days }, (_, i) =>
@@ -173,7 +173,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     }
   });
 
-  // ── GET /api/analytics/kpis/:gymId ─────────────────────────────
+  // ?????? GET /api/analytics/kpis/:gymId ???????????????????????????????????????????????????????????????????????????????????????
   router.get('/api/analytics/kpis/:gymId', verifyAzureToken, async (req, res) => {
     try {
       const { gymId } = req.params;
@@ -191,7 +191,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
       const ts = (d) => admin.firestore.Timestamp.fromDate(d);
       const tsToday = ts(todayStart), tsWeek = ts(weekStart), tsMonth = ts(monthStart), tsYear = ts(yearStart);
 
-      // ── New members count from register (source of truth, same as Register page) ──
+      // ?????? New members count from register (source of truth, same as Register page) ??????
       const countRegisterInRange = (fromDate) => {
         let count = 0;
         const cursor = new Date(fromDate);
@@ -206,7 +206,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
       const gymIds = gymId === 'all' ? ['dokarat', 'marjane', 'casa1', 'casa2'] : gymId.split(',');
       const toLocalDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 
-      // ── Revenue from SQLite register cache — sum ALL payment columns ──
+      // ?????? Revenue from SQLite register cache ??? sum ALL payment columns ??????
       const getRevenueAndBreakdown = (fromDate) => {
         let total = 0, espece = 0, tpe = 0, virement = 0, cheque = 0;
         const cursor = new Date(fromDate);
@@ -235,7 +235,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
         return { total, espece, tpe, virement, cheque };
       };
 
-      // ── Count SQLite entries this month to decide if we need Firestore ──
+      // ?????? Count SQLite entries this month to decide if we need Firestore ??????
       const countCachedEntries = (fromDate) => {
         let count = 0;
         const cursor = new Date(fromDate);
@@ -247,7 +247,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
         return count;
       };
 
-      // ── Firestore fallback for historical months not yet in SQLite ──
+      // ?????? Firestore fallback for historical months not yet in SQLite ??????
       const fetchFirestoreRegisterIncome = async (fromTs) => {
         const start = new Date(fromTs.toMillis());
         const dayCount = Math.ceil((now - start) / (1000 * 60 * 60 * 24)) + 1;
@@ -286,15 +286,15 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
       let incomeDay, incomeWeek, incomeMonth, incomeYear;
 
       if (monthCachedCount >= 3) {
-        // SQLite has data — use it (fast, no quota cost)
-        console.log(`✅ [KPI] SQLite: ${monthCachedCount} entries for ${gymId} — reading prix from local cache`);
+        // SQLite has data ??? use it (fast, no quota cost)
+        console.log(`??? [KPI] SQLite: ${monthCachedCount} entries for ${gymId} ??? reading prix from local cache`);
         incomeDay   = getRevenueAndBreakdown(todayStart);
         incomeWeek  = getRevenueAndBreakdown(weekStart);
         incomeMonth = getRevenueAndBreakdown(monthStart);
         incomeYear  = getRevenueAndBreakdown(yearStart);
       } else {
         // Fallback to Firestore
-        console.log(`📡 [KPI] SQLite sparse (${monthCachedCount} entries) for ${gymId} — falling back to Firestore`);
+        console.log(`???? [KPI] SQLite sparse (${monthCachedCount} entries) for ${gymId} ??? falling back to Firestore`);
         [incomeDay, incomeWeek, incomeMonth, incomeYear] = await Promise.all([
           fetchFirestoreRegisterIncome(tsToday),
           fetchFirestoreRegisterIncome(tsWeek),
@@ -310,7 +310,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
       };
 
       apiCache.kpis[gymId] = { data: kpis, ts: Date.now() };
-      console.log(`📊 [KPI] ${gymId}: income day=${incomeDay.total} | week=${incomeWeek.total} | month=${incomeMonth.total} | year=${incomeYear.total} DH`);
+      console.log(`???? [KPI] ${gymId}: income day=${incomeDay.total} | week=${incomeWeek.total} | month=${incomeMonth.total} | year=${incomeYear.total} DH`);
       res.json(kpis);
     } catch (err) {
       console.error('KPI Calculation Error:', err);
@@ -318,7 +318,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     }
   });
 
-  // ── POST /api/admin/sync-stats ──────────────────────────────────
+  // ?????? POST /api/admin/sync-stats ??????????????????????????????????????????????????????????????????????????????????????????????????????
   router.post('/api/admin/sync-stats', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
       const days = parseInt(req.query.days) || 7;
@@ -330,7 +330,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     }
   });
 
-  // ── POST /api/analytics/log-entry ────────────────────────────────
+  // ?????? POST /api/analytics/log-entry ????????????????????????????????????????????????????????????????????????????????????????????????
   router.post('/api/analytics/log-entry', verifyAzureToken, async (req, res) => {
     try {
       const { gymId, userId } = req.body;
@@ -343,7 +343,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
       await db.runTransaction(async (t) => {
         const doc = await t.get(docRef);
         const vis = await t.get(visitorRef);
-        if (vis.exists && Date.now() - vis.data().lastScannedAt.toDate().getTime() < 600000) { console.log(`🛡️ Dedup: ${userId} at ${gymId}`); return; }
+        if (vis.exists && Date.now() - vis.data().lastScannedAt.toDate().getTime() < 600000) { console.log(`??????? Dedup: ${userId} at ${gymId}`); return; }
         if (!doc.exists) { t.set(docRef, { gym_id: gymId, date: todayStr, count: 1, lastSyncedAt: admin.firestore.FieldValue.serverTimestamp() }); }
         else { t.update(docRef, { count: (doc.data().count || 0) + 1, lastSyncedAt: admin.firestore.FieldValue.serverTimestamp() }); }
         t.set(visitorRef, { userId, lastScannedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
@@ -355,7 +355,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     }
   });
 
-  // ── POST /api/analytics/megaeye-chat ────────────────────────────────────────
+  // ?????? POST /api/analytics/megaeye-chat ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
   // Interactive Groq chat: accepts a user question + context, returns AI answer
   router.post('/api/analytics/megaeye-chat', verifyAzureToken, requireAdmin, async (req, res) => {
     const { question, sector, kpis, dailyStats, liveEntries } = req.body;
@@ -365,10 +365,10 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     const GROQ_KEY_FALLBACK = process.env.GROQ_API_KEY_FALLBACK;
 
     if (!GROQ_KEY && !GROQ_KEY_FALLBACK) {
-      return res.json({ answer: '⚠️ No GROQ_API_KEY configured on server.' });
+      return res.json({ answer: '?????? No GROQ_API_KEY configured on server.' });
     }
 
-    // Helper: call Groq — models confirmed active via /openai/v1/models (April 2026)
+    // Helper: call Groq ??? models confirmed active via /openai/v1/models (April 2026)
     const GROQ_MODEL          = 'llama-3.3-70b-versatile'; // primary
     const GROQ_MODEL_FALLBACK = 'llama-3.1-8b-instant';    // fallback
     const callGroq = async (key, messages, model = GROQ_MODEL) => {
@@ -386,19 +386,19 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     };
 
     try {
-      // ── Gym name mapping ────────────────────────────────────────────────────
-      const GYM_NAMES = { all: 'ALL EMPIRE (Dokarat + Marjane + Casa Anfa + Lady Anfa)', dokarat: 'Dokarat (Fès)', marjane: 'Marjane Saiss (Fès)', casa1: 'Casa Anfa (Casablanca)', casa2: 'Lady Anfa (Casablanca)' };
+      // ?????? Gym name mapping ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
+      const GYM_NAMES = { all: 'ALL EMPIRE (Dokarat + Marjane + Casa Anfa + Lady Anfa)', dokarat: 'Dokarat (F??s)', marjane: 'Marjane Saiss (F??s)', casa1: 'Casa Anfa (Casablanca)', casa2: 'Lady Anfa (Casablanca)' };
       const sectorName = GYM_NAMES[sector] || sector || 'ALL EMPIRE';
 
-      // ── KPI context ─────────────────────────────────────────────────────────
+      // ?????? KPI context ???????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
       const kpiContext = kpis ? [
         `GYM / SECTOR: ${sectorName}`,
-        `Revenue  → Today: ${(kpis?.income?.day||0).toLocaleString()} DH | This week: ${(kpis?.income?.week||0).toLocaleString()} DH | This month: ${(kpis?.income?.month||0).toLocaleString()} DH | This year: ${(kpis?.income?.year||0).toLocaleString()} DH`,
-        `New memberships → Today: ${kpis?.newMembers?.day||0} | This week: ${kpis?.newMembers?.week||0} | This month: ${kpis?.newMembers?.month||0}`,
+        `Revenue  ??? Today: ${(kpis?.income?.day||0).toLocaleString()} DH | This week: ${(kpis?.income?.week||0).toLocaleString()} DH | This month: ${(kpis?.income?.month||0).toLocaleString()} DH | This year: ${(kpis?.income?.year||0).toLocaleString()} DH`,
+        `New memberships ??? Today: ${kpis?.newMembers?.day||0} | This week: ${kpis?.newMembers?.week||0} | This month: ${kpis?.newMembers?.month||0}`,
         `Total active members: ${kpis?.totalActive || 'N/A'}`,
       ].join('\n') : `GYM / SECTOR: ${sectorName}\nNo KPI data available.`;
 
-      // ── 30-day door traffic from SQLite ─────────────────────────────────────
+      // ?????? 30-day door traffic from SQLite ???????????????????????????????????????????????????????????????????????????????????????????????????????????????
       let trafficContext = '';
       if (Array.isArray(dailyStats) && dailyStats.length > 0) {
         const total30 = dailyStats.reduce((s, d) => s + (d.count || 0), 0);
@@ -414,14 +414,14 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
           `Daily (last 10 days): ${dailyStats.slice(-10).map(d=>`${d.date.slice(5)}:${d.count||0}`).join(' | ')}`,
         ].join('\n');
       }
-      // ── Live door entries ────────────────────────────────────────────────────
+      // ?????? Live door entries ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
       let liveContext = '';
       if (Array.isArray(liveEntries) && liveEntries.length > 0) {
         liveContext = `\n--- LIVE ENTRIES TODAY (${sectorName}) ---\n` +
           liveEntries.map(e => `  ${e.name||'?'} @ ${e.time ? new Date(e.time).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}) : '??:??'} (${e.source||'scan'})`).join('\n');
       }
 
-      // ── Course & Reservation Context ─────────────────────────────────────────
+      // ?????? Course & Reservation Context ???????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
       let courseContext = '';
       try {
         const cSnap = await db.collection('courses').get();
@@ -437,7 +437,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
         console.error("Megaeye course context error:", err);
       }
 
-      // ── Subscriptions Context ──────────────────────────────────────────────
+      // ?????? Subscriptions Context ??????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
       let subsContext = '';
       try {
          const { DEFAULT_SUBSCRIPTION_GROUPS } = require('./config');
@@ -488,8 +488,234 @@ ${fullContext}`
       res.json({ answer: raw, sentiment });
     } catch (err) {
       console.error('Groq chat error:', err);
-      res.status(500).json({ error: 'Groq service unavailable', answer: '⚠️ Neural core offline.' });
+      res.status(500).json({ error: 'Groq service unavailable', answer: '?????? Neural core offline.' });
     }
   });
 
-  // \u2500\u2500 INCIDENTS (SQLite-backed, Firestore-write-through) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  // Cache TTL: 10 minutes — avoids Firestore reads on every dashboard refresh\n  const INCIDENTS_TTL_MS = 10 * 60 * 1000;\n  let incidentsCachedAt = 0;\n\n  async function syncIncidentsFromFirestore() {\n    const now = Date.now();\n    if (now - incidentsCachedAt < INCIDENTS_TTL_MS) return; // still fresh\n    try {\n      const snap = await db.collection('incidents').orderBy('createdAt', 'desc').limit(200).get();\n      const rows = snap.docs.map(d => {\n        const data = d.data();\n        return {\n          id: d.id,\n          gymId: data.gymId || '',\n          gymName: data.gymName || '',\n          title: data.title || '',\n          cause: data.cause || '',\n          explanation: data.explanation || '',\n          emergency: data.emergency || 'Low',\n          status: data.status || 'Pending',\n          reporter: data.reporter || '',\n          date: data.date || '',\n          createdAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : new Date().toISOString(),\n        };\n      });\n      lc.upsertIncidents(rows);\n      incidentsCachedAt = now;\n      console.log(`\u26a1 [INCIDENTS] Synced ${rows.length} incidents to SQLite`);\n    } catch (err) {\n      console.error('[INCIDENTS] Firestore sync failed, serving stale cache:', err.message);\n    }\n  }\n\n  // GET /api/incidents — serve from SQLite, sync Firestore only when stale\n  router.get('/api/incidents', verifyAzureToken, async (req, res) => {\n    try {\n      await syncIncidentsFromFirestore();\n      const gymId = req.query.gymId || 'all';\n      const rows = lc.getIncidents(gymId);\n      // Normalize snake_case → camelCase for frontend\n      const out = rows.map(r => ({\n        id: r.id, gymId: r.gym_id, gymName: r.gym_name,\n        title: r.title, cause: r.cause, explanation: r.explanation,\n        emergency: r.emergency, status: r.status,\n        reporter: r.reporter, date: r.date, createdAt: r.created_at,\n      }));\n      res.json(out);\n    } catch (err) {\n      console.error('[INCIDENTS GET] error:', err);\n      res.status(500).json({ error: 'Failed to fetch incidents' });\n    }\n  });\n\n  // POST /api/incidents — write to Firestore + SQLite immediately\n  router.post('/api/incidents', verifyAzureToken, async (req, res) => {\n    try {\n      const { gymId, gymName, title, cause, explanation, emergency, reporter, date } = req.body;\n      const docRef = await db.collection('incidents').add({\n        gymId, gymName, title, cause, explanation, emergency,\n        reporter, date, status: 'Pending',\n        createdAt: admin.firestore.FieldValue.serverTimestamp(),\n        updatedAt: admin.firestore.FieldValue.serverTimestamp(),\n      });\n      const now = new Date().toISOString();\n      lc.upsertIncidents([{ id: docRef.id, gymId, gymName, title, cause, explanation, emergency, reporter, date, status: 'Pending', createdAt: now }]);\n      incidentsCachedAt = 0; // force refresh on next GET\n      res.json({ id: docRef.id, gymId, gymName, title, cause, explanation, emergency, reporter, date, status: 'Pending', createdAt: now });\n    } catch (err) {\n      console.error('[INCIDENTS POST] error:', err);\n      res.status(500).json({ error: 'Failed to create incident' });\n    }\n  });\n\n  // PATCH /api/incidents/:id/resolve — update SQLite instantly, Firestore in background\n  router.patch('/api/incidents/:id/resolve', verifyAzureToken, async (req, res) => {\n    try {\n      lc.resolveIncidentCache(req.params.id); // immediate SQLite update\n      // Fire-and-forget Firestore update (non-blocking)\n      db.collection('incidents').doc(req.params.id).update({\n        status: 'Resolved', updatedAt: admin.firestore.FieldValue.serverTimestamp()\n      }).catch(err => console.error('[INCIDENTS RESOLVE Firestore]', err.message));\n      res.json({ ok: true });\n    } catch (err) {\n      res.status(500).json({ error: 'Failed to resolve incident' });\n    }\n  });\n\n  // \u2500\u2500 KIDS COURSES (SQLite only \u2014 zero Firestore reads) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n  // GET /public/kids-courses — no auth required (mobile app access)\n  router.get('/public/kids-courses', (req, res) => {\n    try {\n      const gymId = req.query.gym || 'dokarat';\n      const rows  = lc.getKidsCourses(gymId);\n      res.json(rows.map(r => ({\n        id: r.id, gymId: r.gym_id, groupId: r.group_id, groupName: r.group_name,\n        day: r.day, timeStart: r.time_start, timeEnd: r.time_end,\n        activity: r.activity, ages: r.ages, updatedAt: r.updated_at,\n      })));\n    } catch (err) { res.status(500).json({ error: 'Failed to fetch kids courses' }); }\n  });\n\n  // GET /api/kids-courses — authenticated dashboard access\n  router.get('/api/kids-courses', verifyAzureToken, (req, res) => {\n    try {\n      const gymId = req.query.gym || 'dokarat';\n      const rows  = lc.getKidsCourses(gymId);\n      res.json(rows.map(r => ({\n        id: r.id, gymId: r.gym_id, groupId: r.group_id, groupName: r.group_name,\n        day: r.day, timeStart: r.time_start, timeEnd: r.time_end,\n        activity: r.activity, ages: r.ages, updatedAt: r.updated_at,\n      })));\n    } catch (err) { res.status(500).json({ error: 'Failed to fetch kids courses' }); }\n  });\n\n  // POST /api/kids-courses — create new session\n  router.post('/api/kids-courses', verifyAzureToken, (req, res) => {\n    try {\n      const { gymId, groupId, groupName, day, timeStart, timeEnd, activity, ages } = req.body;\n      if (!groupId || !day || !timeStart || !timeEnd || !activity || !ages) {\n        return res.status(400).json({ error: 'Missing required fields' });\n      }\n      const id = lc.upsertKidsCourse({ gymId: gymId || 'dokarat', groupId, groupName, day, timeStart, timeEnd, activity, ages });\n      res.json({ id, gymId: gymId || 'dokarat', groupId, groupName, day, timeStart, timeEnd, activity, ages });\n    } catch (err) { res.status(500).json({ error: 'Failed to create kids course' }); }\n  });\n\n  // PUT /api/kids-courses/:id — update existing session\n  router.put('/api/kids-courses/:id', verifyAzureToken, (req, res) => {\n    try {\n      const { groupId, groupName, day, timeStart, timeEnd, activity, ages } = req.body;\n      lc.updateKidsCourse(req.params.id, {\n        group_id: groupId, group_name: groupName, day,\n        time_start: timeStart, time_end: timeEnd, activity, ages,\n      });\n      res.json({ ok: true });\n    } catch (err) { res.status(500).json({ error: 'Failed to update kids course' }); }\n  });\n\n  // DELETE /api/kids-courses/:id\n  router.delete('/api/kids-courses/:id', verifyAzureToken, (req, res) => {\n    try {\n      lc.deleteKidsCourse(req.params.id);\n      res.json({ ok: true });\n    } catch (err) { res.status(500).json({ error: 'Failed to delete kids course' }); }\n  });\n\n  // POST /api/kids-courses/seed — re-seed defaults (idempotent)\n  router.post('/api/kids-courses/seed', verifyAzureToken, requireAdmin, (req, res) => {\n    try {\n      const defaults = [\n        { groupId:'A', groupName:'Les MEGAfit Dynamiques',       day:'Mercredi', timeStart:'14:30', timeEnd:'15:30', activity:'Natation', ages:'5ans-9ans' },\n        { groupId:'A', groupName:'Les MEGAfit Dynamiques',       day:'Samedi',   timeStart:'10:00', timeEnd:'11:00', activity:'Funfit',   ages:'5ans-8ans' },\n        { groupId:'A', groupName:'Les MEGAfit Dynamiques',       day:'Dimanche', timeStart:'10:00', timeEnd:'11:00', activity:'Natation', ages:'5ans-9ans' },\n        { groupId:'B', groupName:'Les MEGAfit Junior-Énergie',   day:'Mercredi', timeStart:'15:30', timeEnd:'16:30', activity:'Natation', ages:'10ans-14ans' },\n        { groupId:'B', groupName:'Les MEGAfit Junior-Énergie',   day:'Samedi',   timeStart:'11:00', timeEnd:'12:00', activity:'Funfit',   ages:'9ans-14ans' },\n        { groupId:'B', groupName:'Les MEGAfit Junior-Énergie',   day:'Dimanche', timeStart:'11:00', timeEnd:'12:00', activity:'Natation', ages:'10ans-14ans' },\n        { groupId:'C', groupName:'Les MEGAfit Aqua Nageurs',     day:'Vendredi', timeStart:'15:00', timeEnd:'16:00', activity:'Natation', ages:'5ans-14ans' },\n        { groupId:'C', groupName:'Les MEGAfit Aqua Nageurs',     day:'Samedi',   timeStart:'10:00', timeEnd:'11:00', activity:'Funfit',   ages:'5ans-8ans' },\n        { groupId:'C', groupName:'Les MEGAfit Aqua Nageurs',     day:'Samedi',   timeStart:'11:00', timeEnd:'12:00', activity:'Funfit',   ages:'9ans-14ans' },\n        { groupId:'C', groupName:'Les MEGAfit Aqua Nageurs',     day:'Dimanche', timeStart:'12:00', timeEnd:'13:00', activity:'Natation', ages:'5ans-14ans' },\n        { groupId:'D', groupName:'Les MEGAfit Futurs Champions', day:'Samedi',   timeStart:'14:00', timeEnd:'15:00', activity:'Funfit',   ages:'5ans-14ans' },\n        { groupId:'D', groupName:'Les MEGAfit Futurs Champions', day:'Samedi',   timeStart:'15:00', timeEnd:'16:00', activity:'Natation', ages:'5ans-14ans' },\n        { groupId:'D', groupName:'Les MEGAfit Futurs Champions', day:'Dimanche', timeStart:'12:00', timeEnd:'13:00', activity:'Natation', ages:'5ans-14ans' },\n        { groupId:'E', groupName:'Les MEGAfit Tout-Petits',      day:'Mercredi', timeStart:'14:30', timeEnd:'15:30', activity:'Natation', ages:'3ans-4ans'  },\n        { groupId:'E', groupName:'Les MEGAfit Tout-Petits',      day:'Dimanche', timeStart:'10:00', timeEnd:'11:00', activity:'Natation', ages:'3ans-4ans'  },\n      ];\n      defaults.forEach(d => lc.upsertKidsCourse({ ...d, gymId: 'dokarat' }));\n      res.json({ ok: true, seeded: defaults.length });\n    } catch (err) { res.status(500).json({ error: 'Seed failed' }); }\n  });\n\n  return router;\n};\n
+
+  // â”€â”€ INCIDENTS (SQLite-backed, Firestore-write-through) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Cache TTL: 10 minutes â€” avoids Firestore reads on every dashboard refresh
+  const INCIDENTS_TTL_MS = 10 * 60 * 1000;
+  let incidentsCachedAt = 0;
+
+  async function syncIncidentsFromFirestore() {
+    const now = Date.now();
+    if (now - incidentsCachedAt < INCIDENTS_TTL_MS) return;
+    try {
+      const snap = await db.collection('incidents').orderBy('createdAt', 'desc').limit(200).get();
+      const rows = snap.docs.map(d => {
+        const data = d.data();
+        return {
+          id: d.id,
+          gymId: data.gymId || '',
+          gymName: data.gymName || '',
+          title: data.title || '',
+          cause: data.cause || '',
+          explanation: data.explanation || '',
+          emergency: data.emergency || 'Low',
+          status: data.status || 'Pending',
+          reporter: data.reporter || '',
+          date: data.date || '',
+          createdAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : new Date().toISOString(),
+        };
+      });
+      lc.upsertIncidents(rows);
+      incidentsCachedAt = now;
+      console.log(`[INCIDENTS] Synced ${rows.length} incidents to SQLite`);
+    } catch (err) {
+      console.error('[INCIDENTS] Firestore sync failed, serving stale cache:', err.message);
+    }
+  }
+
+  // GET /api/incidents
+  router.get('/api/incidents', verifyAzureToken, async (req, res) => {
+    try {
+      await syncIncidentsFromFirestore();
+      const gymId = req.query.gymId || 'all';
+      const rows = lc.getIncidents(gymId);
+      const out = rows.map(r => ({
+        id: r.id, gymId: r.gym_id, gymName: r.gym_name,
+        title: r.title, cause: r.cause, explanation: r.explanation,
+        emergency: r.emergency, status: r.status,
+        reporter: r.reporter, date: r.date, createdAt: r.created_at,
+      }));
+      res.json(out);
+    } catch (err) {
+      console.error('[INCIDENTS GET] error:', err);
+      res.status(500).json({ error: 'Failed to fetch incidents' });
+    }
+  });
+
+  // POST /api/incidents
+  router.post('/api/incidents', verifyAzureToken, async (req, res) => {
+    try {
+      const { gymId, gymName, title, cause, explanation, emergency, reporter, date } = req.body;
+      const docRef = await db.collection('incidents').add({
+        gymId, gymName, title, cause, explanation, emergency,
+        reporter, date, status: 'Pending',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      const now = new Date().toISOString();
+      lc.upsertIncidents([{ id: docRef.id, gymId, gymName, title, cause, explanation, emergency, reporter, date, status: 'Pending', createdAt: now }]);
+      incidentsCachedAt = 0;
+      res.json({ id: docRef.id, gymId, gymName, title, cause, explanation, emergency, reporter, date, status: 'Pending', createdAt: now });
+    } catch (err) {
+      console.error('[INCIDENTS POST] error:', err);
+      res.status(500).json({ error: 'Failed to create incident' });
+    }
+  });
+
+  // PATCH /api/incidents/:id/resolve
+  router.patch('/api/incidents/:id/resolve', verifyAzureToken, async (req, res) => {
+    try {
+      lc.resolveIncidentCache(req.params.id);
+      db.collection('incidents').doc(req.params.id).update({
+        status: 'Resolved', updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }).catch(err => console.error('[INCIDENTS RESOLVE Firestore]', err.message));
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to resolve incident' });
+    }
+  });
+
+  // â”€â”€ KIDS COURSES (SQLite read, Firestore write-through on mutations) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // READ  â†’ always SQLite (zero Firestore reads)
+  // WRITE â†’ SQLite immediately + Firestore fire-and-forget (backup/sync)
+  // STARTUP RECOVERY â†’ if SQLite empty, pull once from Firestore
+
+  async function syncKidsFromFirestore(gymId) {
+    try {
+      const snap = await db.collection('kids_courses').where('gymId', '==', gymId).get();
+      if (snap.empty) return;
+      snap.docs.forEach(d => {
+        const data = d.data();
+        lc.upsertKidsCourse({
+          id: d.id,
+          gymId: data.gymId || gymId,
+          groupId: data.groupId || '',
+          groupName: data.groupName || '',
+          day: data.day || '',
+          timeStart: data.timeStart || '',
+          timeEnd: data.timeEnd || '',
+          activity: data.activity || '',
+          ages: data.ages || '',
+        });
+      });
+      console.log(`[KIDS] Recovered ${snap.size} sessions from Firestore â†’ SQLite`);
+    } catch (err) {
+      console.error('[KIDS] Firestore recovery failed:', err.message);
+    }
+  }
+
+  function kidsRow(r) {
+    return {
+      id: r.id, gymId: r.gym_id, groupId: r.group_id, groupName: r.group_name,
+      day: r.day, timeStart: r.time_start, timeEnd: r.time_end,
+      activity: r.activity, ages: r.ages, updatedAt: r.updated_at,
+    };
+  }
+
+  // GET /public/kids-courses â€” no auth (mobile app)
+  router.get('/public/kids-courses', async (req, res) => {
+    try {
+      const gymId = req.query.gym || 'dokarat';
+      let rows = lc.getKidsCourses(gymId);
+      if (rows.length === 0) { await syncKidsFromFirestore(gymId); rows = lc.getKidsCourses(gymId); }
+      res.json(rows.map(kidsRow));
+    } catch (err) { res.status(500).json({ error: 'Failed to fetch kids courses' }); }
+  });
+
+  // GET /api/kids-courses â€” authenticated dashboard
+  router.get('/api/kids-courses', verifyAzureToken, async (req, res) => {
+    try {
+      const gymId = req.query.gym || 'dokarat';
+      let rows = lc.getKidsCourses(gymId);
+      if (rows.length === 0) { await syncKidsFromFirestore(gymId); rows = lc.getKidsCourses(gymId); }
+      res.json(rows.map(kidsRow));
+    } catch (err) { res.status(500).json({ error: 'Failed to fetch kids courses' }); }
+  });
+
+  // POST /api/kids-courses â€” create + write-through to Firestore
+  router.post('/api/kids-courses', verifyAzureToken, async (req, res) => {
+    try {
+      const { gymId, groupId, groupName, day, timeStart, timeEnd, activity, ages } = req.body;
+      if (!groupId || !day || !timeStart || !timeEnd || !activity || !ages) {
+        return res.status(400).json({ error: 'Missing required fields' });
+      }
+      const id = lc.upsertKidsCourse({ gymId: gymId || 'dokarat', groupId, groupName, day, timeStart, timeEnd, activity, ages });
+      // Fire-and-forget Firestore sync
+      db.collection('kids_courses').doc(id).set({
+        gymId: gymId || 'dokarat', groupId, groupName, day, timeStart, timeEnd, activity, ages,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }).catch(e => console.error('[KIDS POST Firestore]', e.message));
+      res.json({ id, gymId: gymId || 'dokarat', groupId, groupName, day, timeStart, timeEnd, activity, ages });
+    } catch (err) { res.status(500).json({ error: 'Failed to create kids course' }); }
+  });
+
+  // PUT /api/kids-courses/:id â€” update + write-through to Firestore
+  router.put('/api/kids-courses/:id', verifyAzureToken, async (req, res) => {
+    try {
+      const { groupId, groupName, day, timeStart, timeEnd, activity, ages } = req.body;
+      lc.updateKidsCourse(req.params.id, {
+        group_id: groupId, group_name: groupName, day,
+        time_start: timeStart, time_end: timeEnd, activity, ages,
+      });
+      // Fire-and-forget Firestore sync
+      db.collection('kids_courses').doc(req.params.id).update({
+        groupId, groupName, day, timeStart, timeEnd, activity, ages,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }).catch(e => console.error('[KIDS PUT Firestore]', e.message));
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: 'Failed to update kids course' }); }
+  });
+
+  // DELETE /api/kids-courses/:id â€” delete from SQLite + Firestore
+  router.delete('/api/kids-courses/:id', verifyAzureToken, async (req, res) => {
+    try {
+      lc.deleteKidsCourse(req.params.id);
+      db.collection('kids_courses').doc(req.params.id).delete()
+        .catch(e => console.error('[KIDS DELETE Firestore]', e.message));
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: 'Failed to delete kids course' }); }
+  });
+
+  // POST /api/kids-courses/seed â€” reset to official schedule (idempotent)
+  router.post('/api/kids-courses/seed', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const defaults = [
+        { groupId:'A', groupName:'Les MEGAfit Dynamiques',       day:'Mercredi', timeStart:'14:30', timeEnd:'15:30', activity:'Natation', ages:'5ans-9ans' },
+        { groupId:'A', groupName:'Les MEGAfit Dynamiques',       day:'Samedi',   timeStart:'10:00', timeEnd:'11:00', activity:'Funfit',   ages:'5ans-8ans' },
+        { groupId:'A', groupName:'Les MEGAfit Dynamiques',       day:'Dimanche', timeStart:'10:00', timeEnd:'11:00', activity:'Natation', ages:'5ans-9ans' },
+        { groupId:'B', groupName:'Les MEGAfit Junior-Energie',   day:'Mercredi', timeStart:'15:30', timeEnd:'16:30', activity:'Natation', ages:'10ans-14ans' },
+        { groupId:'B', groupName:'Les MEGAfit Junior-Energie',   day:'Samedi',   timeStart:'11:00', timeEnd:'12:00', activity:'Funfit',   ages:'9ans-14ans' },
+        { groupId:'B', groupName:'Les MEGAfit Junior-Energie',   day:'Dimanche', timeStart:'11:00', timeEnd:'12:00', activity:'Natation', ages:'10ans-14ans' },
+        { groupId:'C', groupName:'Les MEGAfit Aqua Nageurs',     day:'Vendredi', timeStart:'15:00', timeEnd:'16:00', activity:'Natation', ages:'5ans-14ans' },
+        { groupId:'C', groupName:'Les MEGAfit Aqua Nageurs',     day:'Samedi',   timeStart:'10:00', timeEnd:'11:00', activity:'Funfit',   ages:'5ans-8ans' },
+        { groupId:'C', groupName:'Les MEGAfit Aqua Nageurs',     day:'Samedi',   timeStart:'11:00', timeEnd:'12:00', activity:'Funfit',   ages:'9ans-14ans' },
+        { groupId:'C', groupName:'Les MEGAfit Aqua Nageurs',     day:'Dimanche', timeStart:'12:00', timeEnd:'13:00', activity:'Natation', ages:'5ans-14ans' },
+        { groupId:'D', groupName:'Les MEGAfit Futurs Champions', day:'Samedi',   timeStart:'14:00', timeEnd:'15:00', activity:'Funfit',   ages:'5ans-14ans' },
+        { groupId:'D', groupName:'Les MEGAfit Futurs Champions', day:'Samedi',   timeStart:'15:00', timeEnd:'16:00', activity:'Natation', ages:'5ans-14ans' },
+        { groupId:'D', groupName:'Les MEGAfit Futurs Champions', day:'Dimanche', timeStart:'12:00', timeEnd:'13:00', activity:'Natation', ages:'5ans-14ans' },
+        { groupId:'E', groupName:'Les MEGAfit Tout-Petits',      day:'Mercredi', timeStart:'14:30', timeEnd:'15:30', activity:'Natation', ages:'3ans-4ans'  },
+        { groupId:'E', groupName:'Les MEGAfit Tout-Petits',      day:'Dimanche', timeStart:'10:00', timeEnd:'11:00', activity:'Natation', ages:'3ans-4ans'  },
+      ];
+      defaults.forEach(d => lc.upsertKidsCourse({ ...d, gymId: 'dokarat' }));
+      // Sync seeded data to Firestore in background
+      Promise.all(defaults.map(d => {
+        const id = lc.getKidsCourses('dokarat').find(r =>
+          r.group_id === d.groupId && r.day === d.day && r.time_start === d.timeStart
+        )?.id;
+        if (!id) return;
+        return db.collection('kids_courses').doc(id).set({
+          ...d, gymId: 'dokarat',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      })).catch(e => console.error('[KIDS SEED Firestore]', e.message));
+      res.json({ ok: true, seeded: defaults.length });
+    } catch (err) { res.status(500).json({ error: 'Seed failed' }); }
+  });
+
+  return router;
+};
