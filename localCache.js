@@ -141,6 +141,21 @@ db.exec(`
     synced_at   TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_incidents_gym ON incidents_cache(gym_id, status);
+
+  CREATE TABLE IF NOT EXISTS kids_courses (
+    id          TEXT PRIMARY KEY,
+    gym_id      TEXT NOT NULL DEFAULT 'dokarat',
+    group_id    TEXT NOT NULL,   -- A, B, C, D, E
+    group_name  TEXT NOT NULL,
+    day         TEXT NOT NULL,
+    time_start  TEXT NOT NULL,
+    time_end    TEXT NOT NULL,
+    activity    TEXT NOT NULL,  -- Natation | Funfit
+    ages        TEXT NOT NULL,
+    created_at  TEXT,
+    updated_at  TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_kids_gym ON kids_courses(gym_id);
 `);
 
 // ── Migrations ──────────────────────────────────────────────────────────────
@@ -557,6 +572,40 @@ function resolveIncidentCache(id) {
     .run(new Date().toISOString(), id);
 }
 
+// ── KIDS COURSES ──────────────────────────────────────────────────────────────────────
+
+const { randomUUID } = require('crypto');
+
+function upsertKidsCourse(course) {
+  const now = new Date().toISOString();
+  const id  = course.id || randomUUID();
+  db.prepare(`
+    INSERT OR REPLACE INTO kids_courses
+    (id, gym_id, group_id, group_name, day, time_start, time_end, activity, ages, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM kids_courses WHERE id=?), ?), ?)
+  `).run(id, course.gymId || 'dokarat', course.groupId, course.groupName,
+         course.day, course.timeStart, course.timeEnd, course.activity, course.ages,
+         id, now, now);
+  return id;
+}
+
+function getKidsCourses(gymId = 'dokarat') {
+  return db.prepare(`SELECT * FROM kids_courses WHERE gym_id = ? ORDER BY group_id, day, time_start`).all(gymId);
+}
+
+function updateKidsCourse(id, fields) {
+  const allowed = ['group_id','group_name','day','time_start','time_end','activity','ages'];
+  const set = allowed.filter(k => fields[k] !== undefined).map(k => `${k} = ?`).join(', ');
+  if (!set) return;
+  const vals = allowed.filter(k => fields[k] !== undefined).map(k => fields[k]);
+  db.prepare(`UPDATE kids_courses SET ${set}, updated_at = ? WHERE id = ?`)
+    .run(...vals, new Date().toISOString(), id);
+}
+
+function deleteKidsCourse(id) {
+  db.prepare(`DELETE FROM kids_courses WHERE id = ?`).run(id);
+}
+
 // ── STATS ─────────────────────────────────────────────────────────────────────
 
 function getCacheStats() {
@@ -587,6 +636,8 @@ module.exports = {
   setPending, updatePendingStatus, getPending, getPendingWithPdf,
   // incidents cache
   upsertIncidents, getIncidents, resolveIncidentCache,
+  // kids courses
+  upsertKidsCourse, getKidsCourses, updateKidsCourse, deleteKidsCourse,
   // info
   getCacheStats,
 };
