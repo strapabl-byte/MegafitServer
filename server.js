@@ -197,7 +197,9 @@ app.use('/api/members',     require('./routes/members')(deps));
 app.use('/api/register',    require('./routes/register')(deps));
 app.use('/api/payments',    require('./routes/payments')(deps));
 app.use('/api/commercials', require('./routes/commercials')(deps));
-app.use('/',                require('./routes/analytics')(deps));   // /api/live-entries, /api/live-count, /api/analytics/*, /api/admin/sync-stats
+// analytics router — stored so we can call pollDoorEntries() from the interval
+const analyticsRouter = require('./routes/analytics')(deps);
+app.use('/', analyticsRouter); // mounts /api/live-entries, /api/live-count, /api/analytics/*
 app.use('/',                require('./routes/courses')(deps));     // /api/courses, /api/coaches, /public/courses, etc.
 app.use('/',                require('./routes/inscriptions')(deps));// /public/* & /api/inscriptions
 app.use('/',                require('./routes/config')(deps));      // /public/pass, /api/chat, config
@@ -293,6 +295,16 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ API running on port ${PORT}`);
   scheduleNightlySync(db, apiCache, isQuotaExceeded);
+
+  // ── Server-side door entries poll (60s) ───────────────────────────────────────
+  // Replaces per-request Firestore calls. One poll = all clients served from SQLite.
+  async function runDoorPoll() {
+    if (isQuotaExceeded()) return;
+    try { await analyticsRouter.pollDoorEntries(); }
+    catch (e) { console.warn('[DOOR POLL] error:', e.message); }
+  }
+  setTimeout(runDoorPoll, 5000);        // first poll 5s after startup (warm SQLite)
+  setInterval(runDoorPoll, 60 * 1000); // then every 60 seconds
 
   setTimeout(async () => {
     if (isQuotaExceeded()) return;
