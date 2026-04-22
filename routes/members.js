@@ -31,6 +31,22 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       const searchQuery = req.query.search || '';
 
       let finalMembers = lc.getMembers(gymId);
+      
+      // Merge all valid pending members who have a signed PDF
+      const pdfMembers = lc.getPendingWithPdf(gymId);
+      if (pdfMembers && pdfMembers.length > 0) {
+         const normalizedPdf = pdfMembers.map(p => ({
+           id: p.id,
+           gym_id: p.gym_id,
+           full_name: `${p.prenom || ''} ${p.nom || ''}`.trim(),
+           plan: p.subscriptionName,
+           status: p.status,
+           pdf_url: p.pdf_url,
+           created_at: p.date,
+           isPendingWithPdf: true
+         }));
+         finalMembers = [...finalMembers, ...normalizedPdf];
+      }
 
       if (searchQuery) {
         const q = searchQuery.toLowerCase();
@@ -41,7 +57,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       }
 
       if (finalMembers && finalMembers.length >= 50 && !searchQuery) {
-        console.log(`⚡ [SQLITE HIT] ${finalMembers.length} members for ${gymId}`);
+        console.log(`⚡ [SQLITE HIT] ${finalMembers.length} members for ${gymId} (includes PDF contracts)`);
         // Always normalize SQLite snake_case → camelCase so the dashboard renders correctly
         finalMembers = finalMembers.map(m => ({
           ...m,
@@ -51,6 +67,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           photo:     m.photo     || null,
           pdfUrl:    m.pdfUrl    || m.pdf_url     || null,
           createdAt: m.createdAt || m.created_at  || null,
+          isPendingWithPdf: m.isPendingWithPdf || false
         }));
         if (!req.isAdmin) {
           finalMembers = finalMembers.map(m => ({
@@ -60,6 +77,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
             qrToken: m.qrToken || '',
             image: m.photo || null, pdfUrl: m.pdfUrl || null, isRestricted: true,
             createdAt: m.createdAt || null,
+            isPendingWithPdf: m.isPendingWithPdf || false
           }));
         }
         return res.json(finalMembers);

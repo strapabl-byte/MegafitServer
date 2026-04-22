@@ -121,9 +121,26 @@ db.exec(`
     total REAL,
     paid REAL,
     balance REAL,
-    status TEXT DEFAULT 'pending'
+    status TEXT DEFAULT 'pending',
+    pdf_url TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_pending_gym_date ON pending_cache(gym_id, date);
+
+  CREATE TABLE IF NOT EXISTS incidents_cache (
+    id          TEXT PRIMARY KEY,
+    gym_id      TEXT,
+    gym_name    TEXT,
+    title       TEXT,
+    cause       TEXT,
+    explanation TEXT,
+    emergency   TEXT,
+    status      TEXT DEFAULT 'Pending',
+    reporter    TEXT,
+    date        TEXT,
+    created_at  TEXT,
+    synced_at   TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_incidents_gym ON incidents_cache(gym_id, status);
 `);
 
 // ── Migrations ──────────────────────────────────────────────────────────────
@@ -138,6 +155,14 @@ try { db.exec("ALTER TABLE register_cache ADD COLUMN prix REAL DEFAULT 0;"); } c
 try { db.exec("ALTER TABLE register_cache ADD COLUMN reste REAL DEFAULT 0;"); } catch (e) {}
 try { db.exec("ALTER TABLE register_cache ADD COLUMN note_reste TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE members_cache ADD COLUMN created_at TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE pending_cache ADD COLUMN pdf_url TEXT;"); } catch (e) {}
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS incidents_cache (
+    id TEXT PRIMARY KEY, gym_id TEXT, gym_name TEXT, title TEXT, cause TEXT,
+    explanation TEXT, emergency TEXT, status TEXT DEFAULT 'Pending',
+    reporter TEXT, date TEXT, created_at TEXT, synced_at TEXT
+  );
+`); } catch (e) {}
 
 
 console.log(`💾 SQLite cache initialised → ${DB_PATH}`);
@@ -440,8 +465,8 @@ function setPending(data) {
   try {
     const stmt = db.prepare(`
       INSERT OR REPLACE INTO pending_cache 
-      (id, gym_id, date, nom, prenom, subscriptionName, total, paid, balance, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, gym_id, date, nom, prenom, subscriptionName, total, paid, balance, status, pdf_url)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const ts = data.createdAt ? new Date(data.createdAt._seconds * 1000) : new Date();
     const dStr = ts.toISOString().split('T')[0];
@@ -456,7 +481,8 @@ function setPending(data) {
       data.totals?.total || 0,
       data.totals?.paid || 0,
       data.totals?.balance || 0,
-      data.status || 'pending'
+      data.status || 'pending',
+      data.pdfUrl || data.pdf_url || null
     );
   } catch (err) {
     console.error('SQLite setPending error:', err.message);
@@ -487,6 +513,50 @@ function getPending(gymId, timeFilter = 'day') {
   }
 }
 
+function getPendingWithPdf(gymId) {
+  try {
+    if (gymId && gymId !== 'all') {
+      const g = buildInClause(getGymIds(gymId));
+      return db.prepare(`SELECT * FROM pending_cache WHERE ${g.sql} AND pdf_url IS NOT NULL ORDER BY date DESC`).all(...g.params);
+    }
+    return db.prepare(`SELECT * FROM pending_cache WHERE pdf_url IS NOT NULL ORDER BY date DESC`).all();
+  } catch(err) {
+    return [];
+  }
+}
+
+// ── INCIDENTS CACHE ───────────────────────────────────────────────────────────────────
+
+function upsertIncidents(incidents) {
+  const now = new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT OR REPLACE INTO incidents_cache
+    (id, gym_id, gym_name, title, cause, explanation, emergency, status, reporter, date, created_at, synced_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const run = db.transaction((rows) => {
+    for (const r of rows) stmt.run(
+      r.id, r.gymId || '', r.gymName || '', r.title || '', r.cause || '',
+      r.explanation || '', r.emergency || 'Low', r.status || 'Pending',
+      r.reporter || '', r.date || '', r.createdAt || now, now
+    );
+  });
+  run(incidents);
+}
+
+function getIncidents(gymId) {
+  if (gymId && gymId !== 'all') {
+    const g = buildInClause(getGymIds(gymId));
+    return db.prepare(`SELECT * FROM incidents_cache WHERE ${g.sql} ORDER BY created_at DESC`).all(...g.params);
+  }
+  return db.prepare(`SELECT * FROM incidents_cache ORDER BY created_at DESC`).all();
+}
+
+function resolveIncidentCache(id) {
+  db.prepare(`UPDATE incidents_cache SET status = 'Resolved', synced_at = ? WHERE id = ?`)
+    .run(new Date().toISOString(), id);
+}
+
 // ── STATS ─────────────────────────────────────────────────────────────────────
 
 function getCacheStats() {
@@ -514,7 +584,9 @@ module.exports = {
   // meta
   getMeta, setMeta, getLastSync, setLastSync,
   // pending (megaeye)
-  setPending, updatePendingStatus, getPending,
+  setPending, updatePendingStatus, getPending, getPendingWithPdf,
+  // incidents cache
+  upsertIncidents, getIncidents, resolveIncidentCache,
   // info
   getCacheStats,
 };
