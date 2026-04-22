@@ -110,9 +110,24 @@ db.exec(`
     PRIMARY KEY (id, gym_id)
   );
   CREATE INDEX IF NOT EXISTS idx_decaissements_gym_date ON decaissements_cache(gym_id, date);
+
+  CREATE TABLE IF NOT EXISTS pending_cache (
+    id TEXT PRIMARY KEY,
+    gym_id TEXT,
+    date TEXT,
+    nom TEXT,
+    prenom TEXT,
+    subscriptionName TEXT,
+    total REAL,
+    paid REAL,
+    balance REAL,
+    status TEXT DEFAULT 'pending'
+  );
+  CREATE INDEX IF NOT EXISTS idx_pending_gym_date ON pending_cache(gym_id, date);
 `);
 
 // ── Migrations ──────────────────────────────────────────────────────────────
+try { db.prepare("ALTER TABLE pending_cache ADD COLUMN status TEXT DEFAULT 'pending'").run(); } catch(e) {}
 try {
   db.exec("ALTER TABLE members_cache ADD COLUMN pdf_url TEXT;");
 } catch (e) { /* already exists */ }
@@ -419,6 +434,59 @@ function setLastSync(gymId) {
   setMeta(`last_full_sync_${gymId}`, new Date().toISOString());
 }
 
+// ── PENDING MEMBERS (MEGAEYE FAST ANALYTICS) ────────────────────────────────
+function setPending(data) {
+  if (!data || !data.id) return;
+  try {
+    const stmt = db.prepare(`
+      INSERT OR REPLACE INTO pending_cache 
+      (id, gym_id, date, nom, prenom, subscriptionName, total, paid, balance, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const ts = data.createdAt ? new Date(data.createdAt._seconds * 1000) : new Date();
+    const dStr = ts.toISOString().split('T')[0];
+    
+    stmt.run(
+      data.id,
+      data.gymId || '',
+      dStr,
+      data.nom || '',
+      data.prenom || '',
+      data.subscriptionName || '',
+      data.totals?.total || 0,
+      data.totals?.paid || 0,
+      data.totals?.balance || 0,
+      data.status || 'pending'
+    );
+  } catch (err) {
+    console.error('SQLite setPending error:', err.message);
+  }
+}
+
+function updatePendingStatus(id, newStatus) {
+  if (!id) return;
+  try {
+    db.prepare(`UPDATE pending_cache SET status = ? WHERE id = ?`).run(newStatus, id);
+  } catch(err) {
+    console.error('SQLite updatePendingStatus error:', err.message);
+  }
+}
+
+function getPending(gymId, timeFilter = 'day') {
+  try {
+    let dateModifier = '-1 day'; // default to last 24h
+    if (timeFilter === 'week') dateModifier = '-7 days';
+    
+    // SQLite can do date('now', modifier)
+    if (gymId && gymId !== 'all') {
+      return db.prepare(`SELECT * FROM pending_cache WHERE gym_id = ? AND date >= date('now', ?) ORDER BY date DESC, id DESC LIMIT 200`).all(gymId, dateModifier);
+    }
+    return db.prepare(`SELECT * FROM pending_cache WHERE date >= date('now', ?) ORDER BY date DESC, id DESC LIMIT 200`).all(dateModifier);
+  } catch(err) {
+    return [];
+  }
+}
+
 // ── STATS ─────────────────────────────────────────────────────────────────────
 
 function getCacheStats() {
@@ -445,6 +513,8 @@ module.exports = {
   upsertPayments, getPayments, deletePayment,
   // meta
   getMeta, setMeta, getLastSync, setLastSync,
+  // pending (megaeye)
+  setPending, updatePendingStatus, getPending,
   // info
   getCacheStats,
 };

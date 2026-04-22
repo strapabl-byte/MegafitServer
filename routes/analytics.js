@@ -22,6 +22,18 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
 
   const DOOR_URL = `https://firestore.googleapis.com/v1/projects/${process.env.DOOR_PROJECT_ID || 'megadoor-b3ccb'}/databases/(default)/documents:runQuery?key=${process.env.DOOR_FIREBASE_API_KEY || ''}`;
 
+  // ── GET /api/analytics/megaeye-registrations ──────────────────────────────
+  router.get('/api/analytics/megaeye-registrations', verifyAzureToken, async (req, res) => {
+    try {
+      const { gymId, timeFilter } = req.query; // 'day' or 'week'
+      const rows = lc.getPending(gymId, timeFilter || 'day');
+      res.json(rows);
+    } catch (err) {
+      console.error('Megaeye Registrations Fetch Error:', err);
+      res.status(500).json({ error: 'Failed to fetch megaeye registrations' });
+    }
+  });
+
   // ── GET /api/live-entries ───────────────────────────────────────
   router.get('/api/live-entries', verifyAzureToken, async (req, res) => {
     try {
@@ -425,7 +437,19 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
         console.error("Megaeye course context error:", err);
       }
 
-      const fullContext = [kpiContext, trafficContext, liveContext, courseContext].filter(Boolean).join('\n');
+      // ── Subscriptions Context ──────────────────────────────────────────────
+      let subsContext = '';
+      try {
+         const { DEFAULT_SUBSCRIPTION_GROUPS } = require('./config');
+         if (DEFAULT_SUBSCRIPTION_GROUPS) {
+            subsContext = `=== AVAILABLE SUBSCRIPTION FORMULAS (DHS) ===\n` + 
+              DEFAULT_SUBSCRIPTION_GROUPS.map(g => `TYPE: ${g.label}\n` + g.options.map(o => ` - ${o.name}: ${o.price > 0 ? o.price + ' DHS' : 'Tarif Inclus/Variable'}`).join('\n')).join('\n');
+         }
+      } catch (e) {
+         console.error("Megaeye subs context error:", e);
+      }
+
+      const fullContext = [kpiContext, trafficContext, liveContext, courseContext, subsContext].filter(Boolean).join('\n\n');
 
       const messages = [
         {
@@ -439,15 +463,6 @@ IMPORTANT RULES FOR YOUR ANALYSIS:
 4. Format your output sharply using bullet points. Never exceed significantly long word counts. Be brutal, sharp, and accurate.
 5. Answer ONLY in French, using professional, high-impact tactical corporate terminology.
 6. End response with [+] if confident or [-] if uncertain.
-
-=== MEGAFIT PRICING SHORTCUT (DHS) ===
-Registration Fee: 3000 DHS 
-Daily Pass: 200 DHS 
-1 Month: 1000 DHS (Local) / 1200 DHS (Multi)
-3 Months: ~2200 DHS
-6 Months: ~5000 DHS
-12 Months: ~4000 DHS (Local) / 5250 DHS (Multi)
-24 Months: 5600 DHS (Local) / 6500 DHS (Multi)
 
 === CURRENT DATA (${sectorName}) ===
 ${fullContext}`

@@ -122,6 +122,75 @@ const deps = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Audit Logging Middleware
+// ─────────────────────────────────────────────────────────────────────────────
+const auditLogger = (req, res, next) => {
+  res.on('finish', () => {
+    // Only log successful mutations
+    if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method) && [200, 201].includes(res.statusCode)) {
+      
+      const path = req.originalUrl || req.path;
+      // Skip auth/config routes
+      if (path.includes('/config') || path.includes('/chat')) return;
+      
+      let action = 'System Activity';
+      
+      if (path.includes('/payments')) {
+        action = req.method === 'POST' ? 'Processed new payment' : 'Updated payment details';
+      } else if (path.includes('/inscriptions')) {
+        action = 'Added new member';
+      } else if (path.includes('/members')) {
+        if (req.method === 'DELETE') action = 'Deleted a member';
+        else if (req.method === 'PUT' || req.method === 'PATCH') action = 'Updated member profile';
+      } else if (path.includes('/register')) {
+        action = 'Processed POST register addition';
+      } else if (path.includes('/courses')) {
+        action = 'Updated gym schedule';
+      } else {
+        action = `${req.method} action in ${path.split('?')[0]}`;
+      }
+      
+      // Attempt to extract GymId based on body or query (fallback to assignedGym)
+      let gymId = req.body?.gymId || req.query?.gymId || req.query?.gym || null;
+      if (!gymId && req.user && req.user.assignedGyms && req.user.assignedGyms.length === 1) {
+          gymId = req.user.assignedGyms[0];
+      }
+      if (!gymId) gymId = 'system';
+
+      const clubs = {
+           'marjane': { id: 'marjane', name: 'Marjane', color: '#3b82f6' },
+           'dokarat': { id: 'dokarat', name: 'Dokarat', color: '#10b981' },
+           'casa1':   { id: 'casa1', name: 'Casa 1', color: '#f59e0b' },
+           'casa2':   { id: 'casa2', name: 'Casa 2', color: '#ec4899' },
+           'system':  { id: 'system', name: 'System', color: '#999999' }
+      };
+      
+      const targetClub = clubs[gymId] || clubs['system'];
+      
+      const payload = {
+        action,
+        gymId,
+        club: targetClub,
+        userId: req.user?.oid || 'system_id',
+        userName: req.user?.name || req.user?.preferred_username || 'App System',
+        path: path.split('?')[0],
+        method: req.method,
+        createdAt: deps.admin.firestore.FieldValue.serverTimestamp()
+      };
+      
+      // Exclude simple sync triggers
+      if (path.includes('/admin/sync')) return;
+
+      deps.db.collection('manager_activity_logs').add(payload).catch(err => {
+         console.error('Failed to log manager activity:', err);
+      });
+    }
+  });
+  next();
+};
+app.use(auditLogger);
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Mount Routers
 // ─────────────────────────────────────────────────────────────────────────────
 app.use('/api/members',     require('./routes/members')(deps));
@@ -132,6 +201,7 @@ app.use('/',                require('./routes/analytics')(deps));   // /api/live
 app.use('/',                require('./routes/courses')(deps));     // /api/courses, /api/coaches, /public/courses, etc.
 app.use('/',                require('./routes/inscriptions')(deps));// /public/* & /api/inscriptions
 app.use('/',                require('./routes/config')(deps));      // /public/pass, /api/chat, config
+app.use('/',                require('./routes/activity')(deps));    // /api/activity/logs
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Healthcheck

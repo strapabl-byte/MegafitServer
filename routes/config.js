@@ -125,3 +125,5 @@ module.exports = function configRouter({ db, admin }) {
 
   return router;
 };
+
+module.exports.DEFAULT_SUBSCRIPTION_GROUPS = DEFAULT_SUBSCRIPTION_GROUPS;

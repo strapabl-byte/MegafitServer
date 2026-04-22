@@ -5,7 +5,7 @@ const { Router } = require('express');
 const crypto = require('crypto');
 const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 
-module.exports = function inscriptionsRouter({ db, admin, apiCache, uploadBase64ToStorage, invalidateCache }) {
+module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBase64ToStorage, invalidateCache }) {
   const router = Router();
 
   // ── GET /public/next-contract-number ──────────────────────────────────────
@@ -59,6 +59,18 @@ module.exports = function inscriptionsRouter({ db, admin, apiCache, uploadBase64
       });
 
       console.log(`📝 Inscription N° ${finalContractNumber} — ${normalizedGymId}`);
+      
+      // ✅ MEGAEYE FAST SYNC: Send lightweight copy to local 1GB SQLite disk 
+      lc.setPending({
+        id: result.id, 
+        gymId: normalizedGymId, 
+        nom: data.nom, 
+        prenom: data.prenom,
+        subscriptionName: data.subscriptionName,
+        totals: data.totals,
+        createdAt: { _seconds: Math.floor(Date.now() / 1000) } 
+      });
+
       invalidateCache(apiCache.inscriptions);
       res.json({ id: result.id, ok: true, contractNumber: finalContractNumber });
     } catch (err) {
@@ -224,6 +236,10 @@ module.exports = function inscriptionsRouter({ db, admin, apiCache, uploadBase64
       }
 
       await insRef.update({ status: 'awaiting_payment', memberId: memberRef.id, memberCreatedAt: admin.firestore.FieldValue.serverTimestamp(), memberCreatedBy: req.user?.preferred_username || 'Admin' });
+      
+      // ✅ MEGAEYE FAST SYNC: Flag as accepted in local SQLite
+      lc.updatePendingStatus(req.params.id, 'accepted');
+
       invalidateCache(apiCache.inscriptions);
       const memberSnap = await memberRef.get();
       res.json({ ok: true, member: { id: memberRef.id, ...memberSnap.data() }, nextStep: 'Go to Payments page to confirm and record the payment' });
