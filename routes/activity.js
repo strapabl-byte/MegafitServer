@@ -6,7 +6,7 @@ module.exports = function (deps) {
   const { db } = deps;
 
   // GET /api/activity/logs
-  router.get('/activity/logs', verifyAzureToken, async (req, res) => {
+  router.get('/api/activity/logs', verifyAzureToken, async (req, res) => {
     try {
       const { gymId } = req.query; // 'all' or specific
       
