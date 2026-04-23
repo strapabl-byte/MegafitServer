@@ -9,6 +9,8 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
   const router = Router();
 
   // ── GET /public/next-contract-number ──────────────────────────────────────
+  // Read-only peek — does NOT increment the counter. Safe to call any time.
+  // Used only for display purposes (e.g. admin previewing the next number).
   router.get('/public/next-contract-number', async (req, res) => {
     try {
       const doc = await db.collection('settings').doc('contractCounter').get();
@@ -19,23 +21,10 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
     }
   });
 
-  // ── POST /public/generate-contract ────────────────────────────────────────
-  router.post('/public/generate-contract', async (req, res) => {
-    try {
-      const counterRef = db.collection('settings').doc('contractCounter');
-      const num = await db.runTransaction(async (t) => {
-        const doc = await t.get(counterRef);
-        let n = 15000;
-        if (!doc.exists) { t.set(counterRef, { current: n }); }
-        else { n = doc.data().current + 1; t.update(counterRef, { current: n }); }
-        return n;
-      });
-      res.json({ contractNumber: num.toString().padStart(6, '0') });
-    } catch (err) {
-      console.error('Contract Generate Error:', err);
-      res.status(500).json({ error: 'Failed to generate contract number' });
-    }
-  });
+  // POST /public/generate-contract — REMOVED.
+  // This route used to increment the counter without creating a real inscription,
+  // causing contract numbers to be skipped on every refresh/preview.
+  // Contract numbers are ONLY assigned atomically inside POST /public/inscriptions.
 
   // ── POST /public/inscriptions ─────────────────────────────────────────────
   router.post('/public/inscriptions', async (req, res) => {
