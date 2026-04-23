@@ -285,7 +285,6 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache }) {
   // ── POST /api/payments/:id/replay-to-register ────────────────────────────
   // 🛡️ Super Admin only — Force-injects a payment that exists in Firestore
   // but is missing from the Daily Register (megafit_daily_register).
-  // This is the "playback" / repair tool for the admin dashboard.
   router.post('/:id/replay-to-register', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
       const paymentRef = db.collection('payments').doc(req.params.id);
@@ -293,19 +292,28 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache }) {
       if (!paymentDoc.exists) return res.status(404).json({ error: 'Paiement introuvable' });
       const payment = paymentDoc.data();
 
+      // ── GUARD 1 (hard): payment already stamped as replayed ──────────────
+      // Most reliable — permanently stored on the payment document itself.
+      if (payment.replayedToRegister && !req.body.force) {
+        return res.status(409).json({
+          error: `Ce paiement a déjà été injecté dans le registre le ${payment.replayedAt ? new Date(payment.replayedAt).toLocaleDateString('fr-MA') : '?'} par ${payment.replayedBy || 'Admin'}.`,
+          hint: 'Envoyez { force: true } pour forcer quand même (attention : doublon possible).',
+          alreadyReplayed: true,
+        });
+      }
+
       // ── Enrich with member data ──────────────────────────────────────────
       let nom = payment.nom || '', tel = '', cin = '', contrat = '', commercial = 'Admin';
       const gymId = payment.gymId || payment.location || 'dokarat';
-      
       if (payment.memberId) {
         const mSnap = await db.collection('members').doc(payment.memberId).get();
         if (mSnap.exists) {
           const m = mSnap.data();
-          nom       = m.fullName  || nom;
-          tel       = m.phone     || '';
-          cin       = m.cin       || '';
-          contrat   = m.contractNumber || payment.contrat || '';
-          commercial= payment.commercial || m.commercial || 'Admin';
+          nom        = m.fullName  || nom;
+          tel        = m.phone     || '';
+          cin        = m.cin       || '';
+          contrat    = m.contractNumber || payment.contrat || '';
+          commercial = payment.commercial || m.commercial || 'Admin';
         }
       }
 
@@ -321,31 +329,31 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache }) {
         dateStr = dateObj.toISOString().slice(0, 10);
       }
 
-      // ── Guard: check if an identical entry already exists ────────────────
-      const regDocId    = `${gymId}_${dateStr}`;
-      const amount      = Number(payment.amount) || 0;
-      const existingSnap = await db.collection('megafit_daily_register')
-        .doc(regDocId).collection('entries')
-        .where('prix', '==', amount)
-        .get();
-
-      let alreadyExists = false;
-      if (!existingSnap.empty) {
-        // Check by nom match to confirm it's truly a duplicate
-        alreadyExists = existingSnap.docs.some(d => 
-          (d.data().nom || '').toLowerCase().trim() === nom.toLowerCase().trim()
-        );
-      }
-
-      if (alreadyExists && !req.body.force) {
-        return res.status(409).json({ 
-          error: 'Une entrée similaire existe déjà dans le registre pour cette date.',
-          hint: 'Envoyez { force: true } pour injecter quand même.',
-          date: dateStr,
-        });
+      // ── GUARD 2 (soft): fuzzy name+amount match in register ──────────────
+      if (!req.body.force) {
+        const regDocId = `${gymId}_${dateStr}`;
+        const amount   = Number(payment.amount) || 0;
+        const existingSnap = await db.collection('megafit_daily_register')
+          .doc(regDocId).collection('entries')
+          .where('prix', '==', amount)
+          .get();
+        if (!existingSnap.empty) {
+          const firstName = nom.toLowerCase().trim().split(' ')[0];
+          const match = existingSnap.docs.find(d => {
+            const enom = (d.data().nom || '').toLowerCase().trim();
+            return enom.includes(firstName) || firstName.includes(enom.split(' ')[0]);
+          });
+          if (match) {
+            return res.status(409).json({
+              error: `Une entrée similaire (${nom} — ${amount} DH) existe déjà dans le registre du ${dateStr}.`,
+              hint: 'Envoyez { force: true } pour injecter quand même (attention : doublon possible).',
+            });
+          }
+        }
       }
 
       // ── Inject into register ─────────────────────────────────────────────
+      const amount = Number(payment.amount) || 0;
       await autoRegisterCA({
         gymId, date: dateStr, nom, tel, cin,
         plan:             payment.plan,
@@ -359,8 +367,15 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache }) {
         note:             `[REPLAY] ${payment.note || 'Paiement rejoué par Super Admin'}`,
       });
 
+      // ── Stamp the payment to permanently lock the replay button ──────────
+      await paymentRef.update({
+        replayedToRegister: true,
+        replayedAt:  new Date().toISOString(),
+        replayedBy:  req.user?.preferred_username || req.user?.name || 'Admin',
+      });
+
       console.log(`🔁 [REPLAY] ${nom} | ${amount} DH | ${gymId}_${dateStr} — by ${req.user?.preferred_username}`);
-      res.json({ ok: true, message: `✅ Paiement de ${nom} injecté dans le registre du ${dateStr}.`, date: dateStr });
+      res.json({ ok: true, message: `✅ Paiement de ${nom} injecté dans le registre du ${dateStr}. Bouton verrouillé.`, date: dateStr });
     } catch (err) {
       console.error('Replay Register Error:', err);
       res.status(500).json({ error: 'Échec du replay' });
