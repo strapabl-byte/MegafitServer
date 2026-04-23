@@ -293,11 +293,9 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache }) {
       const payment = paymentDoc.data();
 
       // ── GUARD 1 (hard): payment already stamped as replayed ──────────────
-      // Most reliable — permanently stored on the payment document itself.
-      if (payment.replayedToRegister && !req.body.force) {
+      if (payment.replayedToRegister) {
         return res.status(409).json({
-          error: `Ce paiement a déjà été injecté dans le registre le ${payment.replayedAt ? new Date(payment.replayedAt).toLocaleDateString('fr-MA') : '?'} par ${payment.replayedBy || 'Admin'}.`,
-          hint: 'Envoyez { force: true } pour forcer quand même (attention : doublon possible).',
+          error: `Paiement déjà injecté dans le registre le ${payment.replayedAt ? new Date(payment.replayedAt).toLocaleDateString('fr-MA') : '?'} par ${payment.replayedBy || 'Admin'}. Opération bloquée.`,
           alreadyReplayed: true,
         });
       }
@@ -329,26 +327,24 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache }) {
         dateStr = dateObj.toISOString().slice(0, 10);
       }
 
-      // ── GUARD 2 (soft): fuzzy name+amount match in register ──────────────
-      if (!req.body.force) {
-        const regDocId = `${gymId}_${dateStr}`;
-        const amount   = Number(payment.amount) || 0;
-        const existingSnap = await db.collection('megafit_daily_register')
-          .doc(regDocId).collection('entries')
-          .where('prix', '==', amount)
-          .get();
-        if (!existingSnap.empty) {
-          const firstName = nom.toLowerCase().trim().split(' ')[0];
-          const match = existingSnap.docs.find(d => {
-            const enom = (d.data().nom || '').toLowerCase().trim();
-            return enom.includes(firstName) || firstName.includes(enom.split(' ')[0]);
+      // ── GUARD 2 (hard): fuzzy name+amount match in register ─────────────
+      const regDocId = `${gymId}_${dateStr}`;
+      const amount   = Number(payment.amount) || 0;
+      const existingSnap = await db.collection('megafit_daily_register')
+        .doc(regDocId).collection('entries')
+        .where('prix', '==', amount)
+        .get();
+      if (!existingSnap.empty) {
+        const firstName = nom.toLowerCase().trim().split(' ')[0];
+        const match = existingSnap.docs.find(d => {
+          const enom = (d.data().nom || '').toLowerCase().trim();
+          return enom.includes(firstName) || firstName.includes(enom.split(' ')[0]);
+        });
+        if (match) {
+          return res.status(409).json({
+            error: `${nom} est déjà présent dans le registre du ${dateStr} pour ${amount} DH. Injection bloquée.`,
+            alreadyInRegister: true,
           });
-          if (match) {
-            return res.status(409).json({
-              error: `Une entrée similaire (${nom} — ${amount} DH) existe déjà dans le registre du ${dateStr}.`,
-              hint: 'Envoyez { force: true } pour injecter quand même (attention : doublon possible).',
-            });
-          }
         }
       }
 
