@@ -49,9 +49,12 @@ db.exec(`
     full_name   TEXT,
     phone       TEXT,
     plan        TEXT,
+    subscription_name TEXT,
     expires_on  TEXT,
+    period_from TEXT,
     status      TEXT,
     birthday    TEXT,
+    cin         TEXT,
     qr_token    TEXT,
     photo       TEXT,
     pdf_url     TEXT,
@@ -160,16 +163,18 @@ db.exec(`
 
 // ── Migrations ──────────────────────────────────────────────────────────────
 try { db.prepare("ALTER TABLE pending_cache ADD COLUMN status TEXT DEFAULT 'pending'").run(); } catch(e) {}
-try {
-  db.exec("ALTER TABLE members_cache ADD COLUMN pdf_url TEXT;");
-} catch (e) { /* already exists */ }
+try { db.exec("ALTER TABLE members_cache ADD COLUMN pdf_url TEXT;"); } catch (e) { /* already exists */ }
 try { db.exec("ALTER TABLE members_cache ADD COLUMN balance REAL DEFAULT 0;"); } catch (e) {}
+try { db.exec("ALTER TABLE members_cache ADD COLUMN created_at TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE members_cache ADD COLUMN subscription_name TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE members_cache ADD COLUMN cin TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE members_cache ADD COLUMN period_from TEXT;"); } catch (e) {}
+// register_cache extensions
 try { db.exec("ALTER TABLE register_cache ADD COLUMN cin TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE register_cache ADD COLUMN tel TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE register_cache ADD COLUMN prix REAL DEFAULT 0;"); } catch (e) {}
 try { db.exec("ALTER TABLE register_cache ADD COLUMN reste REAL DEFAULT 0;"); } catch (e) {}
 try { db.exec("ALTER TABLE register_cache ADD COLUMN note_reste TEXT;"); } catch (e) {}
-try { db.exec("ALTER TABLE members_cache ADD COLUMN created_at TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE pending_cache ADD COLUMN pdf_url TEXT;"); } catch (e) {}
 try { db.exec(`
   CREATE TABLE IF NOT EXISTS incidents_cache (
@@ -289,9 +294,9 @@ function getDailyStat(gymId, date) {
 
 const insertMember = db.prepare(`
   INSERT OR REPLACE INTO members_cache
-    (id, gym_id, full_name, phone, plan, expires_on, status, birthday, qr_token, photo, pdf_url, synced_at, balance, created_at)
+    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at)
   VALUES
-    (@id, @gym_id, @full_name, @phone, @plan, @expires_on, @status, @birthday, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at)
+    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at)
 `);
 
 function upsertMembers(gymId, membersArr) {
@@ -304,23 +309,26 @@ function upsertMembers(gymId, membersArr) {
   });
   const now = new Date().toISOString();
   upsert(membersArr.map(m => ({
-    id:         m.id,
-    gym_id:     gymId || m.location || m.gymId || 'unknown',
-    full_name:  m.fullName || `${m.name || ''} ${m.surname || ''}`.trim(),
-    phone:      m.phone || '',
-    plan:       m.plan || '',
-    expires_on: m.expiresOn || '',
-    status:     m.status || '',
-    birthday:   m.birthday || '',
-    qr_token:   m.qrToken || '',
-    photo:      m.photo || m.image || null,
-    pdf_url:    m.pdfUrl || null,
-    synced_at:  now,
-    balance:    Number(m.balance) || 0,
-    created_at: typeof m.createdAt === 'string' ? m.createdAt : 
-               (m.createdAt && typeof m.createdAt.toDate === 'function') ? m.createdAt.toDate().toISOString() :
-               (m.createdAt?._seconds ? new Date(m.createdAt._seconds * 1000).toISOString() :
-               (m.createdAt?.toISOString ? m.createdAt.toISOString() : null)),
+    id:                m.id,
+    gym_id:            gymId || m.location || m.gymId || 'unknown',
+    full_name:         m.fullName || `${m.name || ''} ${m.surname || ''}`.trim(),
+    phone:             m.phone || '',
+    plan:              m.plan || '',
+    subscription_name: m.subscriptionName || '',
+    expires_on:        m.expiresOn || '',
+    period_from:       m.periodFrom || '',
+    status:            m.status || '',
+    birthday:          m.birthday || '',
+    cin:               m.cin || '',
+    qr_token:          m.qrToken || '',
+    photo:             m.photo || m.image || null,
+    pdf_url:           m.pdfUrl || null,
+    synced_at:         now,
+    balance:           Number(m.balance) || 0,
+    created_at:        typeof m.createdAt === 'string' ? m.createdAt : 
+                       (m.createdAt && typeof m.createdAt.toDate === 'function') ? m.createdAt.toDate().toISOString() :
+                       (m.createdAt?._seconds ? new Date(m.createdAt._seconds * 1000).toISOString() :
+                       (m.createdAt?.toISOString ? m.createdAt.toISOString() : null)),
   })));
 }
 

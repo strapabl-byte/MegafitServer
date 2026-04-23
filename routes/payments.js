@@ -282,6 +282,91 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache }) {
     }
   });
 
+  // ── POST /api/payments/:id/replay-to-register ────────────────────────────
+  // 🛡️ Super Admin only — Force-injects a payment that exists in Firestore
+  // but is missing from the Daily Register (megafit_daily_register).
+  // This is the "playback" / repair tool for the admin dashboard.
+  router.post('/:id/replay-to-register', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const paymentRef = db.collection('payments').doc(req.params.id);
+      const paymentDoc = await paymentRef.get();
+      if (!paymentDoc.exists) return res.status(404).json({ error: 'Paiement introuvable' });
+      const payment = paymentDoc.data();
+
+      // ── Enrich with member data ──────────────────────────────────────────
+      let nom = payment.nom || '', tel = '', cin = '', contrat = '', commercial = 'Admin';
+      const gymId = payment.gymId || payment.location || 'dokarat';
+      
+      if (payment.memberId) {
+        const mSnap = await db.collection('members').doc(payment.memberId).get();
+        if (mSnap.exists) {
+          const m = mSnap.data();
+          nom       = m.fullName  || nom;
+          tel       = m.phone     || '';
+          cin       = m.cin       || '';
+          contrat   = m.contractNumber || payment.contrat || '';
+          commercial= payment.commercial || m.commercial || 'Admin';
+        }
+      }
+
+      // ── Resolve date ─────────────────────────────────────────────────────
+      let dateStr = req.body.date || null;
+      if (!dateStr) {
+        let dateObj = new Date();
+        if (payment.date) {
+          dateObj = typeof payment.date === 'string' ? new Date(payment.date) : payment.date.toDate?.() ?? new Date();
+        } else if (payment.createdAt?._seconds) {
+          dateObj = new Date(payment.createdAt._seconds * 1000);
+        }
+        dateStr = dateObj.toISOString().slice(0, 10);
+      }
+
+      // ── Guard: check if an identical entry already exists ────────────────
+      const regDocId    = `${gymId}_${dateStr}`;
+      const amount      = Number(payment.amount) || 0;
+      const existingSnap = await db.collection('megafit_daily_register')
+        .doc(regDocId).collection('entries')
+        .where('prix', '==', amount)
+        .get();
+
+      let alreadyExists = false;
+      if (!existingSnap.empty) {
+        // Check by nom match to confirm it's truly a duplicate
+        alreadyExists = existingSnap.docs.some(d => 
+          (d.data().nom || '').toLowerCase().trim() === nom.toLowerCase().trim()
+        );
+      }
+
+      if (alreadyExists && !req.body.force) {
+        return res.status(409).json({ 
+          error: 'Une entrée similaire existe déjà dans le registre pour cette date.',
+          hint: 'Envoyez { force: true } pour injecter quand même.',
+          date: dateStr,
+        });
+      }
+
+      // ── Inject into register ─────────────────────────────────────────────
+      await autoRegisterCA({
+        gymId, date: dateStr, nom, tel, cin,
+        plan:             payment.plan,
+        subscriptionName: payment.subscriptionName || '',
+        amount,
+        method:           payment.method || 'Espèces',
+        commercial:       req.user?.preferred_username || commercial,
+        contrat,
+        payments:         payment.paymentsSplit || null,
+        reste:            0,
+        note:             `[REPLAY] ${payment.note || 'Paiement rejoué par Super Admin'}`,
+      });
+
+      console.log(`🔁 [REPLAY] ${nom} | ${amount} DH | ${gymId}_${dateStr} — by ${req.user?.preferred_username}`);
+      res.json({ ok: true, message: `✅ Paiement de ${nom} injecté dans le registre du ${dateStr}.`, date: dateStr });
+    } catch (err) {
+      console.error('Replay Register Error:', err);
+      res.status(500).json({ error: 'Échec du replay' });
+    }
+  });
+
   // ── DELETE /api/payments/:id ──────────────────────────────────────────────
   router.delete('/:id', verifyAzureToken, requireAdmin, async (req, res) => {
     try {

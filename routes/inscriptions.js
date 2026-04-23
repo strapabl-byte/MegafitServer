@@ -8,6 +8,66 @@ const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBase64ToStorage, invalidateCache }) {
   const router = Router();
 
+  function planToAbonnement(plan, subscriptionName) {
+    if (subscriptionName) return subscriptionName.toUpperCase();
+    const map = { Monthly: '1 MOIS', Quarterly: '3 MOIS', 'Semi-Annual': '6 MOIS', Annual: '1 AN' };
+    return map[plan] || plan || '1 AN';
+  }
+
+  async function autoRegisterCA({ gymId = 'dokarat', date, nom, tel, cin, plan, subscriptionName, amount, method, commercial, contrat, payments: split, reste, note }) {
+    try {
+      const today = date || new Date().toISOString().slice(0, 10);
+      const docId = `${gymId}_${today}`;
+      const totalAmt = Number(amount) || 0;
+      let tpe = 0, espece = 0, virement = 0, cheque = 0;
+
+      if (split && typeof split === 'object') {
+        tpe      = Number(split.carte    || split.tpe      || 0);
+        espece   = Number(split.espece   || 0);
+        virement = Number(split.virement || 0);
+        cheque   = Number(split.cheque   || 0);
+      } else {
+        const methodMap = {
+          'Espèces': 'espece', Cash: 'espece', espece: 'espece',
+          TPE: 'tpe', 'Carte Bancaire': 'tpe', tpe: 'tpe', carte: 'tpe',
+          Virement: 'virement', virement: 'virement',
+          'Chèque': 'cheque', Cheque: 'cheque', cheque: 'cheque',
+        };
+        const field = methodMap[method] || 'espece';
+        if (field === 'tpe')           tpe      = totalAmt;
+        else if (field === 'virement') virement = totalAmt;
+        else if (field === 'cheque')   cheque   = totalAmt;
+        else                           espece   = totalAmt;
+      }
+
+      const prix = tpe + espece + virement + cheque || totalAmt;
+      const addedDoc = await db.collection('megafit_daily_register').doc(docId).collection('entries').add({
+        nom: nom || '', tel: tel || '', contrat: contrat || '',
+        commercial: (commercial || 'FORM').toUpperCase(), cin: cin || '',
+        prix, tpe, espece, virement, cheque,
+        abonnement: planToAbonnement(plan, subscriptionName),
+        reste:      Number(reste) || 0,
+        note_reste: note || (reste > 0 ? `Reste: ${reste} DH` : ''),
+        source: 'inscription_auto',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdBy: 'auto',
+      });
+      await db.collection('megafit_daily_register').doc(docId).set(
+        { gymId, date: today, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
+        { merge: true }
+      );
+      
+      const newSnap = await addedDoc.get();
+      if (lc && typeof lc.upsertRegister === 'function') {
+        lc.upsertRegister(gymId, today, [{ id: addedDoc.id, ...newSnap.data() }]);
+      }
+      
+      console.log(`✅ AutoRegisterCA (Inscription): ${nom} | ${prix} DH → ${docId}`);
+    } catch (err) {
+      console.error('⚠️  AutoRegisterCA (non-blocking):', err.message);
+    }
+  }
+
   // ── GET /public/next-contract-number ──────────────────────────────────────
   // Read-only peek — does NOT increment the counter. Safe to call any time.
   // Used only for display purposes (e.g. admin previewing the next number).
@@ -155,11 +215,29 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
       if (ins.memberId) return res.status(409).json({ error: 'Member already created for this inscription' });
 
       const gymId = ins.gymId || 'dokarat';
+
+      // ── Robust plan derivation — handles "24 MOIS", "2 ANS", "12 MOIS", etc. ──
       const sName = (ins.subscriptionName || '').toLowerCase();
+      const monthMatch  = sName.match(/(\d+)\s*mois/);
+      const yearMatch   = sName.match(/(\d+)\s*an/);
+      const totalMonths = monthMatch ? parseInt(monthMatch[1]) : (yearMatch ? parseInt(yearMatch[1]) * 12 : 1);
       let plan = 'Monthly';
-      if (sName.includes('an') || sName.includes('anu')) plan = 'Annual';
-      else if (sName.includes('trim') || sName.includes('3 mois')) plan = 'Quarterly';
-      else if (sName.includes('sem') || sName.includes('6 mois')) plan = 'Semi-Annual';
+      if      (totalMonths >= 12) plan = 'Annual';
+      else if (totalMonths >= 6 ) plan = 'Semi-Annual';
+      else if (totalMonths >= 3 ) plan = 'Quarterly';
+      else                        plan = 'Monthly';
+
+      // ── Expiry: trust the form's pre-calculated dates (most accurate) ───────
+      // Fall back to a month-based calculation only if periodTo is missing.
+      let expiresOn = ins.periodTo || null;
+      if (!expiresOn) {
+        const start = ins.periodFrom ? new Date(ins.periodFrom) : new Date();
+        if (ins.durationYears)         start.setFullYear(start.getFullYear() + Number(ins.durationYears));
+        else if (ins.durationMonths)   start.setMonth(start.getMonth() + Number(ins.durationMonths));
+        else if (ins.durationDays)     start.setDate(start.getDate() + Number(ins.durationDays));
+        else                           start.setFullYear(start.getFullYear() + 1); // absolute last resort
+        expiresOn = start.toISOString().split('T')[0];
+      }
 
       // Only link if explicitly selected via autocomplete in the form
       let existingMember = null;
@@ -171,10 +249,18 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
       const memberData = {
         fullName: `${ins.prenom || ''} ${ins.nom || ''}`.trim(),
         phone: ins.telephone || null, plan,
+        // ✅ FIX: Save the real subscription label (e.g. "24 MOIS LOCAL") on the member
+        subscriptionName: ins.subscriptionName || null,
         birthday: ins.dateNaissance || null,
-        expiresOn: ins.periodTo || new Date(Date.now() + 365 * 86400000).toISOString().split('T')[0],
+        // ✅ FIX: Use form-calculated periodTo directly
+        expiresOn,
+        periodFrom: ins.periodFrom || null,
+        periodTo:   expiresOn,
         photo: ins.profilePicture || null, email: ins.email || null,
-        cin: ins.cin || null, location: gymId,
+        // ✅ CIN always propagated
+        cin: ins.cin || null,
+        adresse: ins.adresse || null, ville: ins.ville || null,
+        location: gymId,
         contractNumber: ins.contractNumber || null, commercial: ins.commercial || null,
         pdfUrl: ins.pdfUrl || null, balance: ins.totals?.balance || 0,
         balanceDeadline: req.body.balanceDeadline || null,
@@ -213,15 +299,23 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
           const chequePhoto = ins.chequePhoto?.startsWith('data:image')
             ? await uploadBase64ToStorage(ins.chequePhoto, `members/${memberId}/cheques/${Date.now()}.jpg`)
             : ins.chequePhoto || null;
-          await db.collection('payments').add({
-            memberId, inscriptionId: req.params.id, gymId,
-            amount: totalPaid, plan, date: new Date().toISOString(), method,
-            paymentsSplit: { espece, carte, virement, cheque },
-            chequePhoto, note: 'Paiement inscription initiale',
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            recordedBy: req.user?.preferred_username || 'Admin', type: 'registration',
-          });
-        }
+            await db.collection('payments').add({
+              memberId, inscriptionId: req.params.id, gymId,
+              amount: totalPaid, plan, date: new Date().toISOString(), method,
+              paymentsSplit: { espece, carte, virement, cheque },
+              chequePhoto, note: 'Paiement inscription initiale',
+              createdAt: admin.firestore.FieldValue.serverTimestamp(),
+              recordedBy: req.user?.preferred_username || 'Admin', type: 'registration',
+            });
+
+            await autoRegisterCA({
+              gymId, nom: memberData.fullName, tel: memberData.phone,
+              cin: memberData.cin, plan, subscriptionName: ins.subscriptionName,
+              amount: totalPaid, method, commercial: ins.commercial || req.user?.preferred_username || 'FORM',
+              contrat: memberData.contractNumber, payments: { espece, carte, virement, cheque },
+              reste: Math.max(0, (ins.totals?.grandTotal || 0) - totalPaid), note: 'Paiement inscription initiale'
+            });
+          }
       }
 
       await insRef.update({ status: 'awaiting_payment', memberId: memberRef.id, memberCreatedAt: admin.firestore.FieldValue.serverTimestamp(), memberCreatedBy: req.user?.preferred_username || 'Admin' });
