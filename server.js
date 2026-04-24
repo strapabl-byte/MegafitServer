@@ -248,43 +248,60 @@ async function seedSQLiteHistoricalStats() {
     }
 
     // ── Auto-sync: full current-month register for all gyms ──────────────────
-    // Fetches day-by-day from Firestore, fills SQLite gaps automatically
+    // ✅ SQLite-first: Only fetch from Firestore if SQLite is empty OR data is stale.
+    // This prevents burning thousands of reads on every server restart (locally + Render).
     const GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
     const now2 = new Date();
     const toDS = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
     const monthStart = new Date(now2.getFullYear(), now2.getMonth(), 1);
-    console.log('📋 Register auto-sync: pulling current month for all gyms...');
+
+    // ── Cooldown guard: skip if synced within last hour ──────────────────────
+    const lastRegSync = lc.getMeta('last_register_sync');
+    const msSinceRegSync = lastRegSync ? Date.now() - new Date(lastRegSync).getTime() : Infinity;
+    const REGISTER_SYNC_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+
+    // Count total SQLite register entries for this month across all gyms
+    let totalSQLiteEntries = 0;
     for (const gid of GYMS) {
-      try {
-        const cursor = new Date(monthStart);
-        let cached = 0, fetched = 0;
-        // Count current SQLite entries
-        const c1 = new Date(monthStart);
-        while (c1 <= now2) { cached += lc.getRegister(gid, toDS(c1)).length; c1.setDate(c1.getDate()+1); }
-        // Fetch full month from Firestore
-        while (cursor <= now2) {
-          const dateStr = toDS(cursor);
-          const snap = await db.collection('megafit_daily_register').doc(`${gid}_${dateStr}`).collection('entries').get();
-          if (!snap.empty) {
-            lc.upsertRegister(gid, dateStr, snap.docs.map(d => ({ id: d.id, ...d.data(), date: dateStr, gymId: gid })));
-            fetched += snap.size;
-          }
-          cursor.setDate(cursor.getDate() + 1);
-        }
-        // Compute monthly revenue from updated cache
-        let rev = 0;
-        const c2 = new Date(monthStart);
-        while (c2 <= now2) {
-          lc.getRegister(gid, toDS(c2)).forEach(e => { rev += (Number(e.tpe)||0)+(Number(e.espece)||0)+(Number(e.virement)||0)+(Number(e.cheque)||0); });
-          c2.setDate(c2.getDate()+1);
-        }
-        console.log(`  ✅ [${gid}] ${cached}→${fetched} entries | month: ${rev.toLocaleString()} DH`);
-      } catch (gErr) {
-        if (gErr.code === 8) { setQuotaExceeded(); break; }
-        console.warn(`  ⚠️ [${gid}] register sync failed:`, gErr.message);
-      }
+      const c = new Date(monthStart);
+      while (c <= now2) { totalSQLiteEntries += lc.getRegister(gid, toDS(c)).length; c.setDate(c.getDate()+1); }
     }
-    console.log('✨ SQLite register sync complete.');
+
+    if (totalSQLiteEntries >= 5 && msSinceRegSync < REGISTER_SYNC_COOLDOWN_MS) {
+      // ✅ SQLite already has data AND we synced recently — skip Firestore entirely
+      console.log(`⏭️  Register sync skipped — SQLite has ${totalSQLiteEntries} entries, last sync ${Math.round(msSinceRegSync/60000)} min ago. Quota saved! ✅`);
+    } else {
+      // 🌐 SQLite is empty or stale — pull from Firestore
+      console.log(`📋 Register auto-sync: pulling current month for all gyms... (SQLite had ${totalSQLiteEntries} entries)`);
+      for (const gid of GYMS) {
+        try {
+          const cursor = new Date(monthStart);
+          let fetched = 0;
+          while (cursor <= now2) {
+            const dateStr = toDS(cursor);
+            const snap = await db.collection('megafit_daily_register').doc(`${gid}_${dateStr}`).collection('entries').get();
+            if (!snap.empty) {
+              lc.upsertRegister(gid, dateStr, snap.docs.map(d => ({ id: d.id, ...d.data(), date: dateStr, gymId: gid })));
+              fetched += snap.size;
+            }
+            cursor.setDate(cursor.getDate() + 1);
+          }
+          // Compute monthly revenue from updated cache
+          let rev = 0;
+          const c2 = new Date(monthStart);
+          while (c2 <= now2) {
+            lc.getRegister(gid, toDS(c2)).forEach(e => { rev += (Number(e.tpe)||0)+(Number(e.espece)||0)+(Number(e.virement)||0)+(Number(e.cheque)||0); });
+            c2.setDate(c2.getDate()+1);
+          }
+          console.log(`  ✅ [${gid}] fetched ${fetched} entries | month: ${rev.toLocaleString()} DH`);
+        } catch (gErr) {
+          if (gErr.code === 8) { setQuotaExceeded(); break; }
+          console.warn(`  ⚠️ [${gid}] register sync failed:`, gErr.message);
+        }
+      }
+      lc.setMeta('last_register_sync', new Date().toISOString());
+      console.log('✨ SQLite register sync complete.');
+    }
   } catch (err) {
     if (err.code === 8) setQuotaExceeded();
     console.warn('⚠️ SQLite seed skipped or partial:', err.message);

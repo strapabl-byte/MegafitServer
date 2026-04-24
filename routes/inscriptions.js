@@ -129,27 +129,34 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
   });
 
   // ── GET /public/members/search ────────────────────────────────────────────
+  // ✅ SQLite-first: reads from local cache — zero Firestore cost
   router.get('/public/members/search', async (req, res) => {
     try {
       const q = (req.query.q || '').trim().toLowerCase();
       if (q.length < 2) return res.json([]);
-      const snap = await db.collection('members').get();
-      const matches = snap.docs
-        .map(d => ({ id: d.id, ...d.data() }))
-        .filter(m => (m.fullName || '').toLowerCase().includes(q) || (m.cin || '').toLowerCase().includes(q) || (m.phone || '').includes(q))
-        .slice(0, 5)
-        .map(m => ({
-          id: m.id, fullName: m.fullName,
-          nom: (m.fullName || '').split(' ').pop(), prenom: (m.fullName || '').split(' ')[0],
-          cin: m.cin, phone: m.phone, email: m.email, birthday: m.birthday,
-          adresse: m.adresse || m.address || '', ville: m.ville || m.city || '',
-        }));
-      res.json(matches);
+
+      const searchTerm = `%${q}%`;
+      const rows = lc.db.prepare(`
+        SELECT id, full_name, phone, cin, email, birthday, adresse, ville, gym_id
+        FROM members_cache
+        WHERE LOWER(full_name) LIKE ? OR LOWER(cin) LIKE ? OR phone LIKE ?
+        LIMIT 5
+      `).all(searchTerm, searchTerm, searchTerm);
+
+      res.json(rows.map(m => ({
+        id: m.id,
+        fullName: m.full_name,
+        nom: (m.full_name || '').split(' ').slice(1).join(' ') || (m.full_name || '').split(' ').pop(),
+        prenom: (m.full_name || '').split(' ')[0],
+        cin: m.cin, phone: m.phone, email: m.email, birthday: m.birthday,
+        adresse: m.adresse || '', ville: m.ville || '',
+      })));
     } catch (err) {
       console.error('Public Member Search Error:', err);
       res.status(500).json({ error: 'Failed to search members' });
     }
   });
+
 
   // ── GET /api/inscriptions ─────────────────────────────────────────────────
   router.get('/api/inscriptions', verifyAzureToken, async (req, res) => {
@@ -303,19 +310,15 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
               memberId, inscriptionId: req.params.id, gymId,
               amount: totalPaid, plan, date: new Date().toISOString(), method,
               paymentsSplit: { espece, carte, virement, cheque },
-              chequePhoto, note: 'Paiement inscription initiale',
+              chequePhoto, note: 'Paiement inscription initiale — À confirmer sur la page Paiements',
               createdAt: admin.firestore.FieldValue.serverTimestamp(),
               recordedBy: req.user?.preferred_username || 'Admin', type: 'registration',
             });
-
-            await autoRegisterCA({
-              gymId, nom: memberData.fullName, tel: memberData.phone,
-              cin: memberData.cin, plan, subscriptionName: ins.subscriptionName,
-              amount: totalPaid, method, commercial: ins.commercial || req.user?.preferred_username || 'FORM',
-              contrat: memberData.contractNumber, payments: { espece, carte, virement, cheque },
-              reste: Math.max(0, (ins.totals?.grandTotal || 0) - totalPaid), note: 'Paiement inscription initiale'
-            });
-          }
+          // ✅ NOTE: autoRegisterCA is intentionally NOT called here.
+          // The register entry is created ONLY when the admin explicitly
+          // confirms the payment on the Payments page (complete-inscription endpoint).
+          // Calling it here caused duplicate entries in the daily register.
+        }
       }
 
       await insRef.update({ status: 'awaiting_payment', memberId: memberRef.id, memberCreatedAt: admin.firestore.FieldValue.serverTimestamp(), memberCreatedBy: req.user?.preferred_username || 'Admin' });
@@ -325,10 +328,135 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
 
       invalidateCache(apiCache.inscriptions);
       const memberSnap = await memberRef.get();
+
+      // ✅ INSTANT MEMBER CACHE: Push new/updated member into SQLite immediately
+      // Without this, the member is invisible in the Members page until the next hourly sync.
+      try {
+        lc.upsertMembers(gymId, [{ id: memberRef.id, ...memberSnap.data() }]);
+        console.log(`💾 SQLite member cache updated for: ${memberData.fullName}`);
+      } catch(cacheErr) {
+        console.warn('⚠️  SQLite member cache update failed (non-blocking):', cacheErr.message);
+      }
+
       res.json({ ok: true, member: { id: memberRef.id, ...memberSnap.data() }, nextStep: 'Go to Payments page to confirm and record the payment' });
     } catch (err) {
       console.error('Confirm Inscription Error:', err);
       res.status(500).json({ error: 'Failed to confirm inscription' });
+    }
+  });
+
+  // ── POST /api/inscriptions/recover-register ──────────────────────────────
+  // Finds all accepted (awaiting_payment) inscriptions from the last N days
+  // that are missing from the daily register and injects them.
+  // Safe to run multiple times — uses source+contrat guard to avoid duplicates.
+  router.post('/recover-register', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const { gymId, daysBack = 7 } = req.body;
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - Number(daysBack));
+
+      // 1. Get all accepted-but-unconfirmed inscriptions
+      let query = db.collection('pending_members')
+        .where('status', '==', 'awaiting_payment');
+      if (gymId) query = query.where('gymId', '==', gymId);
+      const snap = await query.get();
+
+      const recovered = [];
+      const skipped   = [];
+      const errors    = [];
+
+      for (const doc of snap.docs) {
+        const ins = doc.data();
+        const insGymId = ins.gymId || 'dokarat';
+        const fullName = `${ins.prenom || ''} ${ins.nom || ''}`.trim();
+        const contrat  = ins.contractNumber || '';
+
+        // Determine date to use for register (prefer createdAt, fallback to today)
+        let dateStr = new Date().toISOString().slice(0, 10);
+        if (ins.createdAt?._seconds) {
+          dateStr = new Date(ins.createdAt._seconds * 1000).toISOString().slice(0, 10);
+        } else if (ins.memberCreatedAt?._seconds) {
+          dateStr = new Date(ins.memberCreatedAt._seconds * 1000).toISOString().slice(0, 10);
+        }
+
+        // Skip if too old
+        if (new Date(dateStr) < cutoff) {
+          skipped.push({ id: doc.id, name: fullName, reason: 'Too old' });
+          continue;
+        }
+
+        // Check Firestore register for existing entry with this contrat number
+        if (contrat) {
+          const regDocId = `${insGymId}_${dateStr}`;
+          const existSnap = await db.collection('megafit_daily_register')
+            .doc(regDocId).collection('entries')
+            .where('contrat', '==', contrat)
+            .limit(1).get();
+          if (!existSnap.empty) {
+            skipped.push({ id: doc.id, name: fullName, date: dateStr, reason: 'Already in register' });
+            continue;
+          }
+        }
+
+        // Also check SQLite
+        if (contrat) {
+          const existInSQLite = lc.db.prepare(
+            `SELECT id FROM register_cache WHERE gym_id=? AND contrat=? AND date=? LIMIT 1`
+          ).get(insGymId, contrat, dateStr);
+          if (existInSQLite) {
+            skipped.push({ id: doc.id, name: fullName, date: dateStr, reason: 'Already in SQLite register' });
+            continue;
+          }
+        }
+
+        // Build payment split from inscription data
+        const espece   = Number(ins.payments?.espece   || 0);
+        const carte    = Number(ins.payments?.carte    || ins.payments?.tpe || 0);
+        const virement = Number(ins.payments?.virement || 0);
+        const cheque   = Number(ins.payments?.cheque   || 0);
+        const totalPaid = espece + carte + virement + cheque || Number(ins.totals?.paid || ins.totals?.grandTotal || 0);
+
+        if (totalPaid <= 0) {
+          skipped.push({ id: doc.id, name: fullName, date: dateStr, reason: 'No payment amount found' });
+          continue;
+        }
+
+        const method = carte > 0 ? 'Carte Bancaire' : espece > 0 ? 'Espèces' : virement > 0 ? 'Virement' : 'Chèque';
+
+        try {
+          await autoRegisterCA({
+            gymId: insGymId,
+            date: dateStr,
+            nom: fullName,
+            tel: ins.telephone || '',
+            cin: ins.cin || '',
+            plan: ins.plan || 'Annual',
+            subscriptionName: ins.subscriptionName || '',
+            amount: totalPaid,
+            method,
+            commercial: ins.commercial || 'FORM',
+            contrat,
+            payments: { espece, carte, virement, cheque },
+            reste: Math.max(0, (ins.totals?.grandTotal || 0) - totalPaid),
+            note: `[RÉCUPÉRÉ] Inscription N°${contrat} — acceptée le ${dateStr}`,
+          });
+          recovered.push({ id: doc.id, name: fullName, date: dateStr, amount: totalPaid, gymId: insGymId });
+          console.log(`🔧 RECOVER: ${fullName} | ${totalPaid} DH | ${insGymId}_${dateStr}`);
+        } catch (e) {
+          errors.push({ id: doc.id, name: fullName, error: e.message });
+        }
+      }
+
+      res.json({
+        ok: true,
+        summary: `${recovered.length} recovered, ${skipped.length} skipped, ${errors.length} errors`,
+        recovered,
+        skipped,
+        errors,
+      });
+    } catch (err) {
+      console.error('Recover Register Error:', err);
+      res.status(500).json({ error: 'Recovery failed', detail: err.message });
     }
   });
 

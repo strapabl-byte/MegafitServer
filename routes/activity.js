@@ -5,23 +5,30 @@ module.exports = function (deps) {
   const router = express.Router();
   const { db } = deps;
 
+  // ── In-memory cache: avoid hitting Firestore on every 30s dashboard poll ──
+  const ACTIVITY_TTL_MS = 5 * 60 * 1000; // 5 minutes
+  let activityCache = {};  // key: gymId → { data, ts }
+
   // GET /api/activity/logs
   router.get('/api/activity/logs', verifyAzureToken, async (req, res) => {
     try {
-      const { gymId } = req.query; // 'all' or specific
-      
+      const { gymId = 'all' } = req.query;
+      const now = Date.now();
+      const cached = activityCache[gymId];
+
+      // ✅ Serve from cache if fresh — zero Firestore reads
+      if (cached && now - cached.ts < ACTIVITY_TTL_MS) {
+        console.log(`⚡ [CACHE HIT] activity/logs (${gymId}) — ${Math.round((now - cached.ts)/1000)}s old`);
+        return res.json(cached.data);
+      }
+
+      // 🌐 Cache miss — fetch from Firestore and store result
+      console.log(`🌐 [CACHE MISS] activity/logs (${gymId}) — fetching from Firestore`);
       let query = db.collection('manager_activity_logs')
                     .orderBy('createdAt', 'desc')
                     .limit(50);
-                    
+
       if (gymId && gymId !== 'all') {
-        const clubsMap = {
-            'marjane': 'Marjane',
-            'dokarat': 'Dokarat',
-            'casa1': 'Casa 1',
-            'casa2': 'Casa 2'
-        };
-        // Some flexibility for gymId values
         query = query.where('gymId', '==', gymId);
       }
 
@@ -33,7 +40,6 @@ module.exports = function (deps) {
           const date = data.createdAt.toDate();
           timeLabel = date.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
         }
-        
         return {
           id: doc.id,
           time: timeLabel,
@@ -43,6 +49,7 @@ module.exports = function (deps) {
         };
       });
 
+      activityCache[gymId] = { data: logs, ts: now };
       res.json(logs);
     } catch (err) {
       console.error('Audit Fetch Error:', err);
@@ -52,3 +59,4 @@ module.exports = function (deps) {
 
   return router;
 };
+

@@ -71,7 +71,7 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
   });
 
   // ── POST /api/register/entry ──────────────────────────────────────────────
-  router.post('/entry', async (req, res) => {
+  router.post('/entry', verifyAzureToken, async (req, res) => {
     try {
       const { date, gymId = 'dokarat', ...entry } = req.body;
       if (!date) return res.status(400).json({ error: 'date required' });
@@ -97,7 +97,7 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
 
   // ── PUT /api/register/entry/:id ───────────────────────────────────────────
   // User requested bypassing Azure verification for now to allow editing quickly
-  router.put('/entry/:id', async (req, res) => {
+  router.put('/entry/:id', verifyAzureToken, async (req, res) => {
     try {
       const { date, gymId = 'dokarat', ...entry } = req.body;
       if (!date) return res.status(400).json({ error: 'date required' });
@@ -187,12 +187,12 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
 
       const searchTerm = `%${name.trim().toLowerCase()}%`;
       const rows = lc.db.prepare(`
-        SELECT * FROM register_entries
+        SELECT * FROM register_cache
         WHERE gym_id = ?
-          AND LOWER(nom) LIKE ?
+          AND (LOWER(nom) LIKE ? OR tel LIKE ?)
         ORDER BY date DESC
-        LIMIT 30
-      `).all(gymId, searchTerm);
+        LIMIT 50
+      `).all(gymId, searchTerm, searchTerm);
 
       const entries = rows.map(r => ({
         id: r.id,
@@ -222,7 +222,7 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
 
   // ── DÉCAISSEMENTS ──────────────────────────────────────────────────────────
   
-  router.post('/decaissement', async (req, res) => {
+  router.post('/decaissement', verifyAzureToken, async (req, res) => {
     try {
       const { date, gymId = 'dokarat', ...decData } = req.body;
       if (!date) return res.status(400).json({ error: 'date required' });
@@ -244,7 +244,7 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
     }
   });
 
-  router.delete('/decaissement/:id', async (req, res) => {
+  router.delete('/decaissement/:id', verifyAzureToken, async (req, res) => {
     try {
       const { date, gymId = 'dokarat' } = req.query;
       if (!date) return res.status(400).json({ error: 'date required' });

@@ -349,7 +349,6 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache }) {
       }
 
       // ── Inject into register ─────────────────────────────────────────────
-      const amount = Number(payment.amount) || 0;
       await autoRegisterCA({
         gymId, date: dateStr, nom, tel, cin,
         plan:             payment.plan,

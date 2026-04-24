@@ -626,6 +626,8 @@ function getCacheStats() {
 }
 
 module.exports = {
+  // raw db — for custom queries in routes (e.g. commercial stats aggregation)
+  db,
   // entries
   upsertEntries, getEntries, getEntryCount, getUniqueEntryCount,
   // daily stats

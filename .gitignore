@@ -9,3 +9,11 @@ ngrok.log
 *.db-shm
 *.db-wal
 megafit_cache.db*
+# One-off diagnostic / scratch scripts (local dev only)
+scratch_*.js
+check_commercials.js
+diagnose_members.js
+insert_missing_23.js
+recover_missing_register.js
+undo_recovered_register.js
+sync_missing_members.js
