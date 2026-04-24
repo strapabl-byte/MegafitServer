@@ -108,6 +108,9 @@ db.exec(`
     raison      TEXT,
     commercial  TEXT,
     signature   TEXT,
+    status      TEXT DEFAULT 'approved',
+    requested_by TEXT,
+    approved_by  TEXT,
     created_at  TEXT,
     synced_at   TEXT,
     PRIMARY KEY (id, gym_id)
@@ -183,6 +186,9 @@ try { db.exec(`
     reporter TEXT, date TEXT, created_at TEXT, synced_at TEXT
   );
 `); } catch (e) {}
+try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN status TEXT DEFAULT 'approved';"); } catch (e) {}
+try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN requested_by TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN approved_by TEXT;"); } catch (e) {}
 
 
 console.log(`💾 SQLite cache initialised → ${DB_PATH}`);
@@ -395,9 +401,9 @@ function deleteRegisterEntry(gymId, date, entryId) {
 
 const insertDecaissement = db.prepare(`
   INSERT OR REPLACE INTO decaissements_cache 
-    (id, gym_id, date, montant, raison, commercial, signature, created_at, synced_at)
+    (id, gym_id, date, montant, raison, commercial, signature, status, requested_by, approved_by, created_at, synced_at)
   VALUES 
-    (@id, @gym_id, @date, @montant, @raison, @commercial, @signature, @created_at, @synced_at)
+    (@id, @gym_id, @date, @montant, @raison, @commercial, @signature, @status, @requested_by, @approved_by, @created_at, @synced_at)
 `);
 
 function upsertDecaissements(gymId, date, decsArr) {
@@ -406,13 +412,16 @@ function upsertDecaissements(gymId, date, decsArr) {
   });
   const now = new Date().toISOString();
   upsert(decsArr.map(d => ({
-    id:         d.id,
-    gym_id:     gymId,
-    date:       date,
-    montant:    Number(d.montant) || 0,
-    raison:     d.raison || '',
-    commercial: d.commercial || '',
-    signature:  d.signature || '',
+    id:           d.id,
+    gym_id:       gymId,
+    date:         date,
+    montant:      Number(d.montant) || 0,
+    raison:       d.raison || '',
+    commercial:   d.commercial || '',
+    signature:    d.signature || '',
+    status:       d.status || 'approved',
+    requested_by: d.requestedBy || null,
+    approved_by:  d.approvedBy || null,
     created_at: typeof d.createdAt === 'string' ? d.createdAt : 
                (d.createdAt && typeof d.createdAt.toDate === 'function') ? d.createdAt.toDate().toISOString() :
                (d.createdAt?.toISOString ? d.createdAt.toISOString() : now),

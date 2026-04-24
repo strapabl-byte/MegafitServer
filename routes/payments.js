@@ -4,7 +4,7 @@
 const { Router } = require('express');
 const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 
-module.exports = function paymentsRouter({ db, admin, lc, apiCache }) {
+module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCache }) {
   const router = Router();
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -273,6 +273,11 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache }) {
           if (!latestPay.empty) await latestPay.docs[0].ref.update({ memberId: insData.memberId });
         }
         await inscriptionRef.update(updateData);
+      }
+
+      // invalidate cache so it doesn't show as awaiting_payment anymore
+      if (invalidateCache && apiCache) {
+        invalidateCache(apiCache.inscriptions);
       }
 
       res.json({ ok: true, message: 'Paiement validé avec succès.' });

@@ -226,25 +226,82 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
     try {
       const { date, gymId = 'dokarat', ...decData } = req.body;
       if (!date) return res.status(400).json({ error: 'date required' });
+      
+      const userRole = req.user?.role || 'manager';
+      const status = (userRole === 'admin') ? 'approved' : 'pending';
+      const userName = req.user?.preferred_username || req.user?.name || 'system';
+
       const docId = `${gymId}_${date}`;
-      const ref = await db.collection('megafit_daily_register').doc(docId).collection('decaissements').add({
-        ...decData, location: gymId,
+      const payload = {
+        ...decData,
+        location: gymId,
+        status: status,
+        requestedBy: userName,
+        approvedBy: (status === 'approved') ? userName : null,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        createdBy: req.user?.preferred_username || 'system',
-      });
+        createdBy: userName,
+      };
+
+      const ref = await db.collection('megafit_daily_register').doc(docId).collection('decaissements').add(payload);
       await db.collection('megafit_daily_register').doc(docId).set({ gymId, date, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       
       const newDoc = await ref.get();
       lc.upsertDecaissements(gymId, date, [{ id: ref.id, ...newDoc.data() }]);
       
-      res.json({ ok: true, id: ref.id });
+      res.json({ ok: true, id: ref.id, status });
     } catch (err) {
       console.error('POST /api/register/decaissement error:', err);
       res.status(500).json({ error: 'Failed to save decaissement' });
     }
   });
 
-  router.delete('/decaissement/:id', verifyAzureToken, async (req, res) => {
+  // ── Approval Endpoints ───────────────────────────────────────────────────
+  router.patch('/decaissement/:id/approve', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const { date, gymId = 'dokarat' } = req.body;
+      if (!date) return res.status(400).json({ error: 'date required' });
+      
+      const adminName = req.user?.preferred_username || req.user?.name || 'admin';
+      const docRef = db.collection('megafit_daily_register').doc(`${gymId}_${date}`).collection('decaissements').doc(req.params.id);
+      
+      await docRef.update({
+        status: 'approved',
+        approvedBy: adminName,
+        approvedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      const updated = await docRef.get();
+      lc.upsertDecaissements(gymId, date, [{ id: req.params.id, ...updated.data() }]);
+      
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('Approve decaissement error:', err);
+      res.status(500).json({ error: 'Failed to approve' });
+    }
+  });
+
+  router.patch('/decaissement/:id/reject', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const { date, gymId = 'dokarat' } = req.body;
+      if (!date) return res.status(400).json({ error: 'date required' });
+      
+      const docRef = db.collection('megafit_daily_register').doc(`${gymId}_${date}`).collection('decaissements').doc(req.params.id);
+      await docRef.update({
+        status: 'rejected',
+        rejectedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      const updated = await docRef.get();
+      lc.upsertDecaissements(gymId, date, [{ id: req.params.id, ...updated.data() }]);
+      
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('Reject decaissement error:', err);
+      res.status(500).json({ error: 'Failed to reject' });
+    }
+  });
+
+  router.delete('/decaissement/:id', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
       const { date, gymId = 'dokarat' } = req.query;
       if (!date) return res.status(400).json({ error: 'date required' });

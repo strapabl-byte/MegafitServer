@@ -217,7 +217,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
     try {
       const gymId = req.query.gymId;
       const key   = gymId || 'all';
-      let query = db.collection('pending_members').where('source', '==', 'web').where('status', '==', 'pending');
+      let query = db.collection('pending_members').where('source', '==', 'web').where('status', 'in', ['pending', 'awaiting_payment']);
       if (gymId) query = query.where('gymId', '==', gymId);
 
       const cached = apiCache.inscriptions[key];
