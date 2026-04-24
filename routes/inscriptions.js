@@ -130,7 +130,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
 
   // ── GET /public/members/search ────────────────────────────────────────────
   // ✅ SQLite-first: reads from local cache — zero Firestore cost during typing
-  // Only columns that exist in members_cache are queried.
+  // Deleted/inactive members are excluded from results.
   router.get('/public/members/search', async (req, res) => {
     try {
       const q = (req.query.q || '').trim().toLowerCase();
@@ -140,7 +140,11 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
       const rows = lc.db.prepare(`
         SELECT id, full_name, phone, cin, birthday, gym_id, photo
         FROM members_cache
-        WHERE LOWER(full_name) LIKE ? OR LOWER(cin) LIKE ? OR phone LIKE ?
+        WHERE (LOWER(full_name) LIKE ? OR LOWER(cin) LIKE ? OR phone LIKE ?)
+          AND (status IS NULL OR status = ''
+               OR (LOWER(status) NOT LIKE '%delet%'
+               AND LOWER(status) NOT LIKE '%inactiv%'
+               AND LOWER(status) NOT LIKE '%supprim%'))
         LIMIT 5
       `).all(searchTerm, searchTerm, searchTerm);
 
@@ -154,7 +158,6 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         birthday: m.birthday || '',
         gymId:   m.gym_id  || '',
         photo:   m.photo   || '',
-        // email / adresse / ville not in SQLite — fetched on selection via /public/members/:id/detail
       })));
     } catch (err) {
       console.error('Public Member Search Error:', err);
@@ -165,15 +168,28 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
   // ── GET /public/members/:id/detail ───────────────────────────────────────
   // Called ONCE when user selects a member from search results.
   // Does a single Firestore read to get email, adresse, ville not stored in SQLite.
+  // Returns 410 Gone if the member has been deleted.
   router.get('/public/members/:id/detail', async (req, res) => {
     try {
       const memberId = req.params.id;
       if (!memberId) return res.status(400).json({ error: 'id required' });
 
       const snap = await db.collection('members').doc(memberId).get();
-      if (!snap.exists) return res.status(404).json({ error: 'Member not found' });
+
+      // Member document deleted from Firestore entirely
+      if (!snap.exists) {
+        lc.pruneStaleMember(memberId); // remove from SQLite so it won't appear again
+        return res.status(410).json({ error: 'Member deleted', deleted: true });
+      }
 
       const d = snap.data();
+
+      // Member soft-deleted (deleted/isDeleted flag)
+      if (d.deleted === true || d.isDeleted === true || d.status === 'deleted') {
+        lc.pruneStaleMember(memberId); // clean from SQLite cache
+        return res.status(410).json({ error: 'Member deleted', deleted: true });
+      }
+
       res.json({
         id:       snap.id,
         fullName: d.fullName || d.full_name || '',
@@ -193,6 +209,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
       res.status(500).json({ error: 'Failed to fetch member detail' });
     }
   });
+
 
 
   // ── GET /api/inscriptions ─────────────────────────────────────────────────
