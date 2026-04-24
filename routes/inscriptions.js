@@ -129,7 +129,8 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
   });
 
   // ── GET /public/members/search ────────────────────────────────────────────
-  // ✅ SQLite-first: reads from local cache — zero Firestore cost
+  // ✅ SQLite-first: reads from local cache — zero Firestore cost during typing
+  // Only columns that exist in members_cache are queried.
   router.get('/public/members/search', async (req, res) => {
     try {
       const q = (req.query.q || '').trim().toLowerCase();
@@ -137,7 +138,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
 
       const searchTerm = `%${q}%`;
       const rows = lc.db.prepare(`
-        SELECT id, full_name, phone, cin, email, birthday, adresse, ville, gym_id
+        SELECT id, full_name, phone, cin, birthday, gym_id, photo
         FROM members_cache
         WHERE LOWER(full_name) LIKE ? OR LOWER(cin) LIKE ? OR phone LIKE ?
         LIMIT 5
@@ -146,14 +147,50 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
       res.json(rows.map(m => ({
         id: m.id,
         fullName: m.full_name,
-        nom: (m.full_name || '').split(' ').slice(1).join(' ') || (m.full_name || '').split(' ').pop(),
-        prenom: (m.full_name || '').split(' ')[0],
-        cin: m.cin, phone: m.phone, email: m.email, birthday: m.birthday,
-        adresse: m.adresse || '', ville: m.ville || '',
+        nom:    (m.full_name || '').split(' ').slice(1).join(' ') || '',
+        prenom: (m.full_name || '').split(' ')[0] || '',
+        cin:     m.cin     || '',
+        phone:   m.phone   || '',
+        birthday: m.birthday || '',
+        gymId:   m.gym_id  || '',
+        photo:   m.photo   || '',
+        // email / adresse / ville not in SQLite — fetched on selection via /public/members/:id/detail
       })));
     } catch (err) {
       console.error('Public Member Search Error:', err);
       res.status(500).json({ error: 'Failed to search members' });
+    }
+  });
+
+  // ── GET /public/members/:id/detail ───────────────────────────────────────
+  // Called ONCE when user selects a member from search results.
+  // Does a single Firestore read to get email, adresse, ville not stored in SQLite.
+  router.get('/public/members/:id/detail', async (req, res) => {
+    try {
+      const memberId = req.params.id;
+      if (!memberId) return res.status(400).json({ error: 'id required' });
+
+      const snap = await db.collection('members').doc(memberId).get();
+      if (!snap.exists) return res.status(404).json({ error: 'Member not found' });
+
+      const d = snap.data();
+      res.json({
+        id:       snap.id,
+        fullName: d.fullName || d.full_name || '',
+        nom:      d.nom      || '',
+        prenom:   d.prenom   || '',
+        cin:      d.cin      || '',
+        phone:    d.phone    || d.telephone || '',
+        email:    d.email    || '',
+        birthday: d.birthday || d.dateNaissance || '',
+        adresse:  d.adresse  || '',
+        ville:    d.ville    || '',
+        gymId:    d.gymId    || '',
+        photo:    d.photo    || '',
+      });
+    } catch (err) {
+      console.error('Member detail error:', err);
+      res.status(500).json({ error: 'Failed to fetch member detail' });
     }
   });
 
