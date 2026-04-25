@@ -191,6 +191,67 @@ const auditLogger = (req, res, next) => {
 app.use(auditLogger);
 
 // ─────────────────────────────────────────────────────────────────────────────
+// System Stats — live SQLite disk usage for Megaeye dashboard
+// ─────────────────────────────────────────────────────────────────────────────
+app.get('/api/system-stats', (req, res) => {
+  try {
+    const fs   = require('fs');
+    const path = require('path');
+    const DB_PATH = lc.db.name; // path to the SQLite file
+
+    const fileSize = fs.existsSync(DB_PATH) ? fs.statSync(DB_PATH).size : 0;
+    const sizeMB   = parseFloat((fileSize / 1024 / 1024).toFixed(2));
+    const DISK_MB  = 1024; // 1GB Render disk
+    const pctUsed  = parseFloat(((sizeMB / DISK_MB) * 100).toFixed(2));
+
+    // Row counts per table
+    const tables = lc.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(t => t.name);
+    const tableCounts = {};
+    let totalRows = 0;
+    for (const t of tables) {
+      try {
+        const n = lc.db.prepare(`SELECT COUNT(*) as n FROM "${t}"`).get().n;
+        tableCounts[t] = n;
+        totalRows += n;
+      } catch {}
+    }
+
+    // Growth estimate: ~118 MB/year based on real data
+    const MB_PER_YEAR = 118;
+    const yearsRemaining = parseFloat(((DISK_MB - sizeMB) / MB_PER_YEAR).toFixed(1));
+
+    // Server uptime
+    const uptimeSeconds = Math.floor(process.uptime());
+    const uptimeH = Math.floor(uptimeSeconds / 3600);
+    const uptimeM = Math.floor((uptimeSeconds % 3600) / 60);
+
+    res.json({
+      db: {
+        sizeMB,
+        totalRows,
+        pctUsed,
+        diskCapacityMB: DISK_MB,
+        remainingMB: parseFloat((DISK_MB - sizeMB).toFixed(1)),
+        yearsRemaining,
+        tables: tableCounts,
+      },
+      server: {
+        uptimeH,
+        uptimeM,
+        uptimeSeconds,
+        nodeVersion: process.version,
+        platform: process.platform,
+        memUsedMB: parseFloat((process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)),
+        memTotalMB: parseFloat((process.memoryUsage().heapTotal / 1024 / 1024).toFixed(1)),
+      },
+      ts: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ONE-TIME: Inject daily_stats into SQLite from local export
 // MUST be registered BEFORE wildcard routers — protected by INJECT_SECRET
 // ─────────────────────────────────────────────────────────────────────────────
