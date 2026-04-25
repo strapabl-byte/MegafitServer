@@ -459,7 +459,7 @@ async function seedSQLiteHistoricalStats() {
     // ── Cooldown guard: skip if synced within last hour ──────────────────────
     const lastRegSync = lc.getMeta('last_register_sync');
     const msSinceRegSync = lastRegSync ? Date.now() - new Date(lastRegSync).getTime() : Infinity;
-    const REGISTER_SYNC_COOLDOWN_MS = 0; // ✅ Forced 0
+    const REGISTER_SYNC_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
 
     // Count total SQLite register entries for this month across all gyms
     let totalSQLiteEntries = 0;
@@ -540,17 +540,27 @@ app.listen(PORT, '0.0.0.0', () => {
     if (isQuotaExceeded()) return;
     await seedSQLiteHistoricalStats();
 
-    const REPAIR_COOLDOWN_MS = 0; // ✅ Forced 0
+    // Smart guard: run deep repair only if SQLite is missing data (< 25 days)
+    const existingStats = lc.getDailyStats('dokarat', 30).filter(s => s.count > 0);
+    const hasFullData = existingStats.length >= 25;
+
+    const REPAIR_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
     const lastRepair = lc.getMeta('last_startup_repair');
     const msSinceLastRepair = lastRepair ? Date.now() - new Date(lastRepair).getTime() : Infinity;
 
-    if (msSinceLastRepair < REPAIR_COOLDOWN_MS) {
-      console.log(`⏭️  Startup repair skipped — last run ${Math.round(msSinceLastRepair / 60000)} min ago. Quota saved! ✅`);
+    if (hasFullData && msSinceLastRepair < REPAIR_COOLDOWN_MS) {
+      console.log(`⏭️  Startup repair skipped — SQLite already has ${existingStats.length} days of data. Quota saved! ✅`);
     } else {
-      console.log('🛠️  FORCING DEEP REPAIR for April (counting all logs)...');
-      await syncGymCounts(db, apiCache, 30, () => false, true); // true = force manual counting
+      if (!hasFullData) {
+        console.log(`🛠️  SQLite only has ${existingStats.length} days — running Deep Scan Repair for 30 days...`);
+      } else {
+        console.log('🛠️  Running startup repair for last 7 days...');
+      }
+      const days = hasFullData ? 7 : 30;
+      const forceDeep = !hasFullData; // Deep scan only when data is actually missing
+      await syncGymCounts(db, apiCache, days, () => false, forceDeep);
       lc.setMeta('last_startup_repair', new Date().toISOString());
-      console.log('✅ Deep repair complete.');
+      console.log('✅ Startup repair complete.');
     }
   }, 3000);
 
