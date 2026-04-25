@@ -373,21 +373,33 @@ async function seedSQLiteHistoricalStats() {
           let fetched = 0;
           while (cursor <= now2) {
             const dateStr = toDS(cursor);
-            const snap = await db.collection('megafit_daily_register').doc(`${gid}_${dateStr}`).collection('entries').get();
+            const docRef = db.collection('megafit_daily_register').doc(`${gid}_${dateStr}`);
+
+            // Fetch entries
+            const snap = await docRef.collection('entries').get();
             if (!snap.empty) {
               lc.upsertRegister(gid, dateStr, snap.docs.map(d => ({ id: d.id, ...d.data(), date: dateStr, gymId: gid })));
               fetched += snap.size;
             }
+
+            // ✅ Also fetch décaissements so KPI can subtract them correctly
+            const decSnap = await docRef.collection('decaissements').get();
+            if (!decSnap.empty) {
+              lc.upsertDecaissements(gid, dateStr, decSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+            }
+
             cursor.setDate(cursor.getDate() + 1);
           }
-          // Compute monthly revenue from updated cache
+          // Compute monthly revenue from updated cache (entries - decaissements)
           let rev = 0;
           const c2 = new Date(monthStart);
           while (c2 <= now2) {
-            lc.getRegister(gid, toDS(c2)).forEach(e => { rev += (Number(e.tpe)||0)+(Number(e.espece)||0)+(Number(e.virement)||0)+(Number(e.cheque)||0); });
+            const ds2 = toDS(c2);
+            lc.getRegister(gid, ds2).forEach(e => { rev += (Number(e.tpe)||0)+(Number(e.espece)||0)+(Number(e.virement)||0)+(Number(e.cheque)||0); });
+            (lc.getDecaissements(gid, ds2)||[]).forEach(d => { rev -= Number(d.montant)||0; });
             c2.setDate(c2.getDate()+1);
           }
-          console.log(`  ✅ [${gid}] fetched ${fetched} entries | month: ${rev.toLocaleString()} DH`);
+          console.log(`  ✅ [${gid}] fetched ${fetched} entries | month (net): ${rev.toLocaleString()} DH`);
         } catch (gErr) {
           if (gErr.code === 8) { setQuotaExceeded(); break; }
           console.warn(`  ⚠️ [${gid}] register sync failed:`, gErr.message);
