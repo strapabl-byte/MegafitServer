@@ -333,6 +333,36 @@ app.post('/admin/inject-register', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ADMIN: Inject daily_stats (door scans) directly from local/backup
+// POST /admin/inject-stats  body: { stats: [{gym_id, date, count, raw_count}] }
+// ─────────────────────────────────────────────────────────────────────────────
+app.post('/admin/inject-stats', (req, res) => {
+  const secret   = req.headers['x-inject-secret'];
+  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
+  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+
+  const { stats } = req.body;
+  if (!Array.isArray(stats)) return res.status(400).json({ error: 'stats array required' });
+
+  try {
+    const stmt = lc.db.prepare(`
+      INSERT OR REPLACE INTO daily_stats (gym_id, date, count, raw_count)
+      VALUES (?, ?, ?, ?)
+    `);
+    const insertMany = lc.db.transaction((ss) => { 
+      for (const s of ss) stmt.run(s.gym_id, s.date, s.count, s.raw_count); 
+    });
+    insertMany(stats);
+
+    console.log(`✅ [inject-stats] Injected ${stats.length} daily stats rows`);
+    res.json({ ok: true, injected: stats.length });
+  } catch (err) {
+    console.error('[inject-stats] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Mount Routers
 // ─────────────────────────────────────────────────────────────────────────────
 app.use('/api/members',     require('./routes/members')(deps));
