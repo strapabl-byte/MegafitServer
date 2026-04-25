@@ -545,8 +545,8 @@ app.listen(PORT, '0.0.0.0', () => {
     if (msSinceLastRepair < REPAIR_COOLDOWN_MS) {
       console.log(`⏭️  Startup repair skipped — last run ${Math.round(msSinceLastRepair / 60000)} min ago. Quota saved! ✅`);
     } else {
-      console.log('🛠️  Running startup repair for the last 7 days...');
-      await syncGymCounts(db, apiCache, 7, isQuotaExceeded);
+      console.log('🛠️  Running startup repair for the last 30 days...');
+      await syncGymCounts(db, apiCache, 30, isQuotaExceeded);
       lc.setMeta('last_startup_repair', new Date().toISOString());
       console.log('✅ Startup repair complete.');
     }
