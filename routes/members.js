@@ -255,9 +255,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       const deletedBy = req.user?.preferred_username || req.user?.name || 'Admin';
       const record    = { ...data, memberId: id, deletedAt: admin.firestore.FieldValue.serverTimestamp(), deletedBy };
       await db.collection('deleted_members').doc(id).set(record);
-      await db.collection('users_deleted').add(record);
       await ref.delete();
-      await db.collection('access_logs').add({ memberId: id, usedAt: admin.firestore.FieldValue.serverTimestamp(), type: 'delete', actor: deletedBy });
       delete apiCache.profiles[id];
       res.json({ ok: true });
     } catch (err) { res.status(500).json({ ok: false, error: 'Failed to delete' }); }

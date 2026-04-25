@@ -120,7 +120,7 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
   // ── POST /api/payments ────────────────────────────────────────────────────
   router.post('/', verifyAzureToken, async (req, res) => {
     try {
-      const { memberId, amount, plan, date, method, contrat, commercial, location, payments: splitPayments, type, note, reste, balanceDeadline, cin: passedCin, subscriptionName } = req.body;
+      const { memberId, amount, plan, date, method, contrat, commercial, location, payments: splitPayments, type, note, reste, balanceDeadline, cin: passedCin, subscriptionName, inscriptionId } = req.body;
       let nom = '', tel = '', loc = location || 'dokarat', cin = passedCin || '';
       try {
         const m = await db.collection('members').doc(memberId).get();
@@ -132,15 +132,39 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
         }
       } catch (_) {}
 
-      const docRef = await db.collection('payments').add({
-        memberId, amount, plan, gymId: loc,
-        date: date || new Date().toISOString(),
-        method: method || 'Cash',
-        type: type || 'renewal',
-        note: note || '',
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        recordedBy: req.user?.preferred_username || req.user?.name || 'Admin',
-      });
+      let docRef;
+      // ✅ ANTI-DUP LOGIC: If this is an inscription confirmation, check if the payment record was already pre-created
+      if (inscriptionId && type === 'registration') {
+        const existing = await db.collection('payments').where('inscriptionId', '==', inscriptionId).limit(1).get();
+        if (!existing.empty) {
+          docRef = existing.docs[0].ref;
+          await docRef.update({
+            amount, plan, gymId: loc,
+            date: date || new Date().toISOString(),
+            method: method || 'Cash',
+            type: 'registration',
+            note: note || '',
+            paymentsSplit: splitPayments || null,
+            recordedBy: req.user?.preferred_username || req.user?.name || 'Admin',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          console.log(`♻️ Updated existing registration payment for inscription: ${inscriptionId}`);
+        }
+      }
+
+      if (!docRef) {
+        docRef = await db.collection('payments').add({
+          memberId, amount, plan, gymId: loc,
+          date: date || new Date().toISOString(),
+          method: method || 'Cash',
+          type: type || 'renewal',
+          note: note || '',
+          paymentsSplit: splitPayments || null,
+          inscriptionId: inscriptionId || null,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          recordedBy: req.user?.preferred_username || req.user?.name || 'Admin',
+        });
+      }
 
       if (memberId && reste !== undefined) {
         await db.collection('members').doc(memberId).update({

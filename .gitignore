@@ -1,7 +1,7 @@
 node_modules/
 .env
 *.db
-*.db-journal
+*.db-*
 serviceAccount.json
 verified_april_stats.json
 .DS_Store
