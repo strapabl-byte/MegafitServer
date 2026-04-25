@@ -430,27 +430,23 @@ async function seedSQLiteHistoricalStats() {
     console.log(`📡 Current Local Cache Stats: entries=${cacheStats.entries}, members=${cacheStats.members}, payments=${cacheStats.payments}`);
     
     // Seed Door Stats
-    if (cacheStats.stats < 30) {
-      console.log('🚀 Seeding SQLite with 30-day stats...');
-      for (const gymId of ['dokarat', 'marjane']) {
-        const dateStrs = [], docIds = [];
-        for (let i = 29; i >= 0; i--) {
-          const d = new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10);
-          dateStrs.push(d); docIds.push(`${gymId}_${d}`);
-        }
-        const snaps = await db.getAll(...docIds.map(id => db.collection('gym_daily_stats').doc(id)));
-        snaps.forEach((snap, i) => { 
-          if (snap.exists) {
-            const d = snap.data();
-            lc.upsertDailyStat(gymId, dateStrs[i], d.count || 0, d.rawCount || 0); 
-          }
-          // If snap doesn't exist, we LEAVE the SQLite data alone (don't overwrite with 0)
-        });
+    console.log('🚀 Checking/Seeding SQLite with 30-day stats...');
+    for (const gymId of ['dokarat', 'marjane']) {
+      const dateStrs = [], docIds = [];
+      for (let i = 29; i >= 0; i--) {
+        const d = new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10);
+        dateStrs.push(d); docIds.push(`${gymId}_${d}`);
       }
-      console.log('  📊 Daily stats seeding checked.');
-    } else {
-      console.log('✅ Daily stats already seeded. Skip bulk fetch.');
+      const snaps = await db.getAll(...docIds.map(id => db.collection('gym_daily_stats').doc(id)));
+      snaps.forEach((snap, i) => { 
+        if (snap.exists) {
+          const d = snap.data();
+          lc.upsertDailyStat(gymId, dateStrs[i], d.count || 0, d.rawCount || 0); 
+        }
+        // If snap doesn't exist, LEAVE the SQLite data alone (don't overwrite with 0)
+      });
     }
+    console.log('  📊 Daily stats seeding checked.');
 
     // ── Auto-sync: full current-month register for all gyms ──────────────────
     // ✅ SQLite-first: Only fetch from Firestore if SQLite is empty OR data is stale.
@@ -463,7 +459,7 @@ async function seedSQLiteHistoricalStats() {
     // ── Cooldown guard: skip if synced within last hour ──────────────────────
     const lastRegSync = lc.getMeta('last_register_sync');
     const msSinceRegSync = lastRegSync ? Date.now() - new Date(lastRegSync).getTime() : Infinity;
-    const REGISTER_SYNC_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+    const REGISTER_SYNC_COOLDOWN_MS = 0; // ✅ Forced 0
 
     // Count total SQLite register entries for this month across all gyms
     let totalSQLiteEntries = 0;
@@ -544,7 +540,7 @@ app.listen(PORT, '0.0.0.0', () => {
     if (isQuotaExceeded()) return;
     await seedSQLiteHistoricalStats();
 
-    const REPAIR_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+    const REPAIR_COOLDOWN_MS = 0; // ✅ Forced 0
     const lastRepair = lc.getMeta('last_startup_repair');
     const msSinceLastRepair = lastRepair ? Date.now() - new Date(lastRepair).getTime() : Infinity;
 
