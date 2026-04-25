@@ -142,30 +142,43 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
       const result = await getCachedOrFetch(apiCache.calendar, cacheKey, 10 * 60 * 1000, async () => {
         const gymIds = gymId === 'all' ? ['marjane', 'dokarat', 'casa1', 'casa2'] : [gymId];
         const calendarData = {}, resteData = {};
+        const yearStr = String(year);
 
-        await Promise.all(gymIds.map(async (gid) => {
-          const prefix = `${gid}_${year}`;
-          const snap = await db.collection('megafit_daily_register')
-            .where(admin.firestore.FieldPath.documentId(), '>=', `${prefix}-01-01`)
-            .where(admin.firestore.FieldPath.documentId(), '<=', `${prefix}-12-31`)
-            .get();
+        // ── Build date range for the year ──
+        const startDate = new Date(`${yearStr}-01-01`);
+        const endDate   = new Date(`${yearStr}-12-31`);
 
-          await Promise.all(snap.docs.map(async (parentDoc) => {
-            const date = parentDoc.id.replace(`${gid}_`, '');
-            const entriesSnap = await parentDoc.ref.collection('entries').get();
-            let ca = 0, reste = 0;
-            entriesSnap.docs.forEach(d => {
-              const e = d.data();
-              const paid = (Number(e.tpe) || 0) + (Number(e.espece) || 0) + (Number(e.virement) || 0) + (Number(e.cheque) || 0);
-              ca += paid;
-              const sr = Number(e.reste) || 0;
-              if (sr > 0) reste += sr;
-              else { const prix = Number(e.prix) || 0; if (prix > 0 && prix > paid) reste += prix - paid; }
-            });
-            calendarData[date] = (calendarData[date] || 0) + ca;
-            if (reste > 0) resteData[date] = (resteData[date] || 0) + reste;
-          }));
-        }));
+        for (const gid of gymIds) {
+          const cursor = new Date(startDate);
+          while (cursor <= endDate) {
+            const dateStr = `${cursor.getFullYear()}-${String(cursor.getMonth()+1).padStart(2,'0')}-${String(cursor.getDate()).padStart(2,'0')}`;
+            cursor.setDate(cursor.getDate() + 1);
+
+            // ✅ PRIMARY: SQLite cache (zero Firebase cost)
+            const cached = lc.getRegister(gid, dateStr);
+            if (cached && cached.length > 0) {
+              let ca = 0, reste = 0;
+              cached.forEach(e => {
+                const paid = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
+                ca += paid;
+                const sr = Number(e.reste) || 0;
+                if (sr > 0) reste += sr;
+                else { const prix = Number(e.prix)||0; if (prix > 0 && prix > paid) reste += prix - paid; }
+              });
+
+              // ✅ Subtract approved décaissements (same as KPI endpoint)
+              const decs = lc.getDecaissements(gid, dateStr) || [];
+              decs.filter(d => d.status === 'approved' || !d.status)
+                  .forEach(d => { ca -= Number(d.montant) || 0; });
+
+              if (ca > 0) calendarData[dateStr] = (calendarData[dateStr] || 0) + ca;
+              if (reste > 0) resteData[dateStr] = (resteData[dateStr] || 0) + reste;
+            }
+            // Note: Days with no SQLite data = gym was closed or data not yet synced.
+            // We don't fall back to Firestore per-day to avoid quota burn.
+            // The nightly register sync will populate SQLite for any missing days.
+          }
+        }
 
         return { calendarData, resteData };
       });
