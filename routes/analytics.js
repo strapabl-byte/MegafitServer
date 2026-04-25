@@ -105,19 +105,20 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
 
       for (const gid of gymIds) {
         lc.getDailyStats(gid, 31).forEach(s => {
-          if (map[s.date] && s.date !== today) {
+          if (map[s.date]) {
             map[s.date].count    += s.count    || 0;
             map[s.date].rawCount += s.rawCount || 0;
           }
         });
-        // Merge live count for today only when requested
-        if (includeToday && map[today] !== undefined) {
-          const cached = lc.getDailyStat(gid, today);
-          const uniq   = lc.getUniqueEntryCount(gid, today);
-          const raw    = lc.getEntryCount(gid, today);
-          map[today].count    += cached ? Math.max(cached.count, uniq) : uniq;
-          map[today].rawCount += cached ? Math.max(cached.raw_count, raw) : raw;
-        }
+          // daily_stats for today is updated every 60s by pollDoorEntries — already included above
+          // Fallback only if daily_stats has no data for today yet
+          if (includeToday && map[today] !== undefined) {
+            const statToday = lc.getDailyStat(gid, today);
+            if (!statToday || statToday.count === 0) {
+              map[today].count    += lc.getUniqueEntryCount(gid, today);
+              map[today].rawCount += lc.getEntryCount(gid, today);
+            }
+          }
       }
 
       // Revenue from SQLite register (completed days) + today register if requested
