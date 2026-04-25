@@ -6,6 +6,8 @@ const helmet  = require('helmet');
 const cors    = require('cors');
 const multer  = require('multer');
 const crypto  = require('crypto');
+const path    = require('path');
+const fs      = require('fs');
 const admin   = require('firebase-admin');
 const lc      = require('./localCache');
 const { syncGymCounts, scheduleNightlySync } = require('./auto_sync');
@@ -540,7 +542,7 @@ app.listen(PORT, '0.0.0.0', () => {
     if (isQuotaExceeded()) return;
     await seedSQLiteHistoricalStats();
 
-    // Smart guard: run deep repair only if SQLite is missing data (< 20 days with real data)
+    // Smart guard: run repair only if SQLite is missing data (< 20 days with real data)
     const existingStats = lc.getDailyStats('dokarat', 30).filter(s => s.count > 0);
     const hasFullData = existingStats.length >= 20;
 
@@ -550,15 +552,24 @@ app.listen(PORT, '0.0.0.0', () => {
 
     if (hasFullData && msSinceLastRepair < REPAIR_COOLDOWN_MS) {
       console.log(`⏭️  Startup repair skipped — SQLite already has ${existingStats.length} days of data. Quota saved! ✅`);
-    } else {
-      if (!hasFullData) {
-        console.log(`🛠️  SQLite only has ${existingStats.length} days — running Deep Scan Repair for 30 days...`);
+    } else if (!hasFullData) {
+      // ── Seed from bundled JSON file (ZERO Firebase reads) ──────────────────
+      const seedPath = path.join(__dirname, 'seed_daily_stats.json');
+      if (fs.existsSync(seedPath)) {
+        const seedData = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
+        seedData.forEach(row => lc.upsertDailyStat(row.gym_id, row.date, row.count, row.raw_count || 0));
+        console.log(`📦 Seeded ${seedData.length} daily_stats rows from local JSON file. Zero Firebase reads! ✅`);
       } else {
-        console.log('🛠️  Running startup repair for last 7 days...');
+        // Fallback: only if seed file is missing, use Firebase (7 days, no forced manual)
+        console.log('🛠️  Seed file not found — running 7-day repair from Firebase...');
+        await syncGymCounts(db, apiCache, 7, isQuotaExceeded, false);
       }
-      const days = hasFullData ? 7 : 30;
-      const forceDeep = !hasFullData; // Deep scan only when data is actually missing
-      await syncGymCounts(db, apiCache, days, () => false, forceDeep);
+      lc.setMeta('last_startup_repair', new Date().toISOString());
+      console.log('✅ Startup seeding complete.');
+    } else {
+      // Has data but cooldown expired → light 7-day refresh (1-read per day)
+      console.log('🛠️  Running light 7-day refresh...');
+      await syncGymCounts(db, apiCache, 7, isQuotaExceeded, false);
       lc.setMeta('last_startup_repair', new Date().toISOString());
       console.log('✅ Startup repair complete.');
     }
