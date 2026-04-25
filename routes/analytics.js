@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 // routes/analytics.js ??? Daily stats, KPIs, live door entries, entry logging
 
 const { Router } = require('express');
@@ -698,6 +698,9 @@ ${fullContext}`
           ? existing.reduce((max, e) => e.timestamp > max ? e.timestamp : max, '')
           : null;
         const newEntries = [];
+        let latestDeviceUnique = 0;
+        let latestDeviceTotal  = 0;
+
         for (const coll of g.collections) {
           const body = {
             structuredQuery: {
@@ -725,6 +728,7 @@ ${fullContext}`
             const loc  = (f.location?.stringValue || '').toLowerCase();
             const tags = g.locationTags.map(t => t.toLowerCase());
             if (!tags.some(t => loc.includes(t) || t.includes(loc))) return;
+
             newEntries.push({
               id: d.document.name?.split('/').pop() || ts,
               gym_id: gid, date: today, timestamp: ts,
@@ -733,12 +737,30 @@ ${fullContext}`
               status: f.status?.stringValue || 'Entrée',
               is_face: (f.method?.stringValue || '').toLowerCase().includes('face') ? 1 : 0,
             });
+
+            // ✅ Read device-embedded running totals (no counting needed)
+            const du = f.daily_unique?.integerValue != null ? parseInt(f.daily_unique.integerValue) :
+                       f.daily_unique?.doubleValue  != null ? Math.round(f.daily_unique.doubleValue) : null;
+            const dt = f.daily_total?.integerValue  != null ? parseInt(f.daily_total.integerValue) :
+                       f.daily_total?.doubleValue   != null ? Math.round(f.daily_total.doubleValue) : null;
+            if (du !== null) { latestDeviceUnique = Math.max(latestDeviceUnique, du); }
+            if (dt !== null) { latestDeviceTotal  = Math.max(latestDeviceTotal,  dt); }
           });
         }
+
         if (newEntries.length > 0) {
           lc.upsertEntries(gid, newEntries);
-          console.log(`[DOOR POLL] ${gid}: +${newEntries.length} entries`);
+          console.log(`[DOOR POLL] ${gid}: +${newEntries.length} new entries`);
         }
+
+        // Update daily_stats with the latest device-reported totals
+        // If device counter not available, fall back to counting from SQLite
+        const sqliteUnique = lc.getUniqueEntryCount(gid, today);
+        const sqliteRaw    = lc.getEntryCount(gid, today);
+        const finalUnique  = latestDeviceUnique > 0 ? Math.max(latestDeviceUnique, sqliteUnique) : sqliteUnique;
+        const finalRaw     = latestDeviceTotal  > 0 ? Math.max(latestDeviceTotal,  sqliteRaw)    : sqliteRaw;
+        if (finalUnique > 0) lc.upsertDailyStat(gid, today, finalUnique, finalRaw);
+
         lc.setMeta(`liveEntries_sync_${gid}`, String(Date.now()));
       } catch (e) {
         console.warn(`[DOOR POLL] ${gid} failed: ${e.message}`);
