@@ -32,8 +32,6 @@ app.use(express.urlencoded({ limit: '10mb', extended: true }));
 // ─────────────────────────────────────────────────────────────────────────────
 // Firebase Admin Init
 // ─────────────────────────────────────────────────────────────────────────────
-const fs   = require('fs');
-const path = require('path');
 let serviceAccount;
 
 if (process.env.FIREBASE_SERVICE_ACCOUNT) {
