@@ -283,80 +283,51 @@ app.post('/admin/inject-stats', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ADMIN: Force wipe + re-sync register_cache from Firestore for a gym/month
-// Protected by INJECT_SECRET. Use to fix ghost entries on Render.
-// POST /admin/force-register-sync  body: { gymId, year, month }
+// ADMIN: Inject register_cache rows directly from local export — ZERO Firestore reads
+// Protected by INJECT_SECRET.
+// POST /admin/inject-register  body: { rows: [...], wipe: { gymId, dateFrom, dateTo } }
 // ─────────────────────────────────────────────────────────────────────────────
-app.post('/admin/force-register-sync', async (req, res) => {
+app.post('/admin/inject-register', (req, res) => {
   const secret   = req.headers['x-inject-secret'];
   const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
   if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
 
-  const { gymId = 'dokarat', year = 2026, month = 4 } = req.body;
-  const gymIds = gymId === 'all' ? ['dokarat', 'marjane', 'casa1', 'casa2'] : [gymId];
+  const { rows, wipe } = req.body;
+  if (!Array.isArray(rows)) return res.status(400).json({ error: 'rows array required' });
 
   try {
-    const results = {};
-
-    for (const gid of gymIds) {
-      // Build date list for the month
-      const dates = [];
-      const start = new Date(`${year}-${String(month).padStart(2,'0')}-01`);
-      const end   = new Date(year, month, 0); // last day of month
-      const cursor = new Date(start);
-      while (cursor <= end) {
-        dates.push(`${cursor.getFullYear()}-${String(cursor.getMonth()+1).padStart(2,'0')}-${String(cursor.getDate()).padStart(2,'0')}`);
-        cursor.setDate(cursor.getDate() + 1);
-      }
-
-      // Wipe existing SQLite rows for this gym+month
-      const deleted = lc.db.prepare(
+    let wiped = 0;
+    // Optional: wipe a date range before injecting (to remove ghosts)
+    if (wipe && wipe.gymId && wipe.dateFrom && wipe.dateTo) {
+      const del = lc.db.prepare(
         `DELETE FROM register_cache WHERE gym_id=? AND date>=? AND date<=?`
-      ).run(gid, dates[0], dates[dates.length - 1]);
-      console.log(`🗑️  [force-sync] Wiped ${deleted.changes} rows for ${gid} ${year}-${month}`);
-
-      // Re-fetch from Firestore
-      let fetched = 0, skipped = 0;
-      for (const dateStr of dates) {
-        const snap = await db.collection('megafit_daily_register')
-          .doc(`${gid}_${dateStr}`)
-          .collection('entries')
-          .get();
-        if (!snap.empty) {
-          const rows = snap.docs.map(d => ({ id: d.id, ...d.data(), date: dateStr, gymId: gid }));
-          lc.upsertRegister(gid, dateStr, rows);
-          fetched += snap.size;
-        } else {
-          skipped++;
-        }
-        // Also re-sync decaissements
-        const decSnap = await db.collection('megafit_daily_register')
-          .doc(`${gid}_${dateStr}`)
-          .collection('decaissements')
-          .get();
-        if (!decSnap.empty) {
-          lc.upsertDecaissements(gid, dateStr, decSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-        }
-      }
-
-      // Compute new total from fresh SQLite
-      let newTotal = 0;
-      dates.forEach(d => {
-        lc.getRegister(gid, d).forEach(e => {
-          newTotal += (Number(e.tpe)||0)+(Number(e.espece)||0)+(Number(e.virement)||0)+(Number(e.cheque)||0);
-        });
-      });
-
-      results[gid] = { wiped: deleted.changes, fetched, skipped, newTotal };
-      console.log(`✅ [force-sync] ${gid}: fetched ${fetched} entries, new total = ${newTotal} DH`);
+      ).run(wipe.gymId, wipe.dateFrom, wipe.dateTo);
+      wiped = del.changes;
+      console.log(`🗑️  [inject-register] Wiped ${wiped} rows for ${wipe.gymId} ${wipe.dateFrom}→${wipe.dateTo}`);
     }
 
-    // Reset sync cooldown so next startup won't skip
-    lc.setMeta('last_register_sync', new Date().toISOString());
+    // Insert all rows
+    const stmt = lc.db.prepare(`
+      INSERT OR REPLACE INTO register_cache
+        (id, gym_id, date, commercial, nom, tpe, espece, virement, cheque, prix, reste, contrat, abonnement, cin, tel, note_reste, created_at)
+      VALUES
+        (@id, @gym_id, @date, @commercial, @nom, @tpe, @espece, @virement, @cheque, @prix, @reste, @contrat, @abonnement, @cin, @tel, @note_reste, @created_at)
+    `);
+    const insertMany = lc.db.transaction((rs) => { for (const r of rs) stmt.run(r); });
+    insertMany(rows);
 
-    res.json({ ok: true, year, month, results });
+    // Compute new totals by gym
+    const totals = lc.db.prepare(`
+      SELECT gym_id, SUM(CAST(tpe AS NUMERIC)+CAST(espece AS NUMERIC)+CAST(virement AS NUMERIC)+CAST(cheque AS NUMERIC)) as total, COUNT(*) as nb
+      FROM register_cache
+      WHERE id IN (${rows.map(() => '?').join(',')})
+      GROUP BY gym_id
+    `).all(...rows.map(r => r.id));
+
+    console.log(`✅ [inject-register] Inserted ${rows.length} rows, wiped ${wiped} ghosts`);
+    res.json({ ok: true, inserted: rows.length, wiped, totals });
   } catch (err) {
-    console.error('[force-register-sync] Error:', err);
+    console.error('[inject-register] Error:', err);
     res.status(500).json({ error: err.message });
   }
 });
