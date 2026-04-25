@@ -107,6 +107,18 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
         .map(c => ({ ...c, daily: dailyMap[c.name] || [] }))
         .sort((a, b) => b.revenue - a.revenue);
 
+      // ✅ Subtract approved décaissements from gross total (same rule as KPI + Register)
+      let totalDecaissements = 0;
+      gymIds.forEach(gid => {
+        const daysInMonth = new Date(target.split('-')[0], target.split('-')[1], 0).getDate();
+        for (let d = 1; d <= daysInMonth; d++) {
+          const dateStr = `${target}-${String(d).padStart(2,'0')}`;
+          const decs = lc.getDecaissements(gid, dateStr) || [];
+          decs.filter(dec => dec.status === 'approved' || !dec.status)
+              .forEach(dec => { totalDecaissements += Number(dec.montant) || 0; });
+        }
+      });
+
       const rosterRows = lc.db.prepare(`
         SELECT
           UPPER(TRIM(commercial)) AS commercial,
