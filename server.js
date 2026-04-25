@@ -210,6 +210,39 @@ app.use('/',                require('./routes/activity')(deps));    // /api/acti
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ONE-TIME: Inject daily_stats into SQLite from local export
+// Protected by INJECT_SECRET env var — safe to leave deployed
+// ─────────────────────────────────────────────────────────────────────────────
+app.post('/admin/inject-stats', (req, res) => {
+  const secret = req.headers['x-inject-secret'];
+  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
+  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+
+  const { daily_stats } = req.body;
+  if (!Array.isArray(daily_stats)) return res.status(400).json({ error: 'daily_stats array required' });
+
+  let inserted = 0;
+  try {
+    const stmt = lc.db.prepare(`
+      INSERT OR REPLACE INTO daily_stats (gym_id, date, count, raw_count, synced_at)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    const run = lc.db.transaction((rows) => {
+      for (const r of rows) {
+        stmt.run(r.gym_id, r.date, r.count, r.raw_count, new Date().toISOString());
+        inserted++;
+      }
+    });
+    run(daily_stats);
+    console.log(`✅ [inject-stats] Injected ${inserted} rows into SQLite`);
+    res.json({ ok: true, inserted });
+  } catch (err) {
+    console.error('[inject-stats] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Debug: see what your token contains (temporary — remove after fixing ADMIN_EMAILS)
 const { verifyAzureToken: _vat } = require('./middleware/auth');
 app.get('/me', _vat, (req, res) => res.json({
