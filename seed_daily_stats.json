@@ -98,50 +98,50 @@
   {
     "gym_id": "dokarat",
     "date": "2026-04-18",
-    "count": 153,
+    "count": 127,
     "raw_count": 179
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-19",
-    "count": 105,
-    "raw_count": 126
+    "count": 51,
+    "raw_count": 70
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-20",
-    "count": 356,
+    "count": 298,
     "raw_count": 433
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-21",
-    "count": 430,
+    "count": 330,
     "raw_count": 562
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-22",
-    "count": 325,
+    "count": 253,
     "raw_count": 434
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-23",
-    "count": 398,
-    "raw_count": 527
+    "count": 294,
+    "raw_count": 528
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-24",
-    "count": 285,
+    "count": 240,
     "raw_count": 332
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-25",
-    "count": 162,
-    "raw_count": 234
+    "count": 203,
+    "raw_count": 311
   },
   {
     "gym_id": "marjane",
@@ -242,49 +242,49 @@
   {
     "gym_id": "marjane",
     "date": "2026-04-18",
-    "count": 120,
+    "count": 103,
     "raw_count": 142
   },
   {
     "gym_id": "marjane",
     "date": "2026-04-19",
-    "count": 50,
+    "count": 49,
     "raw_count": 54
   },
   {
     "gym_id": "marjane",
     "date": "2026-04-20",
-    "count": 134,
+    "count": 122,
     "raw_count": 156
   },
   {
     "gym_id": "marjane",
     "date": "2026-04-21",
-    "count": 165,
+    "count": 150,
     "raw_count": 203
   },
   {
     "gym_id": "marjane",
     "date": "2026-04-22",
-    "count": 150,
+    "count": 133,
     "raw_count": 197
   },
   {
     "gym_id": "marjane",
     "date": "2026-04-23",
-    "count": 142,
+    "count": 130,
     "raw_count": 168
   },
   {
     "gym_id": "marjane",
     "date": "2026-04-24",
-    "count": 101,
+    "count": 97,
     "raw_count": 110
   },
   {
     "gym_id": "marjane",
     "date": "2026-04-25",
-    "count": 76,
-    "raw_count": 94
+    "count": 97,
+    "raw_count": 119
   }
 ]
