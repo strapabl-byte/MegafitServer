@@ -540,9 +540,9 @@ app.listen(PORT, '0.0.0.0', () => {
     if (isQuotaExceeded()) return;
     await seedSQLiteHistoricalStats();
 
-    // Smart guard: run deep repair only if SQLite is missing data (< 25 days)
+    // Smart guard: run deep repair only if SQLite is missing data (< 20 days with real data)
     const existingStats = lc.getDailyStats('dokarat', 30).filter(s => s.count > 0);
-    const hasFullData = existingStats.length >= 25;
+    const hasFullData = existingStats.length >= 20;
 
     const REPAIR_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
     const lastRepair = lc.getMeta('last_startup_repair');
