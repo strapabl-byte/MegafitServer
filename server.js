@@ -191,6 +191,26 @@ const auditLogger = (req, res, next) => {
 app.use(auditLogger);
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ADMIN: Export all stats and entries for 30 days
+// ─────────────────────────────────────────────────────────────────────────────
+app.get('/api/admin/export-all-stats', (req, res) => {
+  const secret = req.headers['x-inject-secret'];
+  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
+  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+  try {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const dateStr = thirtyDaysAgo.toISOString().slice(0, 10);
+    
+    const stats = lc.db.prepare('SELECT * FROM daily_stats WHERE date >= ?').all(dateStr);
+    const entries = lc.db.prepare('SELECT * FROM entries WHERE date >= ?').all(dateStr);
+    res.json({ stats, entries });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // System Stats — live SQLite disk usage for Megaeye dashboard
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/api/system-stats', (req, res) => {
