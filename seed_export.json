@@ -1,0 +1,484 @@
+{
+  "daily_stats": [
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-24",
+      "count": 93,
+      "raw_count": 104
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-24",
+      "count": 228,
+      "raw_count": 317
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-23",
+      "count": 142,
+      "raw_count": 168
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-23",
+      "count": 398,
+      "raw_count": 527
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-22",
+      "count": 150,
+      "raw_count": 197
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-22",
+      "count": 325,
+      "raw_count": 434
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-21",
+      "count": 165,
+      "raw_count": 203
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-21",
+      "count": 430,
+      "raw_count": 562
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-20",
+      "count": 134,
+      "raw_count": 156
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-20",
+      "count": 356,
+      "raw_count": 433
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-19",
+      "count": 50,
+      "raw_count": 54
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-19",
+      "count": 105,
+      "raw_count": 126
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-18",
+      "count": 120,
+      "raw_count": 142
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-18",
+      "count": 153,
+      "raw_count": 179
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-17",
+      "count": 138,
+      "raw_count": 156
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-17",
+      "count": 300,
+      "raw_count": 445
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-16",
+      "count": 169,
+      "raw_count": 195
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-16",
+      "count": 142,
+      "raw_count": 174
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-15",
+      "count": 127,
+      "raw_count": 145
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-15",
+      "count": 283,
+      "raw_count": 359
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-14",
+      "count": 151,
+      "raw_count": 186
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-14",
+      "count": 372,
+      "raw_count": 457
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-13",
+      "count": 163,
+      "raw_count": 193
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-13",
+      "count": 340,
+      "raw_count": 462
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-12",
+      "count": 58,
+      "raw_count": 63
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-12",
+      "count": 117,
+      "raw_count": 142
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-11",
+      "count": 113,
+      "raw_count": 129
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-11",
+      "count": 261,
+      "raw_count": 364
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-10",
+      "count": 118,
+      "raw_count": 130
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-10",
+      "count": 272,
+      "raw_count": 352
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-09",
+      "count": 156,
+      "raw_count": 171
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-09",
+      "count": 338,
+      "raw_count": 454
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-08",
+      "count": 65,
+      "raw_count": 72
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-08",
+      "count": 309,
+      "raw_count": 450
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-07",
+      "count": 40,
+      "raw_count": 41
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-07",
+      "count": 317,
+      "raw_count": 429
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-06",
+      "count": 81,
+      "raw_count": 95
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-06",
+      "count": 326,
+      "raw_count": 440
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-05",
+      "count": 27,
+      "raw_count": 39
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-05",
+      "count": 114,
+      "raw_count": 155
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-04",
+      "count": 90,
+      "raw_count": 166
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-04",
+      "count": 263,
+      "raw_count": 371
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-03",
+      "count": 98,
+      "raw_count": 169
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-03",
+      "count": 194,
+      "raw_count": 255
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-02",
+      "count": 32,
+      "raw_count": 45
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-02",
+      "count": 151,
+      "raw_count": 214
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-04-01",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-04-01",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-03-31",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-03-31",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-03-30",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-03-30",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-03-29",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-03-29",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-03-28",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-03-28",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-03-27",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-03-27",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-03-26",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-03-26",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-03-25",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-03-25",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-03-24",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-03-24",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-03-23",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-03-23",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-03-22",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-03-22",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-03-21",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-03-21",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-03-20",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-03-20",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-03-19",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-03-19",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-03-18",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-03-18",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-03-17",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-03-17",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "marjane",
+      "date": "2026-03-16",
+      "count": 0,
+      "raw_count": 0
+    },
+    {
+      "gym_id": "dokarat",
+      "date": "2026-03-16",
+      "count": 0,
+      "raw_count": 0
+    }
+  ]
+}
