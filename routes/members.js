@@ -56,7 +56,12 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         );
       }
 
-      if (finalMembers && finalMembers.length >= 50 && !searchQuery) {
+      // ── Cache TTL: use SQLite if recently synced (< 5 min), otherwise re-fetch from Firestore ──
+      const lastMemberSync = lc.getMeta(`member_sync_${gymId}`);
+      const msSinceSync = lastMemberSync ? Date.now() - parseInt(lastMemberSync) : Infinity;
+      const MEMBER_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+      if (finalMembers && finalMembers.length >= 1 && msSinceSync < MEMBER_CACHE_TTL && !searchQuery) {
         console.log(`⚡ [SQLITE HIT] ${finalMembers.length} members for ${gymId} (includes PDF contracts)`);
         // Always normalize SQLite snake_case → camelCase so the dashboard renders correctly
         finalMembers = finalMembers.map(m => ({
@@ -110,6 +115,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
             return tb - ta;
           });
         lc.upsertMembers(gymId, members);
+        lc.setMeta(`member_sync_${gymId}`, String(Date.now()));
         finalMembers = members;
         console.log(`✅ [FIRESTORE] Fetched ${members.length} members for ${gymId} → cached`);
       }
