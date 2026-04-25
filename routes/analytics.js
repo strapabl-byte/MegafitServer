@@ -704,77 +704,70 @@ ${fullContext}`
 
 
   // ── pollDoorEntries — server-side background task, called every 60s ──────────
+  // ✅ EFFICIENT: Only reads the LAST 1 document per gym collection.
+  // The device embeds daily_unique + daily_total in every scan, so the
+  // last scan of the day always has the current running total.
+  // Cost: 1 read per gym per minute (not 200). Zero counting needed.
   router.pollDoorEntries = async function pollDoorEntries() {
     const today = getMoroccanDateStr();
+    const nextDay = new Date(new Date(today).getTime() + 86400000).toISOString().slice(0, 10);
+
     for (const [gid, g] of Object.entries(GYM_DOOR_MAP)) {
       try {
-        const existing      = lc.getEntries(gid, today, 500);
-        const lastTimestamp = existing.length > 0
-          ? existing.reduce((max, e) => e.timestamp > max ? e.timestamp : max, '')
-          : null;
-        const newEntries = [];
-        let latestDeviceUnique = 0;
-        let latestDeviceTotal  = 0;
+        let bestUnique = 0;
+        let bestTotal  = 0;
 
         for (const coll of g.collections) {
+          // Fetch ONLY the last 1 document for today
           const body = {
             structuredQuery: {
               from: [{ collectionId: coll }],
-              where: { fieldFilter: {
-                field: { fieldPath: 'timestamp' },
-                op: lastTimestamp ? 'GREATER_THAN' : 'GREATER_THAN_OR_EQUAL',
-                value: { stringValue: lastTimestamp || today }
-              }},
-              orderBy: [{ field: { fieldPath: 'timestamp' }, direction: 'ASCENDING' }],
-              limit: 200,
+              where: {
+                compositeFilter: {
+                  op: 'AND',
+                  filters: [
+                    { fieldFilter: { field: { fieldPath: 'timestamp' }, op: 'GREATER_THAN_OR_EQUAL', value: { stringValue: today } } },
+                    { fieldFilter: { field: { fieldPath: 'timestamp' }, op: 'LESS_THAN', value: { stringValue: nextDay } } }
+                  ]
+                }
+              },
+              orderBy: [{ field: { fieldPath: 'timestamp' }, direction: 'DESCENDING' }],
+              limit: 1,
             }
           };
+
           const resp = await fetch(DOOR_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
           });
           const data = await resp.json();
-          if (!Array.isArray(data)) continue;
-          data.filter(d => d.document).forEach(d => {
-            const f  = d.document.fields || {};
-            const ts = f.timestamp?.stringValue || '';
-            if (!ts.startsWith(today)) return;
-            const loc  = (f.location?.stringValue || '').toLowerCase();
-            const tags = g.locationTags.map(t => t.toLowerCase());
-            if (!tags.some(t => loc.includes(t) || t.includes(loc))) return;
+          if (!Array.isArray(data) || !data[0]?.document) continue;
 
-            newEntries.push({
-              id: d.document.name?.split('/').pop() || ts,
-              gym_id: gid, date: today, timestamp: ts,
-              name:   f.name?.stringValue   || '',
-              method: f.method?.stringValue || '',
-              status: f.status?.stringValue || 'Entrée',
-              is_face: (f.method?.stringValue || '').toLowerCase().includes('face') ? 1 : 0,
-            });
+          const f   = data[0].document.fields || {};
+          const loc = (f.location?.stringValue || '').toLowerCase();
+          const tags = g.locationTags.map(t => t.toLowerCase());
 
-            // ✅ Read device-embedded running totals (no counting needed)
-            const du = f.daily_unique?.integerValue != null ? parseInt(f.daily_unique.integerValue) :
-                       f.daily_unique?.doubleValue  != null ? Math.round(f.daily_unique.doubleValue) : null;
-            const dt = f.daily_total?.integerValue  != null ? parseInt(f.daily_total.integerValue) :
-                       f.daily_total?.doubleValue   != null ? Math.round(f.daily_total.doubleValue) : null;
-            if (du !== null) { latestDeviceUnique = Math.max(latestDeviceUnique, du); }
-            if (dt !== null) { latestDeviceTotal  = Math.max(latestDeviceTotal,  dt); }
-          });
+          // Verify this doc belongs to this gym
+          if (!tags.some(t => loc.includes(t) || t.includes(loc))) continue;
+
+          // Read the device-embedded running totals directly
+          const du = f.daily_unique?.integerValue != null ? parseInt(f.daily_unique.integerValue) :
+                     f.daily_unique?.doubleValue  != null ? Math.round(f.daily_unique.doubleValue) : 0;
+          const dt = f.daily_total?.integerValue  != null ? parseInt(f.daily_total.integerValue) :
+                     f.daily_total?.doubleValue   != null ? Math.round(f.daily_total.doubleValue) : 0;
+
+          if (du > bestUnique) { bestUnique = du; bestTotal = dt; }
         }
 
-        if (newEntries.length > 0) {
-          lc.upsertEntries(gid, newEntries);
-          console.log(`[DOOR POLL] ${gid}: +${newEntries.length} new entries`);
+        // Save to SQLite daily_stats — this is what the chart reads
+        if (bestUnique > 0) {
+          const prev = lc.getDailyStats(gid, 1)[0]?.count || 0;
+          lc.upsertDailyStat(gid, today, bestUnique, bestTotal);
+          if (bestUnique !== prev) {
+            console.log(`[DOOR POLL] ${gid}: ${bestUnique} unique / ${bestTotal} total today`);
+          }
         }
-
-        // Update daily_stats with the latest device-reported totals
-        // If device counter not available, fall back to counting from SQLite
-        const sqliteUnique = lc.getUniqueEntryCount(gid, today);
-        const sqliteRaw    = lc.getEntryCount(gid, today);
-        const finalUnique  = latestDeviceUnique > 0 ? Math.max(latestDeviceUnique, sqliteUnique) : sqliteUnique;
-        const finalRaw     = latestDeviceTotal  > 0 ? Math.max(latestDeviceTotal,  sqliteRaw)    : sqliteRaw;
-        if (finalUnique > 0) lc.upsertDailyStat(gid, today, finalUnique, finalRaw);
 
         lc.setMeta(`liveEntries_sync_${gid}`, String(Date.now()));
       } catch (e) {
