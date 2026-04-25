@@ -299,11 +299,16 @@ app.post('/admin/inject-register', (req, res) => {
     let wiped = 0;
     // Optional: wipe a date range before injecting (to remove ghosts)
     if (wipe && wipe.gymId && wipe.dateFrom && wipe.dateTo) {
-      const del = lc.db.prepare(
+      const delReg = lc.db.prepare(
         `DELETE FROM register_cache WHERE gym_id=? AND date>=? AND date<=?`
       ).run(wipe.gymId, wipe.dateFrom, wipe.dateTo);
-      wiped = del.changes;
-      console.log(`🗑️  [inject-register] Wiped ${wiped} rows for ${wipe.gymId} ${wipe.dateFrom}→${wipe.dateTo}`);
+      
+      const delDec = lc.db.prepare(
+        `DELETE FROM decaissements_cache WHERE gym_id=? AND date>=? AND date<=?`
+      ).run(wipe.gymId, wipe.dateFrom, wipe.dateTo);
+      
+      wiped = delReg.changes;
+      console.log(`🗑️  [inject-register] Wiped ${wiped} register rows and ${delDec.changes} decaissements for ${wipe.gymId}`);
     }
 
     // Insert all rows
