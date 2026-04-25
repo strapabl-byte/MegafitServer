@@ -1,19 +1,8 @@
 node_modules/
 .env
-serviceAccount.json
-ngrok.log
-*.log
-.DS_Store
-# SQLite Cache
 *.db
-*.db-shm
-*.db-wal
-megafit_cache.db*
-# One-off diagnostic / scratch scripts (local dev only)
-scratch_*.js
-check_commercials.js
-diagnose_members.js
-insert_missing_23.js
-recover_missing_register.js
-undo_recovered_register.js
-sync_missing_members.js
+*.db-journal
+serviceAccount.json
+verified_april_stats.json
+.DS_Store
+dist/

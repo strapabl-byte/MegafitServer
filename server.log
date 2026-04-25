@@ -1,0 +1,257 @@
+💾 SQLite cache initialised → /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/megafit_cache.db
+📂 Found local serviceAccount.json
+🚀 Firebase Admin initialized.
+✅ API running on port 4000
+⏰ Nightly sync scheduled in 1037 min (00:05 Morocco)
+⏱️  Hourly sync active (every 60min, 07:00–23:00 Morocco)
+✅ SQLite already seeded (dokarat: 30d, marjane: 30d) — skip
+📡 [KPI_DEBUG] Fetching 106 register days for dokarat from 2026-01-01
+📊 [RECONCILED] KPIs for dokarat: 0 new members today, 0 DH today.
+🌐 [CACHE MISS] Fetching fresh data for 'live_count_dokarat' from Firebase...
+🌐 [dokarat] SQLite empty for today, fetching 1-doc from Firebase...
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+⚡ [CACHE HIT] Route key 'all' returned from RAM
+⚡ [CACHE HIT] Route key 'all' returned from RAM
+🌐 [CACHE MISS] Fetching fresh data for 'live_count_dokarat' from Firebase...
+🌐 [dokarat] SQLite empty for today, fetching 1-doc from Firebase...
+🌐 [CACHE MISS] Fetching fresh data for 'live_count_dokarat' from Firebase...
+🌐 [dokarat] SQLite empty for today, fetching 1-doc from Firebase...
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+⚡ [CACHE HIT] Route key 'all' returned from RAM
+📡 [KPI_DEBUG] Fetching 106 register days for dokarat from 2026-01-01
+📊 [RECONCILED] KPIs for dokarat: 0 new members today, 0 DH today.
+📡 [KPI_DEBUG] Fetching 106 register days for dokarat from 2026-01-01
+🌐 [CACHE MISS] Fetching fresh data for 'live_count_dokarat' from Firebase...
+🌐 [dokarat] SQLite empty for today, fetching 1-doc from Firebase...
+📊 [RECONCILED] KPIs for dokarat: 0 new members today, 0 DH today.
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+🌐 [CACHE MISS] Fetching fresh data for 'live_count_dokarat' from Firebase...
+🌐 [dokarat] SQLite empty for today, fetching 1-doc from Firebase...
+🌐 [CACHE MISS] Fetching fresh data for 'live_count_dokarat' from Firebase...
+🌐 [dokarat] SQLite empty for today, fetching 1-doc from Firebase...
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+⚡ [CACHE HIT] Route key 'all' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'all' returned from RAM
+🌐 [CACHE MISS] Fetching fresh data for 'live_count_dokarat' from Firebase...
+🌐 [dokarat] SQLite empty for today, fetching 1-doc from Firebase...
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+🌐 [CACHE MISS] Fetching fresh data for 'live_count_dokarat' from Firebase...
+🌐 [dokarat] SQLite empty for today, fetching 1-doc from Firebase...
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+⚡ [CACHE HIT] Route key 'live_count_dokarat' returned from RAM
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+⚡ [CACHE HIT] Route key 'all' returned from RAM
+⚡ [CACHE HIT] Route key 'all' returned from RAM
+📡 [KPI_DEBUG] Fetching 106 register days for dokarat from 2026-01-01
+📊 [RECONCILED] KPIs for dokarat: 0 new members today, 0 DH today.
+📡 [KPI_DEBUG] Fetching 106 register days for dokarat from 2026-01-01
+📊 [RECONCILED] KPIs for dokarat: 0 new members today, 0 DH today.
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+⚡ [CACHE HIT] Route key 'all' returned from RAM
+⚡ [CACHE HIT] Route key 'all' returned from RAM
+⚡ [CACHE HIT] Route key 'all' returned from RAM
+⚡ [CACHE HIT] Route key 'all' returned from RAM
+⚡ [CACHE HIT] Route key 'all' returned from RAM
+Members Fetch Error: Error: 4 DEADLINE_EXCEEDED: Deadline exceeded after 1144.696s,LB pick: 0.001s,remote_addr=142.251.36.202:443
+    at callErrorFromStatus (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@grpc/grpc-js/build/src/call.js:32:19)
+    at Object.onReceiveStatus (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@grpc/grpc-js/build/src/client.js:359:73)
+    at Object.onReceiveStatus (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@grpc/grpc-js/build/src/client-interceptors.js:327:181)
+    at /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@grpc/grpc-js/build/src/resolving-call.js:135:78
+    at processTicksAndRejections (node:internal/process/task_queues:77:11)
+    at runNextTicks (node:internal/process/task_queues:64:3)
+    at listOnTimeout (node:internal/timers:540:9)
+    at process.processTimers (node:internal/timers:514:7)
+for call at
+    at ServiceClientImpl.makeServerStreamRequest (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@grpc/grpc-js/build/src/client.js:342:32)
+    at ServiceClientImpl.<anonymous> (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@grpc/grpc-js/build/src/make-client.js:105:19)
+    at /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@google-cloud/firestore/build/src/v1/firestore_client.js:242:33
+    at /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/google-gax/build/src/streamingCalls/streamingApiCaller.js:38:28
+    at /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/google-gax/build/src/normalCalls/timeout.js:44:16
+    at Object.request (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/google-gax/build/src/streamingCalls/streaming.js:234:40)
+    at makeRequest (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/retry-request/index.js:159:28)
+    at retryRequest (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/retry-request/index.js:119:5)
+    at StreamProxy.setStream (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/google-gax/build/src/streamingCalls/streaming.js:225:37)
+    at StreamingApiCaller.call (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/google-gax/build/src/streamingCalls/streamingApiCaller.js:54:16)
+Caused by: Error
+    at QueryUtil._getResponse (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@google-cloud/firestore/build/src/reference/query-util.js:44:23)
+    at CollectionReference._getResponse (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@google-cloud/firestore/build/src/reference/query.js:784:32)
+    at CollectionReference._get (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@google-cloud/firestore/build/src/reference/query.js:777:35)
+    at /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@google-cloud/firestore/build/src/reference/query.js:745:43
+    at /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@google-cloud/firestore/build/src/telemetry/enabled-trace-util.js:110:30
+    at NoopContextManager.with (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@opentelemetry/api/build/src/context/NoopContextManager.js:25:19)
+    at ContextAPI.with (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@opentelemetry/api/build/src/api/context.js:60:46)
+    at NoopTracer.startActiveSpan (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@opentelemetry/api/build/src/trace/NoopTracer.js:65:31)
+    at ProxyTracer.startActiveSpan (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@opentelemetry/api/build/src/trace/ProxyTracer.js:36:24)
+    at EnabledTraceUtil.startActiveSpan (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/node_modules/@google-cloud/firestore/build/src/telemetry/enabled-trace-util.js:102:28) {
+  code: 4,
+  details: 'Deadline exceeded after 1144.696s,LB pick: 0.001s,remote_addr=142.251.36.202:443',
+  metadata: Metadata {
+    internalRepr: Map(0) {},
+    opaqueData: Map(0) {},
+    options: {}
+  }
+}
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+🌐 [CACHE MISS] Fetching fresh data for 'live_count_dokarat' from Firebase...
+🌐 [dokarat] SQLite empty for today, fetching 1-doc from Firebase...
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+⚠️ Incremental fetch failed for dokarat: fetch failed
+❌ Live Count Error: TypeError: fetch failed
+    at Object.fetch (node:internal/deps/undici/undici:11372:11)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at async /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:2076:20
+    at async getCachedOrFetch (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:175:16)
+    at async /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:2042:20 {
+  cause: Error: getaddrinfo ENOTFOUND firestore.googleapis.com
+      at GetAddrInfoReqWrap.onlookupall [as oncomplete] (node:dns:118:26) {
+    errno: -3008,
+    code: 'ENOTFOUND',
+    syscall: 'getaddrinfo',
+    hostname: 'firestore.googleapis.com'
+  }
+}
+🌐 [CACHE MISS] Fetching fresh data for 'live_count_dokarat' from Firebase...
+🌐 [dokarat] SQLite empty for today, fetching 1-doc from Firebase...
+⚠️ Incremental fetch failed for dokarat: fetch failed
+❌ Live Count Error: TypeError: fetch failed
+    at Object.fetch (node:internal/deps/undici/undici:11372:11)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at async /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:2076:20
+    at async getCachedOrFetch (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:175:16)
+    at async /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:2042:20 {
+  cause: Error: getaddrinfo ENOTFOUND firestore.googleapis.com
+      at GetAddrInfoReqWrap.onlookupall [as oncomplete] (node:dns:118:26) {
+    errno: -3008,
+    code: 'ENOTFOUND',
+    syscall: 'getaddrinfo',
+    hostname: 'firestore.googleapis.com'
+  }
+}
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+🌐 [CACHE MISS] Fetching fresh data for 'live_count_dokarat' from Firebase...
+🌐 [dokarat] SQLite empty for today, fetching 1-doc from Firebase...
+⚠️ Incremental fetch failed for dokarat: fetch failed
+❌ Live Count Error: TypeError: fetch failed
+    at Object.fetch (node:internal/deps/undici/undici:11372:11)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at async /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:2076:20
+    at async getCachedOrFetch (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:175:16)
+    at async /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:2042:20 {
+  cause: Error: getaddrinfo ENOTFOUND firestore.googleapis.com
+      at GetAddrInfoReqWrap.onlookupall [as oncomplete] (node:dns:118:26) {
+    errno: -3008,
+    code: 'ENOTFOUND',
+    syscall: 'getaddrinfo',
+    hostname: 'firestore.googleapis.com'
+  }
+}
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+🌐 [CACHE MISS] Fetching fresh data for 'live_count_dokarat' from Firebase...
+🌐 [dokarat] SQLite empty for today, fetching 1-doc from Firebase...
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+⚠️ Incremental fetch failed for dokarat: fetch failed
+❌ Live Count Error: TypeError: fetch failed
+    at Object.fetch (node:internal/deps/undici/undici:11372:11)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at async /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:2076:20
+    at async getCachedOrFetch (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:175:16)
+    at async /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:2042:20 {
+  cause: Error: getaddrinfo ENOTFOUND firestore.googleapis.com
+      at GetAddrInfoReqWrap.onlookupall [as oncomplete] (node:dns:118:26) {
+    errno: -3008,
+    code: 'ENOTFOUND',
+    syscall: 'getaddrinfo',
+    hostname: 'firestore.googleapis.com'
+  }
+}
+🌐 [CACHE MISS] Fetching fresh data for 'live_count_dokarat' from Firebase...
+🌐 [dokarat] SQLite empty for today, fetching 1-doc from Firebase...
+❌ Live Count Error: TypeError: fetch failed
+    at Object.fetch (node:internal/deps/undici/undici:11372:11)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at async /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:2076:20
+    at async getCachedOrFetch (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:175:16)
+    at async /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:2042:20 {
+  cause: Error: getaddrinfo ENOTFOUND firestore.googleapis.com
+      at GetAddrInfoReqWrap.onlookupall [as oncomplete] (node:dns:118:26) {
+    errno: -3008,
+    code: 'ENOTFOUND',
+    syscall: 'getaddrinfo',
+    hostname: 'firestore.googleapis.com'
+  }
+}
+⚠️ Incremental fetch failed for dokarat: fetch failed
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+🌐 [CACHE MISS] Fetching fresh data for 'live_count_dokarat' from Firebase...
+🌐 [dokarat] SQLite empty for today, fetching 1-doc from Firebase...
+⚠️ Incremental fetch failed for dokarat: fetch failed
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+❌ Live Count Error: TypeError: fetch failed
+    at Object.fetch (node:internal/deps/undici/undici:11372:11)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at async /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:2076:20
+    at async getCachedOrFetch (/Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:175:16)
+    at async /Users/test/Documents/Dev/wetransfer_megafit2-zip_2026-03-23_0210/MegafitProject/megafit-api/server.js:2042:20 {
+  cause: _ConnectTimeoutError: Connect Timeout Error
+      at onConnectTimeout (node:internal/deps/undici/undici:6616:28)
+      at node:internal/deps/undici/undici:6574:50
+      at Immediate._onImmediate (node:internal/deps/undici/undici:6605:13)
+      at process.processImmediate (node:internal/timers:478:21) {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+🌐 [CACHE MISS] Fetching fresh data for 'all' from Firebase...
+⏱️  Hourly sync triggered (7:xx Morocco)
+🔄 Auto-sync starting for: 2026-04-16
+  ❌ REST Fetch failed for mega_fit_logs: fetch failed
+  ℹ️  dokarat: No entries today yet
+  ❌ Sync failed for dokarat / 2026-04-16: 4 DEADLINE_EXCEEDED: Deadline exceeded after 60.000s,name resolution: 0.001s,metadata filters: 0.011s,LB pick: 0.098s,remote_addr=142.251.36.202:443
+  ❌ REST Fetch failed for saiss entrees logs: fetch failed
+  ℹ️  marjane: No entries today yet
+  ❌ Sync failed for marjane / 2026-04-16: 4 DEADLINE_EXCEEDED: Deadline exceeded after 60.002s,LB pick: 0.001s,remote_addr=142.251.36.202:443
+✨ Auto-sync complete.
+⏱️  Hourly sync triggered (10:xx Morocco)
+🔄 Auto-sync starting for: 2026-04-16
+  ❌ REST Fetch failed for mega_fit_logs: fetch failed
+  ℹ️  dokarat: No entries today yet
+  ❌ Sync failed for dokarat / 2026-04-16: Total timeout of API google.firestore.v1.Firestore exceeded 600000 milliseconds retrying error Error: 14 UNAVAILABLE: Name resolution failed for target dns:firestore.googleapis.com:443  before any response was received.
+  ❌ REST Fetch failed for saiss entrees logs: fetch failed
+  ℹ️  marjane: No entries today yet
+⏱️  Hourly sync triggered (11:xx Morocco)
+🔄 Auto-sync starting for: 2026-04-16
+  ❌ Sync failed for marjane / 2026-04-16: Total timeout of API google.firestore.v1.Firestore exceeded 600000 milliseconds retrying error Error: 14 UNAVAILABLE: Name resolution failed for target dns:firestore.googleapis.com:443  before any response was received.
+✨ Auto-sync complete.
+  ℹ️  dokarat: No entries today yet
+  ⚡ marjane / 2026-04-16: 22 unique, 24 raw (fast path)
+✨ Auto-sync complete.
