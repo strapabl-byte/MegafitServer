@@ -536,6 +536,42 @@ app.listen(PORT, '0.0.0.0', () => {
   setTimeout(runDoorPoll, 5000);        // first poll 5s after startup (warm SQLite)
   setInterval(runDoorPoll, 60 * 1000); // then every 60 seconds
 
+  // ── Background member sync (every 5 min) ─────────────────────────────────
+  // Firebase is used ONLY here (write path + this background pull).
+  // Dashboard always reads from SQLite → instant, zero Firebase reads per request.
+  const GYMS_ALL = ['dokarat', 'marjane', 'casa1', 'casa2'];
+  const GYM_LOCATION_MAP = {
+    marjane: ['marjane', 'fes saiss', 'fes marjane'],
+    dokarat: ['dokarat', 'dokkarat fes', 'dokkarat'],
+    casa1:   ['casa1', 'casa anfa'],
+    casa2:   ['casa2', 'lady anfa'],
+  };
+
+  async function syncMembersBackground() {
+    if (isQuotaExceeded()) return;
+    try {
+      for (const gymId of GYMS_ALL) {
+        const snap = await db.collection('members')
+          .where('location', 'in', GYM_LOCATION_MAP[gymId] || [gymId])
+          .limit(500).get();
+        const members = snap.docs
+          .map(d => ({ id: d.id, ...d.data() }))
+          .sort((a, b) => {
+            const ta = a.createdAt?._seconds || a.createdAt?.seconds || 0;
+            const tb = b.createdAt?._seconds || b.createdAt?.seconds || 0;
+            return tb - ta;
+          });
+        lc.upsertMembers(gymId, members);
+        lc.setMeta(`member_sync_${gymId}`, String(Date.now()));
+      }
+      console.log(`🔄 [MEMBER SYNC] All gyms refreshed from Firestore → SQLite ✅`);
+    } catch (e) {
+      console.warn('[MEMBER SYNC] error:', e.message);
+    }
+  }
+  setTimeout(syncMembersBackground, 8000);            // first sync 8s after startup
+  setInterval(syncMembersBackground, 5 * 60 * 1000); // then every 5 minutes
+
   setTimeout(async () => {
     if (isQuotaExceeded()) return;
     await seedSQLiteHistoricalStats();
