@@ -191,37 +191,15 @@ const auditLogger = (req, res, next) => {
 app.use(auditLogger);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Mount Routers
-// ─────────────────────────────────────────────────────────────────────────────
-app.use('/api/members',     require('./routes/members')(deps));
-app.use('/api/register',    require('./routes/register')(deps));
-app.use('/api/payments',    require('./routes/payments')(deps));
-app.use('/api/commercials', require('./routes/commercials')(deps));
-// analytics router — stored so we can call pollDoorEntries() from the interval
-const analyticsRouter = require('./routes/analytics')(deps);
-app.use('/', analyticsRouter); // mounts /api/live-entries, /api/live-count, /api/analytics/*
-app.use('/',                require('./routes/courses')(deps));     // /api/courses, /api/coaches, /public/courses, etc.
-app.use('/',                require('./routes/inscriptions')(deps));// /public/* & /api/inscriptions
-app.use('/',                require('./routes/config')(deps));      // /public/pass, /api/chat, config
-app.use('/',                require('./routes/activity')(deps));    // /api/activity/logs
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Healthcheck
-// ─────────────────────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
-
-// ─────────────────────────────────────────────────────────────────────────────
 // ONE-TIME: Inject daily_stats into SQLite from local export
-// Protected by INJECT_SECRET env var — safe to leave deployed
+// MUST be registered BEFORE wildcard routers — protected by INJECT_SECRET
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/admin/inject-stats', (req, res) => {
   const secret = req.headers['x-inject-secret'];
   const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
   if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
-
   const { daily_stats } = req.body;
   if (!Array.isArray(daily_stats)) return res.status(400).json({ error: 'daily_stats array required' });
-
   let inserted = 0;
   try {
     const stmt = lc.db.prepare(`
@@ -242,6 +220,28 @@ app.post('/admin/inject-stats', (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mount Routers
+// ─────────────────────────────────────────────────────────────────────────────
+app.use('/api/members',     require('./routes/members')(deps));
+app.use('/api/register',    require('./routes/register')(deps));
+app.use('/api/payments',    require('./routes/payments')(deps));
+app.use('/api/commercials', require('./routes/commercials')(deps));
+// analytics router — stored so we can call pollDoorEntries() from the interval
+const analyticsRouter = require('./routes/analytics')(deps);
+app.use('/', analyticsRouter); // mounts /api/live-entries, /api/live-count, /api/analytics/*
+app.use('/',                require('./routes/courses')(deps));     // /api/courses, /api/coaches, /public/courses, etc.
+app.use('/',                require('./routes/inscriptions')(deps));// /public/* & /api/inscriptions
+app.use('/',                require('./routes/config')(deps));      // /public/pass, /api/chat, config
+app.use('/',                require('./routes/activity')(deps));    // /api/activity/logs
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Healthcheck
+// ─────────────────────────────────────────────────────────────────────────────
+app.get('/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
+
+// (inject-stats endpoint moved above route mounts — see line ~193)
 
 // Debug: see what your token contains (temporary — remove after fixing ADMIN_EMAILS)
 const { verifyAzureToken: _vat } = require('./middleware/auth');
