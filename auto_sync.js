@@ -170,7 +170,7 @@ const parseNum = (field) => {
   return null;
 };
 
-async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => false) {
+async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => false, forceManual = false) {
   if (checkQuota()) {
     console.warn("⚠️ [SYNC SKIPPED] Quota exceeded. Silence mode active.");
     return;
@@ -184,7 +184,7 @@ async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => fals
     dates.push(moroccoDateStr(new Date(Date.now() - i * 86400000)));
   }
 
-  console.log(`🔄 Auto-sync starting for: ${dates.join(", ")}`);
+  console.log(`🔄 Auto-sync starting for: ${dates.join(", ")} (Force Manual: ${forceManual})`);
 
   for (const gym of GYM_SYNC_MAP) {
     for (const dateStr of dates) {
@@ -193,7 +193,7 @@ async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => fals
         const allCollections = gym.collections || [gym.collection];
         const tags = (gym.locationTags || [gym.locationTag || '']).map(t => t.toLowerCase().trim());
 
-        if (dateStr === today) {
+        if (dateStr === today && !forceManual) {
           // ── TODAY: incremental — only fetch docs newer than what's in SQLite ──
           // The live pollDoorEntries (every 60s) already handles this continuously.
           // Here we just make sure daily_stats is up to date from SQLite counts.
@@ -237,12 +237,14 @@ async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => fals
             }
           }
 
-          // Fallback: if device fields are missing, use what we already have in SQLite
-          if (unique === 0) {
-            unique = getLC().getUniqueEntryCount(gym.id, dateStr);
-            raw    = getLC().getEntryCount(gym.id, dateStr);
-            if (unique > 0) console.log(`  📦 ${gym.id} / ${dateStr}: ${unique} unique (SQLite fallback — no device counter)`);
-            else            console.log(`  ⚠️  ${gym.id} / ${dateStr}: no data found`);
+          // Fallback: if device fields are missing OR we are forcing a deep scan repair
+          if (unique === 0 || forceManual) {
+            const docs = await fetchRecentLogsFromCollections(allCollections, dateStr);
+            const res  = deduplicateForDate(docs, tags, dateStr);
+            unique = res.unique;
+            raw    = res.raw;
+            if (unique > 0) console.log(`  🔍 ${gym.id} / ${dateStr}: ${unique} unique (${forceManual ? 'Deep Scan repair' : 'Manual count fallback'})`);
+            else            console.log(`  ⚠️  ${gym.id} / ${dateStr}: no data found even in logs`);
           } else {
             console.log(`  ✅ ${gym.id} / ${dateStr}: ${unique} unique, ${raw} raw (1-read from device counter)`);
           }

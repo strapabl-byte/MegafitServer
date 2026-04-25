@@ -439,9 +439,15 @@ async function seedSQLiteHistoricalStats() {
           dateStrs.push(d); docIds.push(`${gymId}_${d}`);
         }
         const snaps = await db.getAll(...docIds.map(id => db.collection('gym_daily_stats').doc(id)));
-        snaps.forEach((snap, i) => { const d = snap.exists ? snap.data() : {}; lc.upsertDailyStat(gymId, dateStrs[i], d.count || 0, d.rawCount || 0); });
+        snaps.forEach((snap, i) => { 
+          if (snap.exists) {
+            const d = snap.data();
+            lc.upsertDailyStat(gymId, dateStrs[i], d.count || 0, d.rawCount || 0); 
+          }
+          // If snap doesn't exist, we LEAVE the SQLite data alone (don't overwrite with 0)
+        });
       }
-      console.log('  📊 Daily stats cached.');
+      console.log('  📊 Daily stats seeding checked.');
     } else {
       console.log('✅ Daily stats already seeded. Skip bulk fetch.');
     }
@@ -538,17 +544,17 @@ app.listen(PORT, '0.0.0.0', () => {
     if (isQuotaExceeded()) return;
     await seedSQLiteHistoricalStats();
 
-    const REPAIR_COOLDOWN_MS = 60 * 60 * 1000;
+    const REPAIR_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
     const lastRepair = lc.getMeta('last_startup_repair');
     const msSinceLastRepair = lastRepair ? Date.now() - new Date(lastRepair).getTime() : Infinity;
 
     if (msSinceLastRepair < REPAIR_COOLDOWN_MS) {
       console.log(`⏭️  Startup repair skipped — last run ${Math.round(msSinceLastRepair / 60000)} min ago. Quota saved! ✅`);
     } else {
-      console.log('🛠️  Running startup repair for the last 30 days...');
-      await syncGymCounts(db, apiCache, 30, isQuotaExceeded);
+      console.log('🛠️  FORCING DEEP REPAIR for April (counting all logs)...');
+      await syncGymCounts(db, apiCache, 30, () => false, true); // true = force manual counting
       lc.setMeta('last_startup_repair', new Date().toISOString());
-      console.log('✅ Startup repair complete.');
+      console.log('✅ Deep repair complete.');
     }
   }, 3000);
 
