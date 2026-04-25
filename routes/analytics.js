@@ -708,7 +708,7 @@ ${fullContext}`
   // ✅ EFFICIENT: Only reads the LAST 1 document per gym collection.
   // The device embeds daily_unique + daily_total in every scan, so the
   // last scan of the day always has the current running total.
-  // Cost: 1 read per gym per minute (not 200). Zero counting needed.
+  // Cost: 1 read per gym per minute. Also saves latest entry for live feed.
   router.pollDoorEntries = async function pollDoorEntries() {
     const today = getMoroccanDateStr();
     const nextDay = new Date(new Date(today).getTime() + 86400000).toISOString().slice(0, 10);
@@ -745,7 +745,8 @@ ${fullContext}`
           const data = await resp.json();
           if (!Array.isArray(data) || !data[0]?.document) continue;
 
-          const f   = data[0].document.fields || {};
+          const doc = data[0].document;
+          const f   = doc.fields || {};
           const loc = (f.location?.stringValue || '').toLowerCase();
           const tags = g.locationTags.map(t => t.toLowerCase());
 
@@ -759,11 +760,27 @@ ${fullContext}`
                      f.daily_total?.doubleValue   != null ? Math.round(f.daily_total.doubleValue) : 0;
 
           if (du > bestUnique) { bestUnique = du; bestTotal = dt; }
+
+          // ✅ Save this entry to SQLite entries table (for the live feed / Accès Direct)
+          const ts = f.timestamp?.stringValue || '';
+          if (ts.startsWith(today)) {
+            const entryId = doc.name?.split('/').pop() || ts;
+            lc.upsertEntries(gid, [{
+              id:      entryId,
+              gym_id:  gid,
+              date:    today,
+              timestamp: ts,
+              name:    f.name?.stringValue   || '',
+              method:  f.method?.stringValue || '',
+              status:  f.status?.stringValue || 'Entrée',
+              is_face: (f.method?.stringValue || '').toLowerCase().includes('face') ? 1 : 0,
+            }]);
+          }
         }
 
         // Save to SQLite daily_stats — this is what the chart reads
         if (bestUnique > 0) {
-          const prev = lc.getDailyStats(gid, 1)[0]?.count || 0;
+          const prev = lc.getDailyStat(gid, today)?.count || 0;
           lc.upsertDailyStat(gid, today, bestUnique, bestTotal);
           if (bestUnique !== prev) {
             console.log(`[DOOR POLL] ${gid}: ${bestUnique} unique / ${bestTotal} total today`);
