@@ -35,15 +35,30 @@ function moroccoDateStr(date = new Date()) {
  */
 async function fetchLatestDoc(collectionName, dateStr) {
   const url = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT}/databases/(default)/documents:runQuery?key=${DOOR_API_KEY}`;
+  const nextDay = new Date(new Date(dateStr).getTime() + 86400000).toISOString().slice(0, 10);
 
   const body = {
     structuredQuery: {
       from: [{ collectionId: collectionName }],
       where: {
-        fieldFilter: {
-          field: { fieldPath: "timestamp" },
-          op: "GREATER_THAN_OR_EQUAL",
-          value: { stringValue: dateStr }
+        compositeFilter: {
+          op: "AND",
+          filters: [
+            {
+              fieldFilter: {
+                field: { fieldPath: "timestamp" },
+                op: "GREATER_THAN_OR_EQUAL",
+                value: { stringValue: dateStr }
+              }
+            },
+            {
+              fieldFilter: {
+                field: { fieldPath: "timestamp" },
+                op: "LESS_THAN",
+                value: { stringValue: nextDay }
+              }
+            }
+          ]
         }
       },
       orderBy: [{ field: { fieldPath: "timestamp" }, direction: "DESCENDING" }],
