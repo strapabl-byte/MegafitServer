@@ -547,12 +547,31 @@ app.listen(PORT, '0.0.0.0', () => {
     casa2:   ['casa2', 'lady anfa'],
   };
 
+  // Fetch all pages from Firestore for a given query builder (handles >500 docs)
+  async function fetchAllMembers(gymId) {
+    const locations = GYM_LOCATION_MAP[gymId] || [gymId];
+    const PAGE = 500;
+    let all = [], lastDoc = null;
+    while (true) {
+      let q = db.collection('members').where('location', 'in', locations).orderBy('__name__').limit(PAGE);
+      if (lastDoc) q = q.startAfter(lastDoc);
+      const snap = await q.get();
+      if (snap.empty) break;
+      all = all.concat(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      lastDoc = snap.docs[snap.docs.length - 1];
+      if (snap.docs.length < PAGE) break;
+    }
+    return all;
+  }
+
+  // ── Active members sync: every 5 min (only non-archive, fast) ─────────────
   async function syncMembersBackground() {
     if (isQuotaExceeded()) return;
     try {
       for (const gymId of GYMS_ALL) {
         const snap = await db.collection('members')
           .where('location', 'in', GYM_LOCATION_MAP[gymId] || [gymId])
+          .where('isArchive', '!=', true)
           .limit(500).get();
         const members = snap.docs
           .map(d => ({ id: d.id, ...d.data() }))
@@ -564,13 +583,40 @@ app.listen(PORT, '0.0.0.0', () => {
         lc.upsertMembers(gymId, members);
         lc.setMeta(`member_sync_${gymId}`, String(Date.now()));
       }
-      console.log(`🔄 [MEMBER SYNC] All gyms refreshed from Firestore → SQLite ✅`);
+      console.log(`🔄 [MEMBER SYNC] Active members refreshed → SQLite ✅`);
     } catch (e) {
       console.warn('[MEMBER SYNC] error:', e.message);
     }
   }
-  setTimeout(syncMembersBackground, 8000);            // first sync 8s after startup
-  setInterval(syncMembersBackground, 5 * 60 * 1000); // then every 5 minutes
+
+  // ── Archive members sync: once on startup (paginated, fetches all 7000+) ──
+  async function syncArchiveMembersOnce() {
+    if (isQuotaExceeded()) return;
+    const alreadySynced = lc.getMeta('archive_members_synced');
+    if (alreadySynced) {
+      console.log(`⏭️  Archive members already synced to SQLite. Skipping.`);
+      return;
+    }
+    try {
+      console.log(`📦 Syncing ALL archive members from Firestore → SQLite (one-time)...`);
+      for (const gymId of GYMS_ALL) {
+        const all = await fetchAllMembers(gymId);
+        if (all.length > 0) {
+          lc.upsertMembers(gymId, all);
+          console.log(`  ✅ ${gymId}: ${all.length} members (incl. archive) saved to SQLite`);
+        }
+        lc.setMeta(`member_sync_${gymId}`, String(Date.now()));
+      }
+      lc.setMeta('archive_members_synced', new Date().toISOString());
+      console.log(`📦 Archive sync complete. All members now in SQLite. ✅`);
+    } catch (e) {
+      console.warn('[ARCHIVE SYNC] error:', e.message);
+    }
+  }
+
+  setTimeout(syncMembersBackground, 8000);             // active members: 8s after startup
+  setInterval(syncMembersBackground, 5 * 60 * 1000);  // then every 5 minutes
+  setTimeout(syncArchiveMembersOnce, 15000);           // archive: 15s after startup (one-time)
 
   setTimeout(async () => {
     if (isQuotaExceeded()) return;
