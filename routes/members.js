@@ -72,7 +72,9 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           photo:     m.photo     || null,
           pdfUrl:    m.pdfUrl    || m.pdf_url     || null,
           createdAt: m.createdAt || m.created_at  || null,
-          isPendingWithPdf: m.isPendingWithPdf || false
+          isPendingWithPdf: m.isPendingWithPdf || false,
+          totalPaid: m.totalPaid || m.total_paid || 0,
+          lastPaymentDate: m.lastPaymentDate || m.last_payment_date || null
         }));
         if (!req.isAdmin) {
           finalMembers = finalMembers.map(m => ({
@@ -129,6 +131,8 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           qrToken: m.qrToken || m.qr_token || '',
           image: m.photo || null, pdfUrl: m.pdf_url || m.pdfUrl || null, isRestricted: true,
           createdAt: m.createdAt || m.created_at || null,
+          totalPaid: m.totalPaid || m.total_paid || 0,
+          lastPaymentDate: m.lastPaymentDate || m.last_payment_date || null
         }));
       }
 

@@ -61,6 +61,8 @@ db.exec(`
     synced_at   TEXT,
     balance     REAL DEFAULT 0,
     created_at  TEXT,
+    total_paid  REAL DEFAULT 0,
+    last_payment_date TEXT,
     PRIMARY KEY (id, gym_id)
   );
   CREATE INDEX IF NOT EXISTS idx_members_gym ON members_cache(gym_id);
@@ -172,6 +174,8 @@ try { db.exec("ALTER TABLE members_cache ADD COLUMN created_at TEXT;"); } catch 
 try { db.exec("ALTER TABLE members_cache ADD COLUMN subscription_name TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE members_cache ADD COLUMN cin TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE members_cache ADD COLUMN period_from TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE members_cache ADD COLUMN total_paid REAL DEFAULT 0;"); } catch (e) {}
+try { db.exec("ALTER TABLE members_cache ADD COLUMN last_payment_date TEXT;"); } catch (e) {}
 // register_cache extensions
 try { db.exec("ALTER TABLE register_cache ADD COLUMN cin TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE register_cache ADD COLUMN tel TEXT;"); } catch (e) {}
@@ -300,9 +304,9 @@ function getDailyStat(gymId, date) {
 
 const insertMember = db.prepare(`
   INSERT OR REPLACE INTO members_cache
-    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at)
+    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date)
   VALUES
-    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at)
+    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date)
 `);
 
 function upsertMembers(gymId, membersArr) {
@@ -335,6 +339,8 @@ function upsertMembers(gymId, membersArr) {
                        (m.createdAt && typeof m.createdAt.toDate === 'function') ? m.createdAt.toDate().toISOString() :
                        (m.createdAt?._seconds ? new Date(m.createdAt._seconds * 1000).toISOString() :
                        (m.createdAt?.toISOString ? m.createdAt.toISOString() : null)),
+    total_paid:        Number(m.totalPaid || m.total_paid) || 0,
+    last_payment_date: m.lastPaymentDate || m.last_payment_date || null,
   })));
 }
 
