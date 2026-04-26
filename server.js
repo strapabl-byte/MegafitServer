@@ -536,6 +536,16 @@ app.listen(PORT, '0.0.0.0', () => {
   setTimeout(runDoorPoll, 5000);        // first poll 5s after startup (warm SQLite)
   setInterval(runDoorPoll, 60 * 1000); // then every 60 seconds
 
+  // ── Gap fill: recover missing historical days on startup ──────────────────
+  // Runs once after startup. Checks last 30 days — if any day has 0 entries
+  // in SQLite, fetches from Firestore and saves to disk permanently.
+  // After this, the disk is the complete source of truth. 💾
+  setTimeout(async () => {
+    if (isQuotaExceeded()) return;
+    try { await analyticsRouter.gapFillDoorEntries(); }
+    catch (e) { console.warn('[GAP FILL] startup error:', e.message); }
+  }, 15000); // 15s after startup (after first door poll completes)
+
   // ── Background member sync (every 5 min) ─────────────────────────────────
   // Firebase is used ONLY here (write path + this background pull).
   // Dashboard always reads from SQLite → instant, zero Firebase reads per request.
