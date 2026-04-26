@@ -569,18 +569,24 @@ app.listen(PORT, '0.0.0.0', () => {
     if (isQuotaExceeded()) return;
     try {
       for (const gymId of GYMS_ALL) {
+        // Fetch last 500 members for this gym (without cloud-side isArchive filter to avoid index requirement)
         const snap = await db.collection('members')
           .where('location', 'in', GYM_LOCATION_MAP[gymId] || [gymId])
-          .where('isArchive', '!=', true)
           .limit(500).get();
+        
+        // Filter out archive members in memory
         const members = snap.docs
           .map(d => ({ id: d.id, ...d.data() }))
+          .filter(m => !m.isArchive && !m.importedFromOdoo) // Only keep non-archive
           .sort((a, b) => {
             const ta = a.createdAt?._seconds || a.createdAt?.seconds || 0;
             const tb = b.createdAt?._seconds || b.createdAt?.seconds || 0;
             return tb - ta;
           });
-        lc.upsertMembers(gymId, members);
+
+        if (members.length > 0) {
+          lc.upsertMembers(gymId, members);
+        }
         lc.setMeta(`member_sync_${gymId}`, String(Date.now()));
       }
       console.log(`🔄 [MEMBER SYNC] Active members refreshed → SQLite ✅`);
