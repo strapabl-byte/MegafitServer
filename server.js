@@ -589,26 +589,44 @@ app.listen(PORT, '0.0.0.0', () => {
     }
   }
 
-  // ── Archive members sync: once on startup (paginated, fetches all 7000+) ──
+  // ── Archive members sync: once on startup — reads from JSON seed file (zero Firebase reads) ──
   async function syncArchiveMembersOnce() {
-    if (isQuotaExceeded()) return;
     const alreadySynced = lc.getMeta('archive_members_synced');
     if (alreadySynced) {
       console.log(`⏭️  Archive members already synced to SQLite. Skipping.`);
       return;
     }
     try {
-      console.log(`📦 Syncing ALL archive members from Firestore → SQLite (one-time)...`);
+      // ── Try JSON seed file first (zero Firebase reads) ──────────────────
+      const seedPath = path.join(__dirname, 'seed_members_dokarat.json');
+      if (fs.existsSync(seedPath)) {
+        console.log(`📦 Loading archive members from seed file → SQLite (zero Firebase reads)...`);
+        const seedData = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
+        // Give each member a stable ID based on name+phone
+        const members = seedData.map((m, i) => ({
+          id: `odoo_${i}_${(m.phone || m.fullName || '').replace(/\W/g, '').slice(0, 10)}`,
+          ...m
+        }));
+        lc.upsertMembers('dokarat', members);
+        lc.setMeta('member_sync_dokarat', String(Date.now()));
+        lc.setMeta('archive_members_synced', new Date().toISOString());
+        console.log(`📦 Archive seed complete: ${members.length} members in SQLite. Zero Firebase reads! ✅`);
+        return;
+      }
+
+      // ── Fallback: fetch from Firestore if seed file missing ─────────────
+      if (isQuotaExceeded()) return;
+      console.log(`📦 Seed file not found — syncing archive members from Firestore (one-time)...`);
       for (const gymId of GYMS_ALL) {
         const all = await fetchAllMembers(gymId);
         if (all.length > 0) {
           lc.upsertMembers(gymId, all);
-          console.log(`  ✅ ${gymId}: ${all.length} members (incl. archive) saved to SQLite`);
+          console.log(`  ✅ ${gymId}: ${all.length} members saved to SQLite`);
         }
         lc.setMeta(`member_sync_${gymId}`, String(Date.now()));
       }
       lc.setMeta('archive_members_synced', new Date().toISOString());
-      console.log(`📦 Archive sync complete. All members now in SQLite. ✅`);
+      console.log(`📦 Archive sync complete. ✅`);
     } catch (e) {
       console.warn('[ARCHIVE SYNC] error:', e.message);
     }
