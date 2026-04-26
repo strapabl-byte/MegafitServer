@@ -569,15 +569,27 @@ app.listen(PORT, '0.0.0.0', () => {
     if (isQuotaExceeded()) return;
     try {
       for (const gymId of GYMS_ALL) {
-        // Fetch last 500 members for this gym (without cloud-side isArchive filter to avoid index requirement)
-        const snap = await db.collection('members')
-          .where('location', 'in', GYM_LOCATION_MAP[gymId] || [gymId])
-          .limit(500).get();
-        
-        // Filter out archive members in memory
-        const members = snap.docs
-          .map(d => ({ id: d.id, ...d.data() }))
-          .filter(m => !m.isArchive && !m.importedFromOdoo) // Only keep non-archive
+        const locations = GYM_LOCATION_MAP[gymId] || [gymId];
+        const PAGE = 500;
+        let all = [], lastDoc = null;
+
+        // Paginate through ALL docs to find real members past the archive ones
+        while (true) {
+          let q = db.collection('members')
+            .where('location', 'in', locations)
+            .orderBy('__name__')
+            .limit(PAGE);
+          if (lastDoc) q = q.startAfter(lastDoc);
+          const snap = await q.get();
+          if (snap.empty) break;
+          all = all.concat(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+          lastDoc = snap.docs[snap.docs.length - 1];
+          if (snap.docs.length < PAGE) break;
+        }
+
+        // Keep only real members (no isArchive flag = real inscription-form member)
+        const members = all
+          .filter(m => !m.isArchive && !m.importedFromOdoo)
           .sort((a, b) => {
             const ta = a.createdAt?._seconds || a.createdAt?.seconds || 0;
             const tb = b.createdAt?._seconds || b.createdAt?.seconds || 0;
@@ -588,8 +600,10 @@ app.listen(PORT, '0.0.0.0', () => {
           lc.upsertMembers(gymId, members);
         }
         lc.setMeta(`member_sync_${gymId}`, String(Date.now()));
+        if (members.length > 0) {
+          console.log(`🔄 [MEMBER SYNC] ${gymId}: ${members.length} active members (from ${all.length} total) ✅`);
+        }
       }
-      console.log(`🔄 [MEMBER SYNC] Active members refreshed → SQLite ✅`);
     } catch (e) {
       console.warn('[MEMBER SYNC] error:', e.message);
     }
