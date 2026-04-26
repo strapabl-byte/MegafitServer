@@ -74,7 +74,8 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           createdAt: m.createdAt || m.created_at  || null,
           isPendingWithPdf: m.isPendingWithPdf || false,
           totalPaid: m.totalPaid || m.total_paid || 0,
-          lastPaymentDate: m.lastPaymentDate || m.last_payment_date || null
+          lastPaymentDate: m.lastPaymentDate || m.last_payment_date || null,
+          isArchive: m.isArchive || !!m.is_archive || false
         }));
         if (!req.isAdmin) {
           finalMembers = finalMembers.map(m => ({
