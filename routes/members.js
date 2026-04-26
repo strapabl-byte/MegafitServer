@@ -85,7 +85,8 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
             qrToken: m.qrToken || '',
             image: m.photo || null, pdfUrl: m.pdfUrl || null, isRestricted: true,
             createdAt: m.createdAt || null,
-            isPendingWithPdf: m.isPendingWithPdf || false
+            isPendingWithPdf: m.isPendingWithPdf || false,
+            isArchive: m.isArchive || !!m.is_archive || false
           }));
         }
         return res.json(finalMembers);
@@ -133,7 +134,8 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           image: m.photo || null, pdfUrl: m.pdf_url || m.pdfUrl || null, isRestricted: true,
           createdAt: m.createdAt || m.created_at || null,
           totalPaid: m.totalPaid || m.total_paid || 0,
-          lastPaymentDate: m.lastPaymentDate || m.last_payment_date || null
+          lastPaymentDate: m.lastPaymentDate || m.last_payment_date || null,
+          isArchive: m.isArchive || !!m.is_archive || false
         }));
       }
 
