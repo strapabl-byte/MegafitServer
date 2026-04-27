@@ -57,6 +57,22 @@ module.exports = function (deps) {
     }
   });
 
+  // GET /api/door/history/:gymId/:date
+  router.get('/api/door/history/:gymId/:date', verifyAzureToken, async (req, res) => {
+    try {
+      const { gymId, date } = req.params;
+      const { lc } = deps;
+      if (!lc) return res.status(500).json({ error: 'Local cache not initialized' });
+
+      // Fetch entries directly from SQLite (Zero Firebase reads)
+      const entries = lc.getEntries(gymId, date, 1000); 
+      res.json(entries);
+    } catch (err) {
+      console.error('Door History Fetch Error:', err);
+      res.status(500).json({ error: 'Failed to fetch door history' });
+    }
+  });
+
   return router;
 };
 

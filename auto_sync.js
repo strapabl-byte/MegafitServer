@@ -150,17 +150,30 @@ function deduplicateForDate(docs, targetTags, dateStr) {
   );
 
   const seen = new Map();
+  const rawEntries = [];
   let unique = 0;
   for (const doc of sorted) {
     const f   = doc.fields;
     const uid = f.user_id?.stringValue || f.id?.stringValue || doc.name.split("/").pop();
     const t   = new Date(f.timestamp?.stringValue || 0).getTime();
+    
+    // Always store the raw entry for historical tracking
+    rawEntries.push({
+      id: doc.name.split("/").pop(),
+      timestamp: f.timestamp?.stringValue || '',
+      name: f.name?.stringValue || '',
+      method: f.method?.stringValue || '',
+      status: f.status?.stringValue || '',
+      user_id: f.user_id?.stringValue || null,
+      isFace: (f.method?.stringValue || '').toLowerCase().includes('visage')
+    });
+
     if (!seen.has(uid) || Math.abs(t - seen.get(uid)) >= 600000) {
       unique++;
       seen.set(uid, t);
     }
   }
-  return { unique, raw: filtered.length };
+  return { unique, raw: filtered.length, rawEntries };
 }
 
 const parseNum = (field) => {
@@ -237,13 +250,16 @@ async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => fals
             }
           }
 
-          // Fallback: if device fields are missing OR we are forcing a deep scan repair
+          // Fallback or explicit full scan: fetch all logs to build historical entry list
           if (unique === 0 || forceManual) {
             const docs = await fetchRecentLogsFromCollections(allCollections, dateStr);
             const res  = deduplicateForDate(docs, tags, dateStr);
             unique = res.unique;
             raw    = res.raw;
-            if (unique > 0) console.log(`  🔍 ${gym.id} / ${dateStr}: ${unique} unique (${forceManual ? 'Deep Scan repair' : 'Manual count fallback'})`);
+            if (res.rawEntries && res.rawEntries.length > 0) {
+               getLC().upsertEntries(gym.id, res.rawEntries);
+            }
+            if (unique > 0) console.log(`  🔍 ${gym.id} / ${dateStr}: ${unique} unique (${forceManual ? 'Deep Scan repair/historical' : 'Manual count fallback'})`);
             else            console.log(`  ⚠️  ${gym.id} / ${dateStr}: no data found even in logs`);
           } else {
             console.log(`  ✅ ${gym.id} / ${dateStr}: ${unique} unique, ${raw} raw (1-read from device counter)`);
@@ -313,7 +329,8 @@ function scheduleNightlySync(db, apiCache, checkQuota = () => false) {
 
   console.log(`⏰ Nightly sync scheduled in ${Math.round(msToNight / 60000)} min (00:05 Morocco)`);
   setTimeout(() => {
-    syncGymCounts(db, apiCache, 7, checkQuota).catch(e => console.error("❌ Nightly sync error:", e));
+    // Nightly sync uses forceManual=true to ensure we pull the FULL LIST of raw entries into SQLite
+    syncGymCounts(db, apiCache, 7, checkQuota, true).catch(e => console.error("❌ Nightly sync error:", e));
     scheduleNightlySync(db, apiCache, checkQuota); // reschedule for next night
   }, msToNight);
 
