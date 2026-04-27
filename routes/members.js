@@ -25,134 +25,72 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
   });
 
   // ── GET /api/members ──────────────────────────────────────────────────────
+  // 🔒 DISK-ONLY: SQLite on Render disk is the SOLE source of truth.
+  // Firebase is NEVER called here. Only add/edit/delete touches Firebase.
   router.get('/', verifyAzureToken, async (req, res) => {
     try {
-      const gymId      = req.query.gymId || 'all';
+      const gymId       = req.query.gymId || 'all';
       const searchQuery = req.query.search || '';
 
+      // 1️⃣ Load from disk
       let finalMembers = lc.getMembers(gymId);
-      
-      // Merge all valid pending members who have a signed PDF
+
+      // 2️⃣ Merge pending members who have a signed PDF contract
       const pdfMembers = lc.getPendingWithPdf(gymId);
       if (pdfMembers && pdfMembers.length > 0) {
-         const normalizedPdf = pdfMembers.map(p => ({
-           id: p.id,
-           gym_id: p.gym_id,
-           full_name: `${p.prenom || ''} ${p.nom || ''}`.trim(),
-           plan: p.subscriptionName,
-           status: p.status,
-           pdf_url: p.pdf_url,
-           created_at: p.date,
-           isPendingWithPdf: true
-         }));
-         finalMembers = [...finalMembers, ...normalizedPdf];
+        const normalizedPdf = pdfMembers.map(p => ({
+          id: p.id, gym_id: p.gym_id,
+          full_name: `${p.prenom || ''} ${p.nom || ''}`.trim(),
+          plan: p.subscriptionName, status: p.status,
+          pdf_url: p.pdf_url, created_at: p.date, isPendingWithPdf: true
+        }));
+        finalMembers = [...finalMembers, ...normalizedPdf];
       }
 
+      // 3️⃣ Local search (zero Firebase reads)
       if (searchQuery) {
         const q = searchQuery.toLowerCase();
         finalMembers = finalMembers.filter(m =>
-          (m.full_name || '').toLowerCase().includes(q) ||
-          (m.phone || '').includes(q)
+          (m.fullName || m.full_name || '').toLowerCase().includes(q) ||
+          (m.phone || '').includes(q) ||
+          (m.cin || '').toLowerCase().includes(q)
         );
       }
 
-      // ── Cache TTL: use SQLite if recently synced (< 5 min), otherwise re-fetch from Firestore ──
-      const lastMemberSync = lc.getMeta(`member_sync_${gymId}`);
-      const msSinceSync = lastMemberSync ? Date.now() - parseInt(lastMemberSync) : Infinity;
-      const MEMBER_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 Hours — disk is persistent, background sync handles updates
+      // 4️⃣ Normalize SQLite snake_case → camelCase
+      finalMembers = finalMembers.map(m => ({
+        ...m,
+        fullName:        m.fullName        || m.full_name        || 'Inconnu',
+        expiresOn:       m.expiresOn       || m.expires_on       || null,
+        qrToken:         m.qrToken         || m.qr_token         || '',
+        photo:           m.photo           || null,
+        pdfUrl:          m.pdfUrl          || m.pdf_url          || null,
+        createdAt:       m.createdAt       || m.created_at       || null,
+        totalPaid:       m.totalPaid       || m.total_paid       || 0,
+        lastPaymentDate: m.lastPaymentDate || m.last_payment_date || null,
+        isArchive:       m.isArchive       || !!m.is_archive      || false,
+        isPendingWithPdf: m.isPendingWithPdf || false,
+      }));
 
-      // ✅ [SQLITE FIRST] Always try SQLite first
-      if (finalMembers && finalMembers.length >= 1 && msSinceSync < MEMBER_CACHE_TTL) {
-        console.log(`⚡ [SQLITE HIT] ${finalMembers.length} members for ${gymId} (includes PDF contracts)`);
-        
-        // Local filtering if search query is present
-        if (searchQuery) {
-          const q = searchQuery.toLowerCase();
-          finalMembers = finalMembers.filter(m =>
-            (m.fullName || m.full_name || '').toLowerCase().includes(q) ||
-            (m.phone || '').includes(q) ||
-            (m.cin || '').toLowerCase().includes(q)
-          );
-        }
-
-        // Always normalize SQLite snake_case → camelCase
-        finalMembers = finalMembers.map(m => ({
-          ...m,
-          fullName:  m.fullName  || m.full_name  || 'Inconnu',
-          expiresOn: m.expiresOn || m.expires_on || null,
-          qrToken:   m.qrToken   || m.qr_token   || '',
-          photo:     m.photo     || null,
-          pdfUrl:    m.pdfUrl    || m.pdf_url     || null,
-          createdAt: m.createdAt || m.created_at  || null,
-          isPendingWithPdf: m.isPendingWithPdf || false,
-          totalPaid: m.totalPaid || m.total_paid || 0,
-          lastPaymentDate: m.lastPaymentDate || m.last_payment_date || null,
-          isArchive: m.isArchive || !!m.is_archive || false
-        }));
-
-        if (!req.isAdmin) {
-          finalMembers = finalMembers.map(m => ({
-            id: m.id, fullName: m.fullName,
-            phone: m.phone || '', birthday: m.birthday || '',
-            expiresOn: m.expiresOn, plan: m.plan,
-            qrToken: m.qrToken || '',
-            image: m.photo || null, pdfUrl: m.pdfUrl || null, isRestricted: true,
-            createdAt: m.createdAt || null,
-            isPendingWithPdf: m.isPendingWithPdf || false,
-            isArchive: m.isArchive || !!m.is_archive || false
-          }));
-        }
-        return res.json(finalMembers);
-      }
-
-      if (isQuotaExceeded()) return res.json(finalMembers);
-
-      // ── Fallback to Firestore only if SQLite has NOTHING or is very stale ──
-      if (searchQuery && finalMembers.length === 0) {
-        const searchSnap = await db.collection('members')
-          .where('fullName', '>=', searchQuery)
-          .where('fullName', '<=', searchQuery + '\uf8ff')
-          .limit(10).get();
-        const found = searchSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-        if (found.length > 0) { lc.upsertMembers(gymId, found); finalMembers = found; }
-      } else if (!searchQuery && (finalMembers.length < 500 || msSinceSync >= MEMBER_CACHE_TTL)) {
-        const lookupMap = {
-          marjane: ['marjane', 'fes saiss', 'fes marjane'],
-          dokarat: ['dokarat', 'dokkarat fes', 'dokkarat'],
-          casa1:   ['casa1', 'casa anfa'],
-          casa2:   ['casa2', 'lady anfa'],
-        };
-        let q = db.collection('members');
-        if (gymId !== 'all') q = q.where('location', 'in', lookupMap[gymId] || [gymId]);
-        const snap = await q.limit(500).get();
-        const members = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        lc.upsertMembers(gymId, members);
-        lc.setMeta(`member_sync_${gymId}`, String(Date.now()));
-        finalMembers = members;
-        console.log(`✅ [FIRESTORE REFRESH] Fetched ${members.length} members for ${gymId}`);
-      }
-
+      // 5️⃣ Restrict fields for non-admin users
       if (!req.isAdmin) {
         finalMembers = finalMembers.map(m => ({
-          id: m.id,
-          fullName: m.fullName || m.full_name || 'Inconnu',
-          phone: m.phone || '', birthday: m.birthday || '',
-          expiresOn: m.expiresOn || m.expires_on, plan: m.plan,
-          qrToken: m.qrToken || m.qr_token || '',
-          image: m.photo || null, pdfUrl: m.pdf_url || m.pdfUrl || null, isRestricted: true,
-          createdAt: m.createdAt || m.created_at || null,
-          totalPaid: m.totalPaid || m.total_paid || 0,
-          lastPaymentDate: m.lastPaymentDate || m.last_payment_date || null,
-          isArchive: m.isArchive || !!m.is_archive || false
+          id: m.id, fullName: m.fullName, phone: m.phone || '',
+          birthday: m.birthday || '', expiresOn: m.expiresOn, plan: m.plan,
+          qrToken: m.qrToken || '', image: m.photo || null,
+          pdfUrl: m.pdfUrl || null, isRestricted: true,
+          createdAt: m.createdAt || null, isPendingWithPdf: m.isPendingWithPdf || false,
+          isArchive: m.isArchive || false,
         }));
       }
 
-      res.json(finalMembers);
+      return res.json(finalMembers);
     } catch (err) {
       console.error('Members Fetch Error:', err);
       res.status(500).json({ error: 'Failed to fetch members', members: [] });
     }
   });
+
 
   // ── POST /api/members ─────────────────────────────────────────────────────
   router.post('/', verifyAzureToken, async (req, res) => {
@@ -165,6 +103,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         }
       }
       const qrToken = crypto.randomBytes(16).toString('hex');
+      const gymId = (location || 'dokarat').toLowerCase().includes('marjane') ? 'marjane' : 'dokarat';
       const docRef = await db.collection('members').add({
         fullName, phone: phone || null, plan: plan || 'Monthly',
         birthday: birthday || null,
@@ -173,7 +112,10 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         qrToken, createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
       const snap = await docRef.get();
-      res.json({ id: docRef.id, ...snap.data() });
+      const newMember = { id: docRef.id, ...snap.data() };
+      // ✅ Write-through: immediately save to disk so disk stays as source of truth
+      lc.upsertMembers(gymId, [newMember]);
+      res.json(newMember);
     } catch (err) {
       console.error('Create Member Error:', err);
       res.status(500).json({ error: 'Failed to create member' });
@@ -243,13 +185,17 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
   router.put('/:id', verifyAzureToken, async (req, res) => {
     try {
       const ref = db.collection('members').doc(req.params.id);
-      const allowed = ['fullName', 'phone', 'plan', 'birthday', 'expiresOn', 'photo', 'status'];
+      const allowed = ['fullName', 'phone', 'plan', 'birthday', 'expiresOn', 'photo', 'status', 'email', 'location'];
       const update  = Object.fromEntries(allowed.filter(k => req.body[k] !== undefined).map(k => [k, req.body[k]]));
       update.updatedAt = admin.firestore.FieldValue.serverTimestamp();
       await ref.update(update);
-      delete apiCache.profiles[req.params.id]; // invalidate profile cache
+      delete apiCache.profiles[req.params.id];
       const snap = await ref.get();
-      res.json({ id: snap.id, ...snap.data() });
+      const updated = { id: snap.id, ...snap.data() };
+      // ✅ Write-through: keep disk in sync immediately
+      const gymId = (updated.location || 'dokarat').toLowerCase().includes('marjane') ? 'marjane' : 'dokarat';
+      lc.upsertMembers(gymId, [updated]);
+      res.json(updated);
     } catch (err) { res.status(500).json({ error: 'Failed to update member' }); }
   });
 
@@ -278,6 +224,8 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       await db.collection('deleted_members').doc(id).set(record);
       await ref.delete();
       delete apiCache.profiles[id];
+      // ✅ Write-through: remove from disk immediately
+      lc.pruneStaleMember ? lc.pruneStaleMember(id) : null;
       res.json({ ok: true });
     } catch (err) { res.status(500).json({ ok: false, error: 'Failed to delete' }); }
   });

@@ -549,41 +549,10 @@ app.listen(PORT, '0.0.0.0', () => {
     catch (e) { console.warn('[GAP FILL] startup error:', e.message); }
   }, 15000);
 
-  // ── Background member sync (every 5 min) ─────────────────────────────────
-  const GYMS_ALL = ['dokarat', 'marjane'];
-  const GYM_LOCATION_MAP = {
-    marjane: ['marjane', 'fes saiss', 'fes marjane'],
-    dokarat: ['dokarat', 'dokkarat fes', 'dokkarat'],
-  };
 
-  async function syncMembersBackground() {
-    if (isQuotaExceeded()) return;
-    try {
-      for (const gymId of GYMS_ALL) {
-        const locations = GYM_LOCATION_MAP[gymId] || [gymId];
-        
-        // ✅ [OPTIMIZATION] Only fetch the 10 most recent members.
-        // If the cache is already warm on the Render disk, we only need new additions.
-        const snap = await db.collection('members')
-          .where('location', 'in', locations)
-          .orderBy('createdAt', 'desc')
-          .limit(10)
-          .get();
-
-        if (snap.empty) continue;
-
-        const members = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        lc.upsertMembers(gymId, members);
-        lc.setMeta(`member_sync_${gymId}`, String(Date.now()));
-        // Console log only if we actually found something new to avoid log spam
-        // console.log(`🔄 [MEMBER SYNC] ${gymId}: Check complete ✅`);
-      }
-    } catch (e) {
-      console.warn('[MEMBER SYNC] error:', e.message);
-    }
-  }
-
-  // ── Archive members sync: once on startup — reads from JSON seed file (zero Firebase reads) ──
+  // ── Archive members seed: once on startup — reads from JSON seed file (zero Firebase reads) ──
+  // This populates SQLite from the bundled seed file on first boot. Never calls Firebase.
+  setTimeout(syncArchiveMembersOnce, 15000);           // archive: 15s after startup (one-time)
   async function syncArchiveMembersOnce() {
     const alreadySynced = lc.getMeta('archive_members_synced');
     if (alreadySynced) {
@@ -638,9 +607,7 @@ app.listen(PORT, '0.0.0.0', () => {
     }
   }
 
-  setTimeout(syncMembersBackground, 8000);             // active members: 8s after startup
-  setInterval(syncMembersBackground, 5 * 60 * 1000);  // then every 5 minutes
-  setTimeout(syncArchiveMembersOnce, 15000);           // archive: 15s after startup (one-time)
+
 
   setTimeout(async () => {
     if (isQuotaExceeded()) return;
