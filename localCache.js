@@ -72,7 +72,23 @@ db.exec(`
     PRIMARY KEY (id, gym_id)
   );
   CREATE INDEX IF NOT EXISTS idx_members_gym ON members_cache(gym_id);
+`);
 
+// ── Migrations for existing tables (Render disk persistence) ─────────────────
+// These run every startup but only ADD if column is missing.
+const migrations = [
+  'ALTER TABLE members_cache ADD COLUMN email TEXT',
+  'ALTER TABLE members_cache ADD COLUMN adresse TEXT',
+  'ALTER TABLE members_cache ADD COLUMN ville TEXT',
+  'ALTER TABLE members_cache ADD COLUMN is_archive INTEGER DEFAULT 0',
+  'ALTER TABLE members_cache ADD COLUMN bonus_3months INTEGER DEFAULT 0'
+];
+
+for (const m of migrations) {
+  try { db.prepare(m).run(); } catch (e) { /* column already exists */ }
+}
+
+db.exec(`
   CREATE TABLE IF NOT EXISTS register_cache (
     id          TEXT NOT NULL,
     gym_id      TEXT NOT NULL,
