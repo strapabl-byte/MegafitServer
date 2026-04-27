@@ -626,6 +626,17 @@ app.listen(PORT, '0.0.0.0', () => {
     if (isQuotaExceeded()) return;
     await seedSQLiteHistoricalStats();
 
+    // 🛠️ DATABASE SELF-HEALING: Normalize timestamps on startup (ensures correct sorting)
+    try {
+      const tFix = lc.db.prepare("UPDATE entries SET timestamp = REPLACE(timestamp, 'T', ' ') WHERE timestamp LIKE '%T%'").run();
+      const zFix = lc.db.prepare("UPDATE entries SET timestamp = REPLACE(timestamp, 'Z', '') WHERE timestamp LIKE '%Z%'").run();
+      if (tFix.changes > 0 || zFix.changes > 0) {
+        console.log(`🧹 [CLEANUP] Normalized ${tFix.changes + zFix.changes} timestamps in database.`);
+      }
+    } catch (err) {
+      console.error("❌ Failed to normalize database timestamps:", err);
+    }
+
     // --- ONE-TIME RENDER DISK UPDATE FROM LOG FILES ---
     if (!lc.getMeta('dokarat_hard_reset_2026_04_27')) {
       console.log("🛠️  PERFORMING ONE-TIME HARD RESET FOR DOKKARATE FROM LOG FILES...");
