@@ -59,7 +59,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       // ── Cache TTL: use SQLite if recently synced (< 5 min), otherwise re-fetch from Firestore ──
       const lastMemberSync = lc.getMeta(`member_sync_${gymId}`);
       const msSinceSync = lastMemberSync ? Date.now() - parseInt(lastMemberSync) : Infinity;
-      const MEMBER_CACHE_TTL = 60 * 60 * 1000; // 1 Hour
+      const MEMBER_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 Hours — disk is persistent, background sync handles updates
 
       // ✅ [SQLITE FIRST] Always try SQLite first
       if (finalMembers && finalMembers.length >= 1 && msSinceSync < MEMBER_CACHE_TTL) {
@@ -115,7 +115,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           .limit(10).get();
         const found = searchSnap.docs.map(d => ({ id: d.id, ...d.data() }));
         if (found.length > 0) { lc.upsertMembers(gymId, found); finalMembers = found; }
-      } else if (!searchQuery && (finalMembers.length < 50 || msSinceSync >= MEMBER_CACHE_TTL)) {
+      } else if (!searchQuery && (finalMembers.length < 500 || msSinceSync >= MEMBER_CACHE_TTL)) {
         const lookupMap = {
           marjane: ['marjane', 'fes saiss', 'fes marjane'],
           dokarat: ['dokarat', 'dokkarat fes', 'dokkarat'],

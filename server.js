@@ -650,7 +650,7 @@ app.listen(PORT, '0.0.0.0', () => {
     const existingStats = lc.getDailyStats('dokarat', 30).filter(s => s.count > 0);
     const hasFullData = existingStats.length >= 20;
 
-    const REPAIR_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+    const REPAIR_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 Hours — disk persists this, safe to skip daily
     const lastRepair = lc.getMeta('last_startup_repair');
     const msSinceLastRepair = lastRepair ? Date.now() - new Date(lastRepair).getTime() : Infinity;
 
@@ -671,11 +671,9 @@ app.listen(PORT, '0.0.0.0', () => {
       lc.setMeta('last_startup_repair', new Date().toISOString());
       console.log('✅ Startup seeding complete.');
     } else {
-      // Has data but cooldown expired → light 7-day refresh (1-read per day)
-      console.log('🛠️  Running light 7-day refresh...');
-      await syncGymCounts(db, apiCache, 7, isQuotaExceeded, false);
+      // Has data and disk is warm — door poll handles live counts every 60s, no Firebase needed
+      console.log(`⏭️  Startup refresh skipped — disk has ${existingStats.length} days, door poll is live. 💾`);
       lc.setMeta('last_startup_repair', new Date().toISOString());
-      console.log('✅ Startup repair complete.');
     }
   }, 3000);
 
