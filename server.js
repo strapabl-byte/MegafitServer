@@ -639,7 +639,10 @@ app.listen(PORT, '0.0.0.0', () => {
           if (fs.existsSync(entriesPath)) {
             const insertStmt = lc.db.prepare("INSERT INTO entries (id, gym_id, date, timestamp, name, method, status, is_face) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
             const entriesData = JSON.parse(fs.readFileSync(entriesPath, 'utf8'));
-            entriesData.forEach(e => insertStmt.run(e.id, e.gym_id, e.date, e.timestamp, e.name, e.method, e.status, e.is_face));
+            entriesData.forEach(e => {
+              const ts = (e.timestamp || '').replace('T', ' ').replace('Z', '');
+              insertStmt.run(e.id, e.gym_id, e.date, ts, e.name, e.method, e.status, e.is_face);
+            });
             console.log(`📦 Injected ${entriesData.length} raw entries into disk.`);
           }
           
