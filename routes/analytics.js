@@ -763,9 +763,9 @@ ${fullContext}`
         let bestTotal  = 0;
 
         for (const coll of g.collections) {
-          // ✅ ABSOLUTE MINIMUM COST: Fetch only 1 doc if we already have data (1 read per poll)
-          const hasLocalData = lc.db.prepare("SELECT 1 FROM entries WHERE gym_id=? AND date=? LIMIT 1").get(gid, today);
-          const pollLimit = hasLocalData ? 1 : 100;
+          // ✅ INCREMENTAL SYNC: Only fetch entries newer than what we already have
+          const lastEntry = lc.db.prepare("SELECT timestamp FROM entries WHERE gym_id=? AND date=? ORDER BY timestamp DESC LIMIT 1").get(gid, today);
+          const lastTs = lastEntry ? lastEntry.timestamp : today;
 
           const body = {
             structuredQuery: {
@@ -774,13 +774,13 @@ ${fullContext}`
                 compositeFilter: {
                   op: 'AND',
                   filters: [
-                    { fieldFilter: { field: { fieldPath: 'timestamp' }, op: 'GREATER_THAN_OR_EQUAL', value: { stringValue: today } } },
+                    { fieldFilter: { field: { fieldPath: 'timestamp' }, op: 'GREATER_THAN', value: { stringValue: lastTs } } },
                     { fieldFilter: { field: { fieldPath: 'timestamp' }, op: 'LESS_THAN', value: { stringValue: nextDay } } }
                   ]
                 }
               },
-              orderBy: [{ field: { fieldPath: 'timestamp' }, direction: 'DESCENDING' }],
-              limit: pollLimit,
+              orderBy: [{ field: { fieldPath: 'timestamp' }, direction: 'ASCENDING' }], // ASC so we process them in order
+              limit: 100, // Safety limit
             }
           };
 
