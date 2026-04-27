@@ -434,17 +434,28 @@ async function seedSQLiteHistoricalStats() {
     console.log('🚀 Checking/Seeding SQLite with 30-day stats...');
     for (const gymId of ['dokarat', 'marjane']) {
       const dateStrs = [], docIds = [];
+      const missingDates = [];
       for (let i = 29; i >= 0; i--) {
         const d = new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10);
-        dateStrs.push(d); docIds.push(`${gymId}_${d}`);
+        dateStrs.push(d);
+        // 🔒 DISK-FIRST: Only fetch from Firebase if this date has no data on disk
+        const existing = lc.getDailyStat ? lc.getDailyStat(gymId, d) : null;
+        if (!existing || !existing.count) {
+          docIds.push(d);
+          missingDates.push(d);
+        }
       }
-      const snaps = await db.getAll(...docIds.map(id => db.collection('gym_daily_stats').doc(id)));
-      snaps.forEach((snap, i) => { 
+      if (missingDates.length === 0) {
+        console.log(`  ⏭️  ${gymId}: all 30 days already on disk — skipping Firebase.`);
+        continue;
+      }
+      console.log(`  📡 ${gymId}: ${missingDates.length} missing days — fetching from Firebase...`);
+      const snaps = await db.getAll(...missingDates.map(d => db.collection('gym_daily_stats').doc(`${gymId}_${d}`)));
+      snaps.forEach((snap, i) => {
         if (snap.exists) {
           const d = snap.data();
-          lc.upsertDailyStat(gymId, dateStrs[i], d.count || 0, d.rawCount || 0); 
+          lc.upsertDailyStat(gymId, missingDates[i], d.count || 0, d.rawCount || 0);
         }
-        // If snap doesn't exist, LEAVE the SQLite data alone (don't overwrite with 0)
       });
     }
     console.log('  📊 Daily stats seeding checked.');

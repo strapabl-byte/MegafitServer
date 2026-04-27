@@ -345,25 +345,13 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
       };
 
       const monthCachedCount = countCachedEntries(monthStart);
-      let incomeDay, incomeWeek, incomeMonth, incomeYear;
-
-      if (monthCachedCount >= 3) {
-        // SQLite has data ??? use it (fast, no quota cost)
-        console.log(`??? [KPI] SQLite: ${monthCachedCount} entries for ${gymId} ??? reading prix from local cache`);
-        incomeDay   = getRevenueAndBreakdown(todayStart);
-        incomeWeek  = getRevenueAndBreakdown(weekStart);
-        incomeMonth = getRevenueAndBreakdown(monthStart);
-        incomeYear  = getRevenueAndBreakdown(yearStart);
-      } else {
-        // Fallback to Firestore
-        console.log(`???? [KPI] SQLite sparse (${monthCachedCount} entries) for ${gymId} ??? falling back to Firestore`);
-        [incomeDay, incomeWeek, incomeMonth, incomeYear] = await Promise.all([
-          fetchFirestoreRegisterIncome(tsToday),
-          fetchFirestoreRegisterIncome(tsWeek),
-          fetchFirestoreRegisterIncome(tsMonth),
-          fetchFirestoreRegisterIncome(tsYear),
-        ]);
-      }
+      // 🔒 DISK-ONLY: Always read from SQLite. If disk is sparse, return zeros.
+      // The door-poll and nightly sync will populate the disk. No Firebase reads here.
+      console.log(`💾 [KPI] SQLite: ${monthCachedCount} entries for ${gymId} — reading from disk only`);
+      const incomeDay   = getRevenueAndBreakdown(todayStart);
+      const incomeWeek  = getRevenueAndBreakdown(weekStart);
+      const incomeMonth = getRevenueAndBreakdown(monthStart);
+      const incomeYear  = getRevenueAndBreakdown(yearStart);
 
       const kpis = {
         newMembers: { day: countRegisterInRange(todayStart), week: countRegisterInRange(weekStart), month: countRegisterInRange(monthStart), year: countRegisterInRange(yearStart) },
@@ -407,25 +395,17 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     }
   });
 
-  // ?????? POST /api/analytics/log-entry ????????????????????????????????????????????????????????????????????????????????????????????????
+  // ── POST /api/analytics/log-entry ─────────────────────────────────────────
+  // 🔒 DISK-ONLY: Updates SQLite daily_stats directly. Zero Firebase reads.
   router.post('/api/analytics/log-entry', verifyAzureToken, async (req, res) => {
     try {
       const { gymId, userId } = req.body;
       if (!gymId || !userId) return res.status(400).json({ error: 'gymId and userId required' });
-      const now = new Date();
-      const todayStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
-      const docRef     = db.collection('gym_daily_stats').doc(`${gymId}_${todayStr}`);
-      const visitorRef = docRef.collection('visitors').doc(userId);
-
-      await db.runTransaction(async (t) => {
-        const doc = await t.get(docRef);
-        const vis = await t.get(visitorRef);
-        if (vis.exists && Date.now() - vis.data().lastScannedAt.toDate().getTime() < 600000) { console.log(`??????? Dedup: ${userId} at ${gymId}`); return; }
-        if (!doc.exists) { t.set(docRef, { gym_id: gymId, date: todayStr, count: 1, lastSyncedAt: admin.firestore.FieldValue.serverTimestamp() }); }
-        else { t.update(docRef, { count: (doc.data().count || 0) + 1, lastSyncedAt: admin.firestore.FieldValue.serverTimestamp() }); }
-        t.set(visitorRef, { userId, lastScannedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-      });
-      res.json({ ok: true });
+      const todayStr = lc.getMoroccanDateStr ? lc.getMoroccanDateStr() : new Date().toISOString().slice(0, 10);
+      const existing = lc.getDailyStat(gymId, todayStr);
+      const newCount = (existing?.count || 0) + 1;
+      lc.upsertDailyStat(gymId, todayStr, newCount, (existing?.raw_count || 0) + 1);
+      res.json({ ok: true, count: newCount });
     } catch (err) {
       console.error('Log Entry Error:', err);
       res.status(500).json({ error: 'Failed to log entry' });

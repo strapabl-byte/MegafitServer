@@ -123,12 +123,21 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
       const { memberId, amount, plan, date, method, contrat, commercial, location, payments: splitPayments, type, note, reste, balanceDeadline, cin: passedCin, subscriptionName, inscriptionId } = req.body;
       let nom = '', tel = '', loc = location || 'dokarat', cin = passedCin || '';
       try {
-        const m = await db.collection('members').doc(memberId).get();
-        if (m.exists) { 
-          nom = m.data().fullName || ''; 
-          tel = m.data().phone || ''; 
-          loc = location || m.data().location || 'dokarat'; 
-          cin = cin || m.data().cin || '';
+        // 🔒 DISK-FIRST: Read member data from SQLite, not Firebase
+        const diskMember = lc.getMemberById ? lc.getMemberById(memberId) : null;
+        if (diskMember) {
+          nom = diskMember.fullName || diskMember.full_name || '';
+          tel = diskMember.phone || '';
+          loc = location || diskMember.location || 'dokarat';
+          cin = cin || diskMember.cin || '';
+        } else {
+          const m = await db.collection('members').doc(memberId).get();
+          if (m.exists) {
+            nom = m.data().fullName || '';
+            tel = m.data().phone || '';
+            loc = location || m.data().location || 'dokarat';
+            cin = cin || m.data().cin || '';
+          }
         }
       } catch (_) {}
 
@@ -233,25 +242,23 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
         note: note || `Complément encaissé aujourd'hui (Reste: ${newBalance} DH)`
       });
 
-      // 2. Safely annotate the original register entry 
+      // 🔒 DISK-FIRST: Search register_cache in SQLite by contract number
       if (contractNum) {
-        const regSnap = await db.collectionGroup('entries').where('contrat', '==', contractNum).orderBy('createdAt', 'desc').limit(1).get();
-        if (!regSnap.empty) {
-          const doc = regSnap.docs[0];
-          await doc.ref.update({
-            reste: newBalance,
-            note_reste: newBalance <= 0 ? `✅ Soldé — ${line}` : `⚠️ Reste: ${newBalance} DH\n${line}`,
-          });
-          
-          const updatedReg = await doc.ref.get();
-          // Extract the date and gym id from the parent path
-          // parent path: megafit_daily_register/dokarat_2026-04-12/entries
+        const regRows = lc.db ? lc.db.prepare(`
+          SELECT * FROM register_cache WHERE contrat = ? ORDER BY date DESC LIMIT 1
+        `).all(contractNum) : [];
+        if (regRows.length > 0) {
+          const row = regRows[0];
+          const line = `+ ${payAmount} DH (${method || 'Espèces'}) le ${new Date().toLocaleDateString('fr-FR')}`;
+          const updatedReste = newBalance <= 0 ? `✅ Soldé — ${line}` : `⚠️ Reste: ${newBalance} DH\n${line}`;
+          // Update SQLite
+          try { lc.db.prepare('UPDATE register_cache SET reste = ?, note_reste = ? WHERE id = ? AND gym_id = ?')
+            .run(newBalance, updatedReste, row.id, row.gym_id); } catch(_) {}
+          // Also update Firebase in background (non-blocking)
           try {
-             const parentParts = doc.ref.parent.parent.id.split('_'); // 'dokarat_2026-04-12' -> ['dokarat', '2026-04-12']
-             if (parentParts.length === 2) {
-                lc.upsertRegister(parentParts[0], parentParts[1], [{ id: doc.id, ...updatedReg.data() }]);
-             }
-          } catch(e) {}
+            const fbRef = db.collection('megafit_daily_register').doc(`${row.gym_id}_${row.date}`).collection('entries').doc(row.id);
+            fbRef.update({ reste: newBalance, note_reste: updatedReste }).catch(() => {});
+          } catch(_) {}
         }
       }
 

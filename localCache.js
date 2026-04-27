@@ -408,6 +408,11 @@ function pruneStaleMember(memberId) {
   db.prepare('DELETE FROM members_cache WHERE id=?').run(memberId);
 }
 
+// Lookup a single member by Firebase ID from the disk
+function getMemberById(memberId) {
+  return db.prepare('SELECT * FROM members_cache WHERE id=? LIMIT 1').get(memberId) || null;
+}
+
 // ── REGISTER ─────────────────────────────────────────────────────────────────
 
 const insertRegister = db.prepare(`
@@ -745,7 +750,7 @@ module.exports = {
   // daily stats
   upsertDailyStat, getDailyStats, getDailyStat,
   // members
-  upsertMembers, getMembers, pruneStaleMember,
+  upsertMembers, getMembers, getMemberById, pruneStaleMember,
   // register
   upsertRegister, getRegister, deleteRegisterEntry,
   // decaissements

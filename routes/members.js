@@ -122,12 +122,21 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
     }
   });
 
-  // ── GET /api/members/:id ──────────────────────────────────────────────────
+  // ── GET /api/members/:id ──────────────────────────────────────────────
+  // 🔒 DISK-FIRST: Check SQLite before calling Firebase.
   router.get('/:id', verifyAzureToken, async (req, res) => {
     try {
+      // 1️⃣ Check disk first
+      const diskMember = lc.getMemberById ? lc.getMemberById(req.params.id) : null;
+      if (diskMember) return res.json(diskMember);
+      // 2️⃣ Only if not on disk, check Firebase (e.g. brand-new member not yet in seed)
       const doc = await db.collection('members').doc(req.params.id).get();
       if (!doc.exists) return res.status(404).json({ error: 'Member not found' });
-      res.json({ id: doc.id, ...doc.data() });
+      const member = { id: doc.id, ...doc.data() };
+      // Write to disk immediately so next request hits disk
+      const gymId = (member.location || 'dokarat').toLowerCase().includes('marjane') ? 'marjane' : 'dokarat';
+      lc.upsertMembers(gymId, [member]);
+      res.json(member);
     } catch (err) { res.status(500).json({ error: 'Failed to fetch member' }); }
   });
 
