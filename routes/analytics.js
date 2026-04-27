@@ -250,8 +250,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
       const monthStart  = new Date(now.getFullYear(), now.getMonth(), 1);
       const yearStart   = new Date(now.getFullYear(), 0, 1);
 
-      const ts = (d) => admin.firestore.Timestamp.fromDate(d);
-      const tsToday = ts(todayStart), tsWeek = ts(weekStart), tsMonth = ts(monthStart), tsYear = ts(yearStart);
+      // 🔒 DISK-ONLY: All KPI data comes from SQLite register_cache. No Firebase reads.
 
       // ?????? New members count from register (source of truth, same as Register page) ??????
       const countRegisterInRange = (fromDate) => {
@@ -297,56 +296,17 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
         return { total, espece, tpe, virement, cheque };
       };
 
-      // ?????? Count SQLite entries this month to decide if we need Firestore ??????
-      const countCachedEntries = (fromDate) => {
+      // 🔒 DISK-ONLY: Always read KPIs from SQLite. No Firebase fallback.
+      const monthCachedCount = (() => {
         let count = 0;
-        const cursor = new Date(fromDate);
-        while (cursor <= now) {
-          const dateStr = toLocalDateStr(cursor);
-          for (const gid of gymIds) count += lc.getRegister(gid, dateStr).length;
-          cursor.setDate(cursor.getDate() + 1);
+        const c = new Date(monthStart);
+        while (c <= now) {
+          const ds = toLocalDateStr(c);
+          for (const gid of gymIds) count += lc.getRegister(gid, ds).length;
+          c.setDate(c.getDate() + 1);
         }
         return count;
-      };
-
-      // ?????? Firestore fallback for historical months not yet in SQLite ??????
-      const fetchFirestoreRegisterIncome = async (fromTs) => {
-        const start = new Date(fromTs.toMillis());
-        const dayCount = Math.ceil((now - start) / (1000 * 60 * 60 * 24)) + 1;
-        const docRefs = [];
-        const decRefs = [];
-        for (let i = 0; i < dayCount; i++) {
-          const d = new Date(start); d.setDate(start.getDate() + i); if (d > now) break;
-          const dateStr = toLocalDateStr(d);
-          gymIds.forEach(gid => {
-            docRefs.push(db.collection('megafit_daily_register').doc(`${gid}_${dateStr}`).collection('entries'));
-            decRefs.push(db.collection('megafit_daily_register').doc(`${gid}_${dateStr}`).collection('decaissements'));
-          });
-        }
-        const snaps = await Promise.all(docRefs.map(r => r.get()));
-        const decSnaps = await Promise.all(decRefs.map(r => r.get()));
-        
-        let total = 0, espece = 0, tpe = 0, virement = 0, cheque = 0;
-        snaps.forEach(snap => snap.forEach(doc => {
-          const e = doc.data();
-          const e_esp = Number(e.espece) || 0;
-          const e_tpe = Number(e.tpe) || 0;
-          const e_vir = Number(e.virement) || 0;
-          const e_che = Number(e.cheque) || 0;
-          espece += e_esp; tpe += e_tpe; virement += e_vir; cheque += e_che;
-          total += e_esp + e_tpe + e_vir + e_che;
-        }));
-        decSnaps.forEach(snap => snap.forEach(doc => {
-          const amt = Number(doc.data().montant) || 0;
-          espece -= amt;
-          total -= amt;
-        }));
-        return { total, espece, tpe, virement, cheque };
-      };
-
-      const monthCachedCount = countCachedEntries(monthStart);
-      // 🔒 DISK-ONLY: Always read from SQLite. If disk is sparse, return zeros.
-      // The door-poll and nightly sync will populate the disk. No Firebase reads here.
+      })();
       console.log(`💾 [KPI] SQLite: ${monthCachedCount} entries for ${gymId} — reading from disk only`);
       const incomeDay   = getRevenueAndBreakdown(todayStart);
       const incomeWeek  = getRevenueAndBreakdown(weekStart);
@@ -478,17 +438,19 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
           liveEntries.map(e => `  ${e.name||'?'} @ ${e.time ? new Date(e.time).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}) : '??:??'} (${e.source||'scan'})`).join('\n');
       }
 
-      // ?????? Course & Reservation Context ???????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
+      // 🔒 DISK-ONLY: Course context read from SQLite courses_cache (no Firebase).
       let courseContext = '';
       try {
-        const cSnap = await db.collection('courses').get();
-        if (!cSnap.empty) {
-           courseContext = `\n--- CURRENT SCHEDULE & RESERVATIONS ---\n`;
-           cSnap.docs.forEach(doc => {
-              const d = doc.data();
-              // Summarize course info compactly
-              courseContext += `- ${d.title} (${d.coach}) | Days: ${(d.days||[]).join(',')} | Time: ${d.time} | Booked: ${d.reserved||0}/${d.capacity}\n`;
-           });
+        const courseRows = lc.db ? lc.db.prepare(
+          `SELECT title, coach, days, time, reserved, capacity FROM courses_cache LIMIT 50`
+        ).all() : [];
+        if (courseRows.length > 0) {
+          courseContext = `\n--- CURRENT SCHEDULE & RESERVATIONS ---\n`;
+          courseRows.forEach(d => {
+            let daysList = '';
+            try { daysList = (JSON.parse(d.days || '[]')).join(','); } catch { daysList = d.days || ''; }
+            courseContext += `- ${d.title || '?'} (${d.coach || '?'}) | Days: ${daysList} | Time: ${d.time || '?'} | Booked: ${d.reserved||0}/${d.capacity||'?'}\n`;
+          });
         }
       } catch (err) {
         console.error("Megaeye course context error:", err);

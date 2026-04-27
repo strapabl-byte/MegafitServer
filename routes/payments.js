@@ -77,39 +77,120 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
       payments.sort((a, b) => new Date(b.date || b.createdAt?._seconds * 1000 || 0) - new Date(a.date || a.createdAt?._seconds * 1000 || 0));
 
       // Virtual backfill: inject registration payment if missing
+      // 🔒 DISK-FIRST: Read member + inscription from SQLite, not Firebase.
       if (!payments.some(p => p.type === 'registration')) {
-        const mSnap = await db.collection('members').doc(req.params.memberId).get();
-        if (mSnap.exists && mSnap.data().inscriptionId) {
-          const insSnap = await db.collection('pending_members').doc(mSnap.data().inscriptionId).get();
-          if (insSnap.exists) {
-            const ins = insSnap.data();
-            const m   = mSnap.data();
-            const totalPaid = Number(ins.totals?.paid) ||
-              ((Number(ins.payments?.espece   ) || 0) +
-               (Number(ins.payments?.tpe      ) || 0) +
-               (Number(ins.payments?.carte    ) || 0) +
-               (Number(ins.payments?.virement ) || 0) +
-               (Number(ins.payments?.cheque   ) || 0));
+        // Try SQLite disk first
+        const diskMember = lc.getMemberById ? lc.getMemberById(req.params.memberId) : null;
+        const diskMemberData = diskMember || null;
+        const inscriptionId = diskMemberData?.inscriptionId || diskMemberData?.inscription_id || null;
+
+        if (inscriptionId) {
+          // Try SQLite pending_members
+          const diskIns = lc.getPendingById ? lc.getPendingById(inscriptionId) : null;
+          if (diskIns) {
+            const totalPaid = Number(diskIns.totals?.paid || (typeof diskIns.totals === 'string' ? JSON.parse(diskIns.totals)?.paid : 0)) ||
+              ((Number(diskIns.payments?.espece   || 0)) +
+               (Number(diskIns.payments?.tpe      || diskIns.payments?.carte || 0)) +
+               (Number(diskIns.payments?.virement || 0)) +
+               (Number(diskIns.payments?.cheque   || 0)));
+            const parsedPayments = typeof diskIns.payments === 'string' ? JSON.parse(diskIns.payments || '{}') : (diskIns.payments || {});
             if (totalPaid > 0) {
               const methods = [];
-              if (Number(ins.payments?.espece                     ) > 0) methods.push('Esp');
-              if (Number(ins.payments?.carte || ins.payments?.tpe ) > 0) methods.push('Car');
-              if (Number(ins.payments?.cheque                     ) > 0) methods.push('Chq');
-              if (Number(ins.payments?.virement                   ) > 0) methods.push('Vir');
+              if (Number(parsedPayments.espece)                              > 0) methods.push('Esp');
+              if (Number(parsedPayments.carte || parsedPayments.tpe)        > 0) methods.push('Car');
+              if (Number(parsedPayments.cheque)                             > 0) methods.push('Chq');
+              if (Number(parsedPayments.virement)                           > 0) methods.push('Vir');
               payments.push({
-                id: `reg-${m.inscriptionId}`, amount: totalPaid,
-                plan: m.plan || 'Monthly',
-                date: m.createdAt?._seconds ? new Date(m.createdAt._seconds * 1000).toISOString() : new Date().toISOString(),
+                id: `reg-${inscriptionId}`, amount: totalPaid,
+                plan: diskMemberData.plan || 'Monthly',
+                date: diskMemberData.createdAt || diskMemberData.created_at || new Date().toISOString(),
                 method: methods.join('+') || 'Dépôt',
                 type: 'registration', note: 'Paiement inscription initiale', virtual: true,
-                pdfUrl: ins.pdfUrl || m.pdfUrl || null,
-                contractNumber: ins.contractNumber || m.contractNumber || null,
-                subscriptionName: ins.subscriptionName || m.plan || null,
+                pdfUrl: diskIns.pdfUrl || diskIns.pdf_url || diskMemberData.pdfUrl || null,
+                contractNumber: diskIns.contractNumber || diskIns.contract_number || diskMemberData.contractNumber || null,
+                subscriptionName: diskIns.subscriptionName || diskIns.subscription_name || diskMemberData.plan || null,
               });
             }
+          } else {
+            // Firebase fallback: only if not on disk
+            try {
+              const mSnap = diskMemberData
+                ? { exists: true, data: () => diskMemberData }
+                : await db.collection('members').doc(req.params.memberId).get();
+              if (mSnap.exists && mSnap.data().inscriptionId) {
+                const insSnap = await db.collection('pending_members').doc(mSnap.data().inscriptionId).get();
+                if (insSnap.exists) {
+                  const ins = insSnap.data();
+                  const m   = mSnap.data();
+                  const totalPaid = Number(ins.totals?.paid) ||
+                    ((Number(ins.payments?.espece   ) || 0) +
+                     (Number(ins.payments?.tpe      ) || 0) +
+                     (Number(ins.payments?.carte    ) || 0) +
+                     (Number(ins.payments?.virement ) || 0) +
+                     (Number(ins.payments?.cheque   ) || 0));
+                  if (totalPaid > 0) {
+                    const methods = [];
+                    if (Number(ins.payments?.espece                     ) > 0) methods.push('Esp');
+                    if (Number(ins.payments?.carte || ins.payments?.tpe ) > 0) methods.push('Car');
+                    if (Number(ins.payments?.cheque                     ) > 0) methods.push('Chq');
+                    if (Number(ins.payments?.virement                   ) > 0) methods.push('Vir');
+                    payments.push({
+                      id: `reg-${m.inscriptionId}`, amount: totalPaid,
+                      plan: m.plan || 'Monthly',
+                      date: m.createdAt?._seconds ? new Date(m.createdAt._seconds * 1000).toISOString() : new Date().toISOString(),
+                      method: methods.join('+') || 'Dépôt',
+                      type: 'registration', note: 'Paiement inscription initiale', virtual: true,
+                      pdfUrl: ins.pdfUrl || m.pdfUrl || null,
+                      contractNumber: ins.contractNumber || m.contractNumber || null,
+                      subscriptionName: ins.subscriptionName || m.plan || null,
+                    });
+                  }
+                }
+              }
+            } catch (fbErr) {
+              console.warn('[PAYMENTS GET] inscription Firebase fallback failed:', fbErr.message);
+            }
+          }
+        } else if (!diskMemberData) {
+          // No disk record at all — full Firebase fallback
+          try {
+            const mSnap = await db.collection('members').doc(req.params.memberId).get();
+            if (mSnap.exists && mSnap.data().inscriptionId) {
+              const insSnap = await db.collection('pending_members').doc(mSnap.data().inscriptionId).get();
+              if (insSnap.exists) {
+                const ins = insSnap.data();
+                const m   = mSnap.data();
+                const totalPaid = Number(ins.totals?.paid) ||
+                  ((Number(ins.payments?.espece   ) || 0) +
+                   (Number(ins.payments?.tpe      ) || 0) +
+                   (Number(ins.payments?.carte    ) || 0) +
+                   (Number(ins.payments?.virement ) || 0) +
+                   (Number(ins.payments?.cheque   ) || 0));
+                if (totalPaid > 0) {
+                  const methods = [];
+                  if (Number(ins.payments?.espece                     ) > 0) methods.push('Esp');
+                  if (Number(ins.payments?.carte || ins.payments?.tpe ) > 0) methods.push('Car');
+                  if (Number(ins.payments?.cheque                     ) > 0) methods.push('Chq');
+                  if (Number(ins.payments?.virement                   ) > 0) methods.push('Vir');
+                  payments.push({
+                    id: `reg-${m.inscriptionId}`, amount: totalPaid,
+                    plan: m.plan || 'Monthly',
+                    date: m.createdAt?._seconds ? new Date(m.createdAt._seconds * 1000).toISOString() : new Date().toISOString(),
+                    method: methods.join('+') || 'Dépôt',
+                    type: 'registration', note: 'Paiement inscription initiale', virtual: true,
+                    pdfUrl: ins.pdfUrl || m.pdfUrl || null,
+                    contractNumber: ins.contractNumber || m.contractNumber || null,
+                    subscriptionName: ins.subscriptionName || m.plan || null,
+                  });
+                }
+              }
+            }
+          } catch (fbErr) {
+            console.warn('[PAYMENTS GET] full Firebase fallback failed:', fbErr.message);
           }
         }
       }
+
       res.json(payments);
     } catch (err) {
       console.error('Payment History Error:', err);

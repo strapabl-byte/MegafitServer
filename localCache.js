@@ -622,6 +622,15 @@ function getPendingWithPdf(gymId) {
   }
 }
 
+// Lookup a single pending inscription by its Firebase ID
+function getPendingById(inscriptionId) {
+  try {
+    return db.prepare('SELECT * FROM pending_cache WHERE id = ? LIMIT 1').get(inscriptionId) || null;
+  } catch(err) {
+    return null;
+  }
+}
+
 // ── INCIDENTS CACHE ───────────────────────────────────────────────────────────────────
 
 function upsertIncidents(incidents) {
@@ -760,7 +769,7 @@ module.exports = {
   // meta
   getMeta, setMeta, getLastSync, setLastSync,
   // pending (megaeye)
-  setPending, updatePendingStatus, getPending, getPendingWithPdf,
+  setPending, updatePendingStatus, getPending, getPendingWithPdf, getPendingById,
   // incidents cache
   upsertIncidents, getIncidents, resolveIncidentCache,
   // kids courses

@@ -141,47 +141,106 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
   });
 
   // ── GET /api/members/:id/profile ──────────────────────────────────────────
+  // 🔒 DISK-FIRST: Reads member + inscription from SQLite. Firebase only as last resort.
   router.get('/:id/profile', verifyAzureToken, async (req, res) => {
     const memberId = req.params.id;
     try {
+      // 1️⃣ In-process cache (60s)
       const cached = apiCache.profiles[memberId];
       if (cached && Date.now() - cached.ts < 60000) {
         if (!req.isAdmin && cached.data.location && !req.hasAccessToGym(cached.data.location))
           return res.status(403).json({ error: 'Access denied to this member' });
         return res.json(cached.data);
       }
-      const memberDoc = await db.collection('members').doc(memberId).get();
-      if (!memberDoc.exists) return res.status(404).json({ error: 'Member not found' });
-      const member = { id: memberDoc.id, ...memberDoc.data() };
+
+      // 2️⃣ Try SQLite disk first
+      let member = lc.getMemberById ? lc.getMemberById(memberId) : null;
+      if (member) {
+        // Normalize disk field names to camelCase
+        member = {
+          id: member.id || memberId,
+          fullName:       member.fullName       || member.full_name       || 'Inconnu',
+          phone:          member.phone          || '',
+          plan:           member.plan           || 'Monthly',
+          status:         member.status         || '',
+          birthday:       member.birthday       || null,
+          expiresOn:      member.expiresOn      || member.expires_on      || null,
+          photo:          member.photo          || null,
+          email:          member.email          || null,
+          location:       member.location       || member.gym_id          || 'dokarat',
+          qrToken:        member.qrToken        || member.qr_token        || '',
+          pdfUrl:         member.pdfUrl         || member.pdf_url         || null,
+          contractNumber: member.contractNumber || member.contrat         || null,
+          cin:            member.cin            || null,
+          balance:        member.balance        || 0,
+          isFrozen:       member.isFrozen       || !!member.is_frozen     || false,
+          inscriptionId:  member.inscriptionId  || null,
+          createdAtStr:   member.createdAt      || member.created_at      || null,
+          source: 'disk',
+        };
+      } else {
+        // 3️⃣ Fallback: Firebase (brand-new member not yet synced to disk)
+        const memberDoc = await db.collection('members').doc(memberId).get();
+        if (!memberDoc.exists) return res.status(404).json({ error: 'Member not found' });
+        const raw = memberDoc.data();
+        let createdAtStr = null;
+        if (raw.createdAt?._seconds) createdAtStr = new Date(raw.createdAt._seconds * 1000).toISOString().split('T')[0];
+        member = { id: memberDoc.id, ...raw, createdAtStr, source: 'firebase' };
+        // Write-through so next call hits disk
+        const gymId = (member.location || 'dokarat').toLowerCase().includes('marjane') ? 'marjane' : 'dokarat';
+        lc.upsertMembers(gymId, [member]);
+      }
+
+      // Access control
       if (!req.isAdmin && member.location && !req.hasAccessToGym(member.location)) {
         console.warn(`🚫 Manager ${req.user?.name} tried to access member ${memberId} from gym ${member.location}`);
         return res.status(403).json({ error: 'Access denied: member belongs to a different gym' });
       }
+
+      // 4️⃣ Resolve inscription (disk-first via getPendingById if available)
       let inscription = null;
       if (member.inscriptionId) {
-        const insDoc = await db.collection('pending_members').doc(member.inscriptionId).get();
-        if (insDoc.exists) {
-          const ins = insDoc.data();
+        const diskIns = lc.getPendingById ? lc.getPendingById(member.inscriptionId) : null;
+        if (diskIns) {
           inscription = {
-            cin: ins.cin, adresse: ins.adresse, ville: ins.ville, email: ins.email,
-            commercial: ins.commercial, subscriptionName: ins.subscriptionName,
-            contractNumber: ins.contractNumber || member.contractNumber,
-            pdfUrl: ins.pdfUrl || member.pdfUrl,
-            gymId: ins.gymId || member.location,
-            periodFrom: ins.periodFrom, periodTo: ins.periodTo || member.expiresOn,
-            totals: ins.totals, payments: ins.payments,
-            balance: ins.totals?.balance ?? member.balance ?? 0,
-            source: ins.source || 'web',
+            cin: diskIns.cin, adresse: diskIns.adresse, ville: diskIns.ville, email: diskIns.email,
+            commercial: diskIns.commercial,
+            subscriptionName: diskIns.subscriptionName || diskIns.subscription_name,
+            contractNumber: diskIns.contractNumber || diskIns.contract_number || member.contractNumber,
+            pdfUrl: diskIns.pdfUrl || diskIns.pdf_url || member.pdfUrl,
+            gymId: diskIns.gymId || diskIns.gym_id || member.location,
+            periodFrom: diskIns.periodFrom || diskIns.period_from,
+            periodTo: diskIns.periodTo || diskIns.period_to || member.expiresOn,
+            totals: diskIns.totals ? (typeof diskIns.totals === 'string' ? JSON.parse(diskIns.totals) : diskIns.totals) : null,
+            payments: diskIns.payments ? (typeof diskIns.payments === 'string' ? JSON.parse(diskIns.payments) : diskIns.payments) : null,
+            balance: diskIns.balance ?? member.balance ?? 0,
+            source: 'disk',
           };
+        } else {
+          // Firebase fallback for inscription (member from Firebase path above)
+          try {
+            const insDoc = await db.collection('pending_members').doc(member.inscriptionId).get();
+            if (insDoc.exists) {
+              const ins = insDoc.data();
+              inscription = {
+                cin: ins.cin, adresse: ins.adresse, ville: ins.ville, email: ins.email,
+                commercial: ins.commercial, subscriptionName: ins.subscriptionName,
+                contractNumber: ins.contractNumber || member.contractNumber,
+                pdfUrl: ins.pdfUrl || member.pdfUrl,
+                gymId: ins.gymId || member.location,
+                periodFrom: ins.periodFrom, periodTo: ins.periodTo || member.expiresOn,
+                totals: ins.totals, payments: ins.payments,
+                balance: ins.totals?.balance ?? member.balance ?? 0,
+                source: 'firebase',
+              };
+            }
+          } catch (insErr) {
+            console.warn('[PROFILE] inscription Firebase fallback failed:', insErr.message);
+          }
         }
       }
-      
-      let createdAtStr = null;
-      if (member.createdAt && member.createdAt._seconds) {
-        createdAtStr = new Date(member.createdAt._seconds * 1000).toISOString().split('T')[0];
-      }
-      
-      const payload = { ...member, createdAtStr, inscription };
+
+      const payload = { ...member, inscription };
       apiCache.profiles[memberId] = { data: payload, ts: Date.now() };
       res.json(payload);
     } catch (err) {
