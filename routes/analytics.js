@@ -763,7 +763,10 @@ ${fullContext}`
         let bestTotal  = 0;
 
         for (const coll of g.collections) {
-          // Fetch last 20 entries for today (disk-first: save ALL scans, not just count)
+          // ✅ EFFICIENT: Fetch only 5 docs if we already have data, or 100 if we are catching up
+          const hasLocalData = lc.db.prepare("SELECT 1 FROM entries WHERE gym_id=? AND date=? LIMIT 1").get(gid, today);
+          const pollLimit = hasLocalData ? 5 : 100;
+
           const body = {
             structuredQuery: {
               from: [{ collectionId: coll }],
@@ -777,7 +780,7 @@ ${fullContext}`
                 }
               },
               orderBy: [{ field: { fieldPath: 'timestamp' }, direction: 'DESCENDING' }],
-              limit: 100,   // ✅ Increased to 100 to catch all of today's entries after restart
+              limit: pollLimit,
             }
           };
 
