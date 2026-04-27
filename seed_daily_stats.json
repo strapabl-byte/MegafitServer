@@ -50,19 +50,19 @@
   {
     "gym_id": "dokarat",
     "date": "2026-04-05",
-    "count": 80,
+    "count": 79,
     "raw_count": 155
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-06",
-    "count": 233,
+    "count": 232,
     "raw_count": 440
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-07",
-    "count": 234,
+    "count": 233,
     "raw_count": 736
   },
   {
@@ -128,62 +128,62 @@
   {
     "gym_id": "dokarat",
     "date": "2026-04-18",
-    "count": 222,
-    "raw_count": 328
+    "count": 110,
+    "raw_count": 150
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-19",
     "count": 89,
-    "raw_count": 127
+    "raw_count": 126
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-20",
-    "count": 296,
-    "raw_count": 436
+    "count": 294,
+    "raw_count": 434
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-21",
-    "count": 329,
-    "raw_count": 567
+    "count": 328,
+    "raw_count": 566
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-22",
-    "count": 254,
-    "raw_count": 438
+    "count": 253,
+    "raw_count": 435
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-23",
-    "count": 290,
-    "raw_count": 527
+    "count": 287,
+    "raw_count": 525
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-24",
-    "count": 238,
-    "raw_count": 333
+    "count": 237,
+    "raw_count": 332
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-25",
-    "count": 222,
-    "raw_count": 341
+    "count": 223,
+    "raw_count": 347
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-26",
-    "count": 80,
-    "raw_count": 132
+    "count": 78,
+    "raw_count": 128
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-27",
-    "count": 140,
-    "raw_count": 182
+    "count": 117,
+    "raw_count": 139
   },
   {
     "gym_id": "marjane",
@@ -338,7 +338,7 @@
   {
     "gym_id": "marjane",
     "date": "2026-04-27",
-    "count": 66,
-    "raw_count": 84
+    "count": 69,
+    "raw_count": 89
   }
 ]
