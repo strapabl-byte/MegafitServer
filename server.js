@@ -446,17 +446,19 @@ async function seedSQLiteHistoricalStats() {
         }
       }
       if (missingDates.length === 0) {
-        console.log(`  ⏭️  ${gymId}: all 30 days already on disk — skipping Firebase.`);
+        console.log(`  ⏭️  ${gymId}: all 30 days already on disk — skipping.`);
         continue;
       }
-      console.log(`  📡 ${gymId}: ${missingDates.length} missing days — fetching from Firebase...`);
-      const snaps = await db.getAll(...missingDates.map(d => db.collection('gym_daily_stats').doc(`${gymId}_${d}`)));
-      snaps.forEach((snap, i) => {
-        if (snap.exists) {
-          const d = snap.data();
-          lc.upsertDailyStat(gymId, missingDates[i], d.count || 0, d.rawCount || 0);
+      // 🔒 DISK-ONLY: Compute daily counts from the local entries table — zero Firebase reads
+      console.log(`  📊 ${gymId}: computing ${missingDates.length} missing days from local entries...`);
+      for (const d of missingDates) {
+        const row = lc.db.prepare(
+          `SELECT COUNT(*) as cnt, COUNT(DISTINCT name) as unique_cnt FROM entries WHERE gym_id=? AND date=?`
+        ).get(gymId, d);
+        if (row && row.cnt > 0) {
+          lc.upsertDailyStat(gymId, d, row.unique_cnt || row.cnt, row.cnt);
         }
-      });
+      }
     }
     console.log('  📊 Daily stats seeding checked.');
 
