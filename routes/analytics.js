@@ -763,9 +763,9 @@ ${fullContext}`
         let bestTotal  = 0;
 
         for (const coll of g.collections) {
-          // ✅ EFFICIENT: Fetch only 5 docs if we already have data, or 100 if we are catching up
+          // ✅ ABSOLUTE MINIMUM COST: Fetch only 1 doc if we already have data (1 read per poll)
           const hasLocalData = lc.db.prepare("SELECT 1 FROM entries WHERE gym_id=? AND date=? LIMIT 1").get(gid, today);
-          const pollLimit = hasLocalData ? 5 : 100;
+          const pollLimit = hasLocalData ? 1 : 100;
 
           const body = {
             structuredQuery: {
