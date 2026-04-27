@@ -401,6 +401,7 @@ app.use('/',                require('./routes/courses')(deps));     // /api/cour
 app.use('/',                require('./routes/inscriptions')(deps));// /public/* & /api/inscriptions
 app.use('/',                require('./routes/config')(deps));      // /public/pass, /api/chat, config
 app.use('/',                require('./routes/activity')(deps));    // /api/activity/logs
+app.use('/',                require('./routes/recruitment')(deps)); // /api/recruitment/applications
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Healthcheck
@@ -468,28 +469,33 @@ async function seedSQLiteHistoricalStats() {
       while (c <= now2) { totalSQLiteEntries += lc.getRegister(gid, toDS(c)).length; c.setDate(c.getDate()+1); }
     }
 
-    if (totalSQLiteEntries >= 5 && msSinceRegSync < REGISTER_SYNC_COOLDOWN_MS) {
-      // ✅ SQLite already has data AND we synced recently — skip Firestore entirely
-      console.log(`⏭️  Register sync skipped — SQLite has ${totalSQLiteEntries} entries, last sync ${Math.round(msSinceRegSync/60000)} min ago. Quota saved! ✅`);
+    if (totalSQLiteEntries >= 20 && msSinceRegSync < REGISTER_SYNC_COOLDOWN_MS) {
+      // ✅ SQLite already has substantial data AND we synced recently — skip Firestore
+      console.log(`⏭️  Register sync skipped — SQLite has ${totalSQLiteEntries} entries. Using persistent disk. ✅`);
     } else {
       // 🌐 SQLite is empty or stale — pull from Firestore
-      console.log(`📋 Register auto-sync: pulling current month for all gyms... (SQLite had ${totalSQLiteEntries} entries)`);
+      console.log(`📋 Register auto-sync: checking current month... (SQLite has ${totalSQLiteEntries} entries)`);
       for (const gid of GYMS) {
         try {
           const cursor = new Date(monthStart);
           let fetched = 0;
           while (cursor <= now2) {
             const dateStr = toDS(cursor);
-            const docRef = db.collection('megafit_daily_register').doc(`${gid}_${dateStr}`);
+            
+            // ✅ [OPTIMIZATION] Only fetch if SQLite has 0 entries for this specific day
+            // This prevents re-downloading thousands of records we already have on disk.
+            if (lc.getRegister(gid, dateStr).length > 0 && cursor.getTime() < now2.getTime() - (24*60*60*1000)) {
+               cursor.setDate(cursor.getDate() + 1);
+               continue; 
+            }
 
-            // Fetch entries
+            const docRef = db.collection('megafit_daily_register').doc(`${gid}_${dateStr}`);
             const snap = await docRef.collection('entries').get();
             if (!snap.empty) {
               lc.upsertRegister(gid, dateStr, snap.docs.map(d => ({ id: d.id, ...d.data(), date: dateStr, gymId: gid })));
               fetched += snap.size;
             }
 
-            // ✅ Also fetch décaissements so KPI can subtract them correctly
             const decSnap = await docRef.collection('decaissements').get();
             if (!decSnap.empty) {
               lc.upsertDecaissements(gid, dateStr, decSnap.docs.map(d => ({ id: d.id, ...d.data() })));
@@ -497,16 +503,7 @@ async function seedSQLiteHistoricalStats() {
 
             cursor.setDate(cursor.getDate() + 1);
           }
-          // Compute monthly revenue from updated cache (entries - decaissements)
-          let rev = 0;
-          const c2 = new Date(monthStart);
-          while (c2 <= now2) {
-            const ds2 = toDS(c2);
-            lc.getRegister(gid, ds2).forEach(e => { rev += (Number(e.tpe)||0)+(Number(e.espece)||0)+(Number(e.virement)||0)+(Number(e.cheque)||0); });
-            (lc.getDecaissements(gid, ds2)||[]).forEach(d => { rev -= Number(d.montant)||0; });
-            c2.setDate(c2.getDate()+1);
-          }
-          console.log(`  ✅ [${gid}] fetched ${fetched} entries | month (net): ${rev.toLocaleString()} DH`);
+          console.log(`  ✅ [${gid}] monthly sync: ${fetched} new/updated entries saved to disk.`);
         } catch (gErr) {
           if (gErr.code === 8) { setQuotaExceeded(); break; }
           console.warn(`  ⚠️ [${gid}] register sync failed:`, gErr.message);
@@ -527,92 +524,59 @@ app.listen(PORT, '0.0.0.0', () => {
   scheduleNightlySync(db, apiCache, isQuotaExceeded);
 
   // ── Server-side door entries poll (60s) ───────────────────────────────────────
-  // Replaces per-request Firestore calls. One poll = all clients served from SQLite.
   async function runDoorPoll() {
     if (isQuotaExceeded()) return;
     try { await analyticsRouter.pollDoorEntries(); }
     catch (e) { console.warn('[DOOR POLL] error:', e.message); }
   }
-  setTimeout(runDoorPoll, 5000);        // first poll 5s after startup (warm SQLite)
-  setInterval(runDoorPoll, 60 * 1000); // then every 60 seconds
+  setTimeout(runDoorPoll, 5000);
+  setInterval(runDoorPoll, 60 * 1000);
 
   // ── Gap fill: recover missing historical days on startup ──────────────────
-  // Runs once after startup. Checks last 30 days — if any day has 0 entries
-  // in SQLite, fetches from Firestore and saves to disk permanently.
-  // After this, the disk is the complete source of truth. 💾
   setTimeout(async () => {
     if (isQuotaExceeded()) return;
-    try { await analyticsRouter.gapFillDoorEntries(); }
+    // Only run gap fill if we haven't done it today (persisted in SQLite)
+    const lastGapFill = lc.getMeta('last_gap_fill');
+    const todayStr = new Date().toISOString().split('T')[0];
+    if (lastGapFill === todayStr) {
+      console.log('⏭️  Gap fill skipped — already performed today. Disk is warm. 💾');
+      return;
+    }
+    try { 
+      await analyticsRouter.gapFillDoorEntries(); 
+      lc.setMeta('last_gap_fill', todayStr);
+    }
     catch (e) { console.warn('[GAP FILL] startup error:', e.message); }
-  }, 15000); // 15s after startup (after first door poll completes)
+  }, 15000);
 
   // ── Background member sync (every 5 min) ─────────────────────────────────
-  // Firebase is used ONLY here (write path + this background pull).
-  // Dashboard always reads from SQLite → instant, zero Firebase reads per request.
-  const GYMS_ALL = ['dokarat', 'marjane', 'casa1', 'casa2'];
+  const GYMS_ALL = ['dokarat', 'marjane'];
   const GYM_LOCATION_MAP = {
     marjane: ['marjane', 'fes saiss', 'fes marjane'],
     dokarat: ['dokarat', 'dokkarat fes', 'dokkarat'],
-    casa1:   ['casa1', 'casa anfa'],
-    casa2:   ['casa2', 'lady anfa'],
   };
 
-  // Fetch all pages from Firestore for a given query builder (handles >500 docs)
-  async function fetchAllMembers(gymId) {
-    const locations = GYM_LOCATION_MAP[gymId] || [gymId];
-    const PAGE = 500;
-    let all = [], lastDoc = null;
-    while (true) {
-      let q = db.collection('members').where('location', 'in', locations).orderBy('__name__').limit(PAGE);
-      if (lastDoc) q = q.startAfter(lastDoc);
-      const snap = await q.get();
-      if (snap.empty) break;
-      all = all.concat(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-      lastDoc = snap.docs[snap.docs.length - 1];
-      if (snap.docs.length < PAGE) break;
-    }
-    return all;
-  }
-
-  // ── Active members sync: every 5 min (only non-archive, fast) ─────────────
   async function syncMembersBackground() {
     if (isQuotaExceeded()) return;
     try {
       for (const gymId of GYMS_ALL) {
         const locations = GYM_LOCATION_MAP[gymId] || [gymId];
-        const PAGE = 500;
-        let all = [], lastDoc = null;
+        
+        // ✅ [OPTIMIZATION] Only fetch the 10 most recent members.
+        // If the cache is already warm on the Render disk, we only need new additions.
+        const snap = await db.collection('members')
+          .where('location', 'in', locations)
+          .orderBy('createdAt', 'desc')
+          .limit(10)
+          .get();
 
-        // Paginate through ALL docs to find real members past the archive ones
-        while (true) {
-          let q = db.collection('members')
-            .where('location', 'in', locations)
-            .orderBy('__name__')
-            .limit(PAGE);
-          if (lastDoc) q = q.startAfter(lastDoc);
-          const snap = await q.get();
-          if (snap.empty) break;
-          all = all.concat(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-          lastDoc = snap.docs[snap.docs.length - 1];
-          if (snap.docs.length < PAGE) break;
-        }
+        if (snap.empty) continue;
 
-        // Keep only real members (no isArchive flag = real inscription-form member)
-        const members = all
-          .filter(m => !m.isArchive && !m.importedFromOdoo)
-          .sort((a, b) => {
-            const ta = a.createdAt?._seconds || a.createdAt?.seconds || 0;
-            const tb = b.createdAt?._seconds || b.createdAt?.seconds || 0;
-            return tb - ta;
-          });
-
-        if (members.length > 0) {
-          lc.upsertMembers(gymId, members);
-        }
+        const members = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        lc.upsertMembers(gymId, members);
         lc.setMeta(`member_sync_${gymId}`, String(Date.now()));
-        if (members.length > 0) {
-          console.log(`🔄 [MEMBER SYNC] ${gymId}: ${members.length} active members (from ${all.length} total) ✅`);
-        }
+        // Console log only if we actually found something new to avoid log spam
+        // console.log(`🔄 [MEMBER SYNC] ${gymId}: Check complete ✅`);
       }
     } catch (e) {
       console.warn('[MEMBER SYNC] error:', e.message);
@@ -628,17 +592,29 @@ app.listen(PORT, '0.0.0.0', () => {
     }
     try {
       // ── Try JSON seed file first (zero Firebase reads) ──────────────────
-      const seedPath = path.join(__dirname, 'seed_members_dokarat.json');
+      const seedPath = path.join(__dirname, 'seed_members_all.json');
       if (fs.existsSync(seedPath)) {
-        console.log(`📦 Loading archive members from seed file → SQLite (zero Firebase reads)...`);
-        const seedData = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
-        // Give each member a stable ID based on name+phone
-        const members = seedData.map((m, i) => ({
-          id: `odoo_${i}_${(m.phone || m.fullName || '').replace(/\W/g, '').slice(0, 10)}`,
-          ...m
-        }));
-        lc.upsertMembers('dokarat', members);
-        lc.setMeta('member_sync_dokarat', String(Date.now()));
+        console.log(`📦 Loading ALL members from seed file → SQLite (zero Firebase reads)...`);
+        const members = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
+        
+        // Group by gym to use lc.upsertMembers correctly
+        const byGym = {};
+        members.forEach(m => {
+          const g = m.location || m.gymId || 'dokarat';
+          let key = 'dokarat';
+          if (g.toLowerCase().includes('marjane') || g.toLowerCase().includes('saiss')) key = 'marjane';
+          if (g.toLowerCase().includes('casa1')) key = 'casa1';
+          if (g.toLowerCase().includes('casa2')) key = 'casa2';
+          
+          if (!byGym[key]) byGym[key] = [];
+          byGym[key].push(m);
+        });
+
+        for (const [gymId, gymMembers] of Object.entries(byGym)) {
+          lc.upsertMembers(gymId, gymMembers);
+          lc.setMeta(`member_sync_${gymId}`, String(Date.now()));
+        }
+
         lc.setMeta('archive_members_synced', new Date().toISOString());
         console.log(`📦 Archive seed complete: ${members.length} members in SQLite. Zero Firebase reads! ✅`);
         return;

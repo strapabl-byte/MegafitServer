@@ -13,11 +13,11 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     return d.toISOString().slice(0, 10);
   }
 
+  // Door-device gyms — only gyms with actual biometric terminals connected
+  // casa1/casa2 have no door device yet → excluded from door polling & gap fill
   const GYM_DOOR_MAP = {
-    dokarat: { collections: ['mega_fit_logs'],                       locationTags: ['dokkarat'] },
-    marjane: { collections: ['saiss entrees logs', 'mega_fit_logs'], locationTags: ['saiss', 'marjane'] },
-    casa1:   { collections: ['mega_fit_logs'],                       locationTags: ['casa anfa'] },
-    casa2:   { collections: ['mega_fit_logs'],                       locationTags: ['lady anfa'] },
+    dokarat: { collections: ['mega_fit_logs'],       locationTags: ['dokkarat'] },
+    marjane: { collections: ['saiss entrees logs'], locationTags: ['saiss', 'marjane'] },
   };
 
   const DOOR_URL = `https://firestore.googleapis.com/v1/projects/${process.env.DOOR_PROJECT_ID || 'megadoor-b3ccb'}/databases/(default)/documents:runQuery?key=${process.env.DOOR_FIREBASE_API_KEY || ''}`;
@@ -43,17 +43,37 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
       const today = getMoroccanDateStr();
       const targetGymIds = gymId === 'all' ? Object.keys(GYM_DOOR_MAP) : [gymId];
 
-      // Cross-reference: load members from SQLite
+      // Cross-reference: load members from SQLite — include zkteco_user_id for precise matching
       const placeholders = targetGymIds.map(() => '?').join(',');
       const memberRows = lc.db.prepare(
-        `SELECT full_name, expires_on FROM members_cache WHERE gym_id IN (${placeholders})`
+        `SELECT full_name, expires_on, zkteco_user_id FROM members_cache WHERE gym_id IN (${placeholders})`
       ).all(...targetGymIds);
 
       const normalize = s => (s || '').replace(/\s+/g, ' ').trim().toUpperCase();
-      const memberMap = new Map();
+
+      // Build two lookup maps:
+      // 1. By ZKTeco user_id (exact, most reliable — for Doukkarate new format)
+      const memberByUserId = new Map();
+      // 2. By normalized name (fuzzy fallback)
+      const memberByName = new Map();
+
       for (const m of memberRows) {
         const key = normalize(m.full_name);
-        if (key) memberMap.set(key, { expiresOn: m.expires_on });
+        const data = { fullName: m.full_name, expiresOn: m.expires_on };
+        
+        // Priority: always keep the profile with the LATEST expiration date
+        const existingByName = memberByName.get(key);
+        if (!existingByName || (m.expires_on && (!existingByName.expiresOn || m.expires_on > existingByName.expiresOn))) {
+          if (key) memberByName.set(key, data);
+        }
+
+        if (m.zkteco_user_id) {
+          const uid = String(m.zkteco_user_id);
+          const existingByUid = memberByUserId.get(uid);
+          if (!existingByUid || (m.expires_on && (!existingByUid.expiresOn || m.expires_on > existingByUid.expiresOn))) {
+            memberByUserId.set(uid, data);
+          }
+        }
       }
 
       const isSubActive = (expiresOn) => {
@@ -64,16 +84,31 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
       let merged = [];
       targetGymIds.forEach(gid => {
         lc.getEntries(gid, today, limitCount).forEach(e => {
-          const entryNorm = normalize(e.name);
-          let member = memberMap.get(entryNorm);
+          let member = null;
+          let matchMethod = 'none';
 
-          // Partial match: first word of entry = first word of member name
-          if (!member && entryNorm.length > 3) {
-            const entryFirst = entryNorm.split(' ')[0];
-            for (const [mName, mData] of memberMap.entries()) {
-              if (mName.includes(entryNorm) || (entryFirst.length > 3 && mName.startsWith(entryFirst))) {
-                member = mData;
-                break;
+          // ── 1. Exact match by ZKTeco user_id (most reliable, Doukkarate new format) ──
+          if (e.user_id) {
+            member = memberByUserId.get(String(e.user_id)) || null;
+            if (member) matchMethod = 'user_id';
+          }
+
+          // ── 2. Fallback: exact name match ─────────────────────────────────────────
+          if (!member) {
+            // Use the clean display name (already stripped of [ID] prefix by pollDoorEntries)
+            const entryNorm = normalize(e.name);
+            member = memberByName.get(entryNorm) || null;
+            if (member) matchMethod = 'name_exact';
+
+            // ── 3. Partial name match (legacy names, single-word entries) ───────────
+            if (!member && entryNorm.length > 3) {
+              const entryFirst = entryNorm.split(' ')[0];
+              for (const [mName, mData] of memberByName.entries()) {
+                if (mName.includes(entryNorm) || (entryFirst.length > 3 && mName.startsWith(entryFirst))) {
+                  member = mData;
+                  matchMethod = 'name_partial';
+                  break;
+                }
               }
             }
           }
@@ -84,17 +119,20 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
             : 'unknown';
 
           merged.push({
-            docId: e.id,
-            name: e.name,
-            gymId: gid,
-            displayTime: (e.timestamp || '').slice(11, 16),
-            timestamp: e.timestamp,
-            status: e.status,
-            method: e.method,
-            isFace: e.is_face === 1,
+            docId:        e.id,
+            name:         e.name,
+            userId:       e.user_id || null,      // ZKTeco machine ID
+            gymId:        gid,
+            displayTime:  (e.timestamp || '').slice(11, 16),
+            timestamp:    e.timestamp,
+            status:       e.status,
+            method:       e.method,
+            isFace:       e.is_face === 1,
             isKnown,
             memberStatus,
-            expiresOn: member ? member.expiresOn : null,
+            matchMethod,  // how the cross-ref was resolved (user_id / name_exact / name_partial / none)
+            expiresOn:    member ? member.expiresOn : null,
+            userTodayCount: lc.db.prepare('SELECT COUNT(*) as count FROM entries WHERE gym_id=? AND name=? AND date=?').get(gid, e.name, today)?.count || 1
           });
         });
       });
@@ -107,6 +145,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     }
   });
 
+
   // GET /api/live-count
   router.get('/api/live-count', verifyAzureToken, async (req, res) => {
     try {
@@ -115,12 +154,16 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
       const today = getMoroccanDateStr();
       const cacheKey = `live_count_${gymId}`;
       const result = await getCachedOrFetch(apiCache.general, cacheKey, 30000, async () => {
-        const gymIds = gymId === 'all' ? ['marjane', 'dokarat', 'casa1', 'casa2'] : [gymId];
+        const gymIds = gymId === 'all' ? ['marjane', 'dokarat'] : [gymId];
         let totalCount = 0, totalRaw = 0;
         for (const gid of gymIds) {
           const cached = lc.getDailyStat(gid, today);
-          if (cached && cached.count > 0) { totalCount += cached.count; totalRaw += cached.raw_count; }
-          else { totalCount += lc.getUniqueEntryCount(gid, today); totalRaw += lc.getEntryCount(gid, today); }
+          const liveUnique = lc.getUniqueEntryCount(gid, today);
+          const liveRaw    = lc.getEntryCount(gid, today);
+
+          // Use whichever is higher (protects against machine resets or stale cache)
+          totalCount += Math.max(liveUnique, cached?.count || 0);
+          totalRaw    += Math.max(liveRaw,    cached?.raw_count || 0);
         }
         return { count: totalCount, rawCount: totalRaw, date: today, source: 'aggregation' };
       });
@@ -136,7 +179,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     try {
       const { gymId } = req.params;
       const includeToday = req.query.includeToday === 'true';
-      const gymIds = gymId === 'all' ? ['marjane', 'dokarat', 'casa1', 'casa2'] : gymId.split(',');
+      const gymIds = gymId === 'all' ? ['marjane', 'dokarat'] : gymId.split(',');
       const today = getMoroccanDateStr();
 
       // Build date range:
@@ -222,7 +265,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
         return count;
       };
 
-      const gymIds = gymId === 'all' ? ['dokarat', 'marjane', 'casa1', 'casa2'] : gymId.split(',');
+      const gymIds = gymId === 'all' ? ['dokarat', 'marjane'] : gymId.split(',');
       const toLocalDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 
       // ?????? Revenue from SQLite register cache ??? sum ALL payment columns ??????
@@ -421,7 +464,7 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
 
     try {
       // ?????? Gym name mapping ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
-      const GYM_NAMES = { all: 'ALL EMPIRE (Dokarat + Marjane + Casa Anfa + Lady Anfa)', dokarat: 'Dokarat (F??s)', marjane: 'Marjane Saiss (F??s)', casa1: 'Casa Anfa (Casablanca)', casa2: 'Lady Anfa (Casablanca)' };
+      const GYM_NAMES = { all: 'ALL EMPIRE (Dokarat + Marjane)', dokarat: 'Dokarat (Fès)', marjane: 'Marjane Saiss (Fès)' };
       const sectorName = GYM_NAMES[sector] || sector || 'ALL EMPIRE';
 
       // ?????? KPI context ???????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
@@ -752,6 +795,17 @@ ${fullContext}`
   });
 
 
+
+  // ZKTeco name parser: "[1234] John Doe" -> { userId, cleanName }
+  function parseZKTecoName(rawName) {
+    if (!rawName) return { userId: null, cleanName: "" };
+    const match = rawName.match(/^\[(\d+)\]\s*(.+)$/);
+    if (match) return { userId: match[1], cleanName: match[2].trim() };
+    const newIdMatch = rawName.match(/^New ID:(\d+)$/);
+    if (newIdMatch) return { userId: newIdMatch[1], cleanName: "Inconnu #" + newIdMatch[1] };
+    return { userId: null, cleanName: rawName };
+  }
+
   // ── pollDoorEntries — server-side background task, called every 60s ──────────
   // ✅ EFFICIENT: Only reads the LAST 1 document per gym collection.
   // The device embeds daily_unique + daily_total in every scan, so the
@@ -781,7 +835,7 @@ ${fullContext}`
                 }
               },
               orderBy: [{ field: { fieldPath: 'timestamp' }, direction: 'DESCENDING' }],
-              limit: 20,   // ✅ Save all recent entries to disk (not just 1)
+              limit: 100,   // ✅ Increased to 100 to catch all of today's entries after restart
             }
           };
 
@@ -814,15 +868,26 @@ ${fullContext}`
             const ts = f.timestamp?.stringValue || '';
             if (ts.startsWith(today)) {
               const entryId = doc.name?.split('/').pop() || ts;
+
+              // ── Parse ZKTeco name format: "[1234] John Doe" or legacy plain name ──
+              const rawName = f.name?.stringValue || '';
+              const { userId, cleanName } = parseZKTecoName(rawName);
+
+              // ── Also read user_id field if device sends it separately ──
+              const deviceUserId = f.user_id?.stringValue
+                || (f.user_id?.integerValue != null ? String(f.user_id.integerValue) : null)
+                || userId; // fall back to ID extracted from name
+
               lc.upsertEntries(gid, [{
                 id:        entryId,
                 gym_id:    gid,
                 date:      today,
                 timestamp: ts,
-                name:      f.name?.stringValue   || '',
+                name:      cleanName,   // clean name without [ID] prefix
                 method:    f.method?.stringValue || '',
                 status:    f.status?.stringValue || 'Entrée',
                 is_face:   (f.method?.stringValue || '').toLowerCase().includes('face') ? 1 : 0,
+                user_id:   deviceUserId || null,
               }]);
             }
           }

@@ -30,6 +30,7 @@ db.exec(`
     method      TEXT,
     status      TEXT,
     is_face     INTEGER DEFAULT 0,
+    user_id     TEXT,            -- ZKTeco machine user ID (new format: [1234] John Doe)
     PRIMARY KEY (id, gym_id)
   );
   CREATE INDEX IF NOT EXISTS idx_entries_gym_date ON entries(gym_id, date);
@@ -63,7 +64,11 @@ db.exec(`
     created_at  TEXT,
     total_paid  REAL DEFAULT 0,
     last_payment_date TEXT,
+    email       TEXT,
+    adresse     TEXT,
+    ville       TEXT,
     is_archive  INTEGER DEFAULT 0,
+    bonus_3months INTEGER DEFAULT 0,
     PRIMARY KEY (id, gym_id)
   );
   CREATE INDEX IF NOT EXISTS idx_members_gym ON members_cache(gym_id);
@@ -165,6 +170,20 @@ db.exec(`
     updated_at  TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_kids_gym ON kids_courses(gym_id);
+
+  CREATE TABLE IF NOT EXISTS recruitment_applications (
+    id          TEXT PRIMARY KEY,
+    fullName    TEXT,
+    email       TEXT,
+    phone       TEXT,
+    position    TEXT,
+    motivation  TEXT,
+    cvLink      TEXT,
+    status      TEXT DEFAULT 'new',
+    createdAt   TEXT,
+    synced_at   TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_recruitment_date ON recruitment_applications(createdAt);
 `);
 
 // ── Migrations ──────────────────────────────────────────────────────────────
@@ -215,9 +234,20 @@ function buildInClause(gymIds, prefix = 'gym_id') {
 
 // ── ENTRIES ─────────────────────────────────────────────────────────────────
 
+// Safe migration: add user_id column if it doesn't exist yet (idempotent)
+try { db.exec('ALTER TABLE entries ADD COLUMN user_id TEXT'); } catch(_) {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_entries_user_id ON entries(user_id)'); } catch(_) {}
+
+// Safe migration: add zkteco_user_id to members_cache (used to cross-ref door entries by ID)
+try { db.exec('ALTER TABLE members_cache ADD COLUMN zkteco_user_id TEXT'); } catch(_) {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_members_zkteco_id ON members_cache(zkteco_user_id)'); } catch(_) {}
+
+// Safe migration: add bonus_3months to members_cache
+try { db.exec('ALTER TABLE members_cache ADD COLUMN bonus_3months INTEGER DEFAULT 0'); } catch(_) {}
+
 const insertEntry = db.prepare(`
-  INSERT OR REPLACE INTO entries (id, gym_id, date, timestamp, name, method, status, is_face)
-  VALUES (@id, @gym_id, @date, @timestamp, @name, @method, @status, @is_face)
+  INSERT OR REPLACE INTO entries (id, gym_id, date, timestamp, name, method, status, is_face, user_id)
+  VALUES (@id, @gym_id, @date, @timestamp, @name, @method, @status, @is_face, @user_id)
 `);
 
 function upsertEntries(gymId, entriesArr) {
@@ -233,6 +263,7 @@ function upsertEntries(gymId, entriesArr) {
     method:    e.method || '',
     status:    e.status || '',
     is_face:   e.isFace ? 1 : 0,
+    user_id:   e.user_id || null,
   })));
 }
 
@@ -306,9 +337,9 @@ function getDailyStat(gymId, date) {
 
 const insertMember = db.prepare(`
   INSERT OR REPLACE INTO members_cache
-    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date, is_archive)
+    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date, email, adresse, ville, is_archive, bonus_3months)
   VALUES
-    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date, @is_archive)
+    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date, @email, @adresse, @ville, @is_archive, @bonus_3months)
 `);
 
 function upsertMembers(gymId, membersArr) {
@@ -343,7 +374,11 @@ function upsertMembers(gymId, membersArr) {
                        (m.createdAt?.toISOString ? m.createdAt.toISOString() : null)),
     total_paid:        Number(m.totalPaid || m.total_paid) || 0,
     last_payment_date: m.lastPaymentDate || m.last_payment_date || null,
+    email:             m.email || '',
+    adresse:           m.adresse || '',
+    ville:             m.ville || '',
     is_archive:        (m.isArchive || m.is_archive || m.importedFromOdoo) ? 1 : 0,
+    bonus_3months:     m.bonus3Months ? 1 : 0,
   })));
 }
 
@@ -632,6 +667,48 @@ function deleteKidsCourse(id) {
   db.prepare(`DELETE FROM kids_courses WHERE id = ?`).run(id);
 }
 
+// ── RECRUITMENT ───────────────────────────────────────────────────────────────
+
+const insertRecruitment = db.prepare(`
+  INSERT OR REPLACE INTO recruitment_applications
+    (id, fullName, email, phone, position, motivation, cvLink, status, createdAt, synced_at)
+  VALUES
+    (@id, @fullName, @email, @phone, @position, @motivation, @cvLink, @status, @createdAt, @synced_at)
+`);
+
+function upsertRecruitmentApplications(apps) {
+  const now = new Date().toISOString();
+  const upsert = db.transaction((rows) => {
+    for (const a of rows) {
+      insertRecruitment.run({
+        id:         a.id,
+        fullName:   a.fullName || '',
+        email:      a.email || '',
+        phone:      a.phone || '',
+        position:   a.position || '',
+        motivation: a.motivation || '',
+        cvLink:     a.cvLink || '',
+        status:     a.status || 'new',
+        createdAt:  a.createdAt || now,
+        synced_at:  now
+      });
+    }
+  });
+  upsert(apps);
+}
+
+function getRecruitmentApplications() {
+  return db.prepare(`SELECT * FROM recruitment_applications ORDER BY createdAt DESC`).all();
+}
+
+function getLastRecruitmentSync() {
+  return getMeta('last_recruitment_sync');
+}
+
+function setLastRecruitmentSync(ts) {
+  setMeta('last_recruitment_sync', ts || new Date().toISOString());
+}
+
 // ── STATS ─────────────────────────────────────────────────────────────────────
 
 function getCacheStats() {
@@ -640,6 +717,7 @@ function getCacheStats() {
     members:  db.prepare('SELECT COUNT(*) as n FROM members_cache').get().n,
     payments: db.prepare('SELECT COUNT(*) as n FROM payments_cache').get().n,
     stats:    db.prepare('SELECT COUNT(*) as n FROM daily_stats').get().n,
+    recruitment: db.prepare('SELECT COUNT(*) as n FROM recruitment_applications').get().n,
   };
 }
 
@@ -666,6 +744,8 @@ module.exports = {
   upsertIncidents, getIncidents, resolveIncidentCache,
   // kids courses
   upsertKidsCourse, getKidsCourses, updateKidsCourse, deleteKidsCourse,
+  // recruitment
+  upsertRecruitmentApplications, getRecruitmentApplications, getLastRecruitmentSync, setLastRecruitmentSync,
   // info
   getCacheStats,
 };

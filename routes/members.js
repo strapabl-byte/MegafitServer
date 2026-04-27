@@ -59,11 +59,23 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       // ── Cache TTL: use SQLite if recently synced (< 5 min), otherwise re-fetch from Firestore ──
       const lastMemberSync = lc.getMeta(`member_sync_${gymId}`);
       const msSinceSync = lastMemberSync ? Date.now() - parseInt(lastMemberSync) : Infinity;
-      const MEMBER_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+      const MEMBER_CACHE_TTL = 60 * 60 * 1000; // 1 Hour
 
-      if (finalMembers && finalMembers.length >= 1 && msSinceSync < MEMBER_CACHE_TTL && !searchQuery) {
+      // ✅ [SQLITE FIRST] Always try SQLite first
+      if (finalMembers && finalMembers.length >= 1 && msSinceSync < MEMBER_CACHE_TTL) {
         console.log(`⚡ [SQLITE HIT] ${finalMembers.length} members for ${gymId} (includes PDF contracts)`);
-        // Always normalize SQLite snake_case → camelCase so the dashboard renders correctly
+        
+        // Local filtering if search query is present
+        if (searchQuery) {
+          const q = searchQuery.toLowerCase();
+          finalMembers = finalMembers.filter(m =>
+            (m.fullName || m.full_name || '').toLowerCase().includes(q) ||
+            (m.phone || '').includes(q) ||
+            (m.cin || '').toLowerCase().includes(q)
+          );
+        }
+
+        // Always normalize SQLite snake_case → camelCase
         finalMembers = finalMembers.map(m => ({
           ...m,
           fullName:  m.fullName  || m.full_name  || 'Inconnu',
@@ -77,6 +89,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           lastPaymentDate: m.lastPaymentDate || m.last_payment_date || null,
           isArchive: m.isArchive || !!m.is_archive || false
         }));
+
         if (!req.isAdmin) {
           finalMembers = finalMembers.map(m => ({
             id: m.id, fullName: m.fullName,
@@ -94,6 +107,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
 
       if (isQuotaExceeded()) return res.json(finalMembers);
 
+      // ── Fallback to Firestore only if SQLite has NOTHING or is very stale ──
       if (searchQuery && finalMembers.length === 0) {
         const searchSnap = await db.collection('members')
           .where('fullName', '>=', searchQuery)
@@ -101,7 +115,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           .limit(10).get();
         const found = searchSnap.docs.map(d => ({ id: d.id, ...d.data() }));
         if (found.length > 0) { lc.upsertMembers(gymId, found); finalMembers = found; }
-      } else if (!searchQuery && finalMembers.length < 50) {
+      } else if (!searchQuery && (finalMembers.length < 50 || msSinceSync >= MEMBER_CACHE_TTL)) {
         const lookupMap = {
           marjane: ['marjane', 'fes saiss', 'fes marjane'],
           dokarat: ['dokarat', 'dokkarat fes', 'dokkarat'],
@@ -111,17 +125,11 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         let q = db.collection('members');
         if (gymId !== 'all') q = q.where('location', 'in', lookupMap[gymId] || [gymId]);
         const snap = await q.limit(500).get();
-        const members = snap.docs
-          .map(d => ({ id: d.id, ...d.data() }))
-          .sort((a, b) => {
-            const ta = a.createdAt?._seconds || a.createdAt?.seconds || 0;
-            const tb = b.createdAt?._seconds || b.createdAt?.seconds || 0;
-            return tb - ta;
-          });
+        const members = snap.docs.map(d => ({ id: d.id, ...d.data() }));
         lc.upsertMembers(gymId, members);
         lc.setMeta(`member_sync_${gymId}`, String(Date.now()));
         finalMembers = members;
-        console.log(`✅ [FIRESTORE] Fetched ${members.length} members for ${gymId} → cached`);
+        console.log(`✅ [FIRESTORE REFRESH] Fetched ${members.length} members for ${gymId}`);
       }
 
       if (!req.isAdmin) {

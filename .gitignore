@@ -3,6 +3,8 @@ node_modules/
 *.db
 *.db-*
 serviceAccount.json
+serviceAccount_recrute.json
+*.json.bak
 verified_april_stats.json
 .DS_Store
 dist/

@@ -138,12 +138,12 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
 
       const searchTerm = `%${q}%`;
       const rows = lc.db.prepare(`
-        SELECT id, full_name, phone, cin, birthday, gym_id, photo
+        SELECT id, full_name, phone, cin, birthday, gym_id, photo, expires_on, bonus_3months, 
+               email, adresse, ville
         FROM members_cache
         WHERE (LOWER(full_name) LIKE ? OR LOWER(cin) LIKE ? OR phone LIKE ?)
           AND (status IS NULL OR status = ''
                OR (LOWER(status) NOT LIKE '%delet%'
-               AND LOWER(status) NOT LIKE '%inactiv%'
                AND LOWER(status) NOT LIKE '%supprim%'))
         LIMIT 5
       `).all(searchTerm, searchTerm, searchTerm);
@@ -158,6 +158,11 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         birthday: m.birthday || '',
         gymId:   m.gym_id  || '',
         photo:   m.photo   || '',
+        expiresOn: m.expires_on || null,
+        bonus3Months: m.bonus_3months === 1,
+        email:   m.email   || '',
+        adresse: m.adresse || '',
+        ville:   m.ville   || '',
       })));
     } catch (err) {
       console.error('Public Member Search Error:', err);
@@ -203,6 +208,8 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         ville:    d.ville    || '',
         gymId:    d.gymId    || '',
         photo:    d.photo    || '',
+        expiresOn: d.expiresOn || null,
+        bonus3Months: d.bonus3Months || false,
       });
     } catch (err) {
       console.error('Member detail error:', err);
