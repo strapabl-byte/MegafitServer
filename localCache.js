@@ -283,7 +283,8 @@ function upsertEntries(gymId, entriesArr) {
   })));
 }
 
-function getEntries(gymId, date, limit = 50) {
+function getEntries(gymId, options = {}) {
+  const { date, startDate, endDate, name, limit = 50 } = options;
   const g = buildInClause(getGymIds(gymId));
   let sql = `SELECT * FROM entries WHERE ${g.sql}`;
   let params = [...g.params];
@@ -291,6 +292,20 @@ function getEntries(gymId, date, limit = 50) {
   if (date) {
     sql += ` AND date=?`;
     params.push(date);
+  } else {
+    if (startDate) {
+      sql += ` AND date>=?`;
+      params.push(startDate);
+    }
+    if (endDate) {
+      sql += ` AND date<=?`;
+      params.push(endDate);
+    }
+  }
+
+  if (name && name.trim() !== '') {
+    sql += ` AND name LIKE ?`;
+    params.push(`%${name.trim()}%`);
   }
 
   sql += ` ORDER BY timestamp DESC LIMIT ?`;

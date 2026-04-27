@@ -57,15 +57,24 @@ module.exports = function (deps) {
     }
   });
 
-  // GET /api/door/history/:gymId/:date
-  router.get('/api/door/history/:gymId/:date', verifyAzureToken, async (req, res) => {
+  // GET /api/door/history/:gymId
+  router.get('/api/door/history/:gymId', verifyAzureToken, async (req, res) => {
     try {
-      const { gymId, date } = req.params;
+      const { gymId } = req.params;
+      const { date, startDate, endDate, name, limit } = req.query;
       const { lc } = deps;
       if (!lc) return res.status(500).json({ error: 'Local cache not initialized' });
 
       // Fetch entries directly from SQLite (Zero Firebase reads)
-      const entries = lc.getEntries(gymId, date, 1000); 
+      const options = {
+        date,
+        startDate,
+        endDate,
+        name,
+        limit: limit ? parseInt(limit, 10) : 1000
+      };
+      
+      const entries = lc.getEntries(gymId, options); 
       res.json(entries);
     } catch (err) {
       console.error('Door History Fetch Error:', err);
