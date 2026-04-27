@@ -253,7 +253,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
   router.put('/:id', verifyAzureToken, async (req, res) => {
     try {
       const ref = db.collection('members').doc(req.params.id);
-      const allowed = ['fullName', 'phone', 'plan', 'birthday', 'expiresOn', 'photo', 'status', 'email', 'location'];
+      const allowed = ['fullName', 'phone', 'plan', 'birthday', 'expiresOn', 'photo', 'status', 'email', 'location', 'bonus3Months'];
       const update  = Object.fromEntries(allowed.filter(k => req.body[k] !== undefined).map(k => [k, req.body[k]]));
       update.updatedAt = admin.firestore.FieldValue.serverTimestamp();
       await ref.update(update);
