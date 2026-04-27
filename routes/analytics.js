@@ -765,7 +765,8 @@ ${fullContext}`
         for (const coll of g.collections) {
           // ✅ INCREMENTAL SYNC: Only fetch entries newer than what we already have
           const lastEntry = lc.db.prepare("SELECT timestamp FROM entries WHERE gym_id=? AND date=? ORDER BY timestamp DESC LIMIT 1").get(gid, today);
-          const lastTs = lastEntry ? lastEntry.timestamp : today;
+          // Normalize timestamp: remove 'T' and 'Z' so it matches the space-format in Firestore
+          const lastTs = lastEntry ? lastEntry.timestamp.replace('T', ' ').replace('Z', '') : today;
 
           const body = {
             structuredQuery: {
