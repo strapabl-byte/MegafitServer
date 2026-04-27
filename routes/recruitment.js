@@ -11,10 +11,18 @@ let recruteApp;
 let dbRecrute;
 
 try {
-  const serviceAccountPath = path.join(__dirname, '..', 'serviceAccount_recrute.json');
-  if (fs.existsSync(serviceAccountPath)) {
-    const serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
-    
+  let serviceAccount;
+  const localPath = path.join(__dirname, '..', 'serviceAccount_recrute.json');
+
+  if (process.env.RECRUITE_SERVICE_ACCOUNT) {
+    serviceAccount = JSON.parse(process.env.RECRUITE_SERVICE_ACCOUNT);
+    console.log('🚀 Recruitment Admin initialized from environment variable.');
+  } else if (fs.existsSync(localPath)) {
+    serviceAccount = JSON.parse(fs.readFileSync(localPath, 'utf8'));
+    console.log('🚀 Recruitment Admin initialized from local file.');
+  }
+
+  if (serviceAccount) {
     // Check if app already exists to avoid "app already exists" error on hot-reload
     if (admin.apps.some(app => app.name === 'recrute')) {
       recruteApp = admin.app('recrute');
@@ -23,11 +31,7 @@ try {
         credential: admin.credential.cert(serviceAccount)
       }, 'recrute');
     }
-
-    // 🔥 CORRECT WAY for Named Databases in Admin SDK:
-    // We target the 'default' database ID as seen in the user's config
     dbRecrute = getFirestore(recruteApp, 'default');
-    console.log('🚀 Recruitment Admin initialized with database: default');
   } else {
     console.warn('⚠️ Recruitment service account not found. Sync disabled.');
   }
