@@ -626,6 +626,38 @@ app.listen(PORT, '0.0.0.0', () => {
     if (isQuotaExceeded()) return;
     await seedSQLiteHistoricalStats();
 
+    // --- ONE-TIME RENDER DISK UPDATE FROM LOG FILES ---
+    if (!lc.getMeta('dokarat_hard_reset_2026_04_27')) {
+      console.log("🛠️  PERFORMING ONE-TIME HARD RESET FOR DOKKARATE FROM LOG FILES...");
+      try {
+        lc.db.transaction(() => {
+          lc.db.prepare("DELETE FROM entries WHERE gym_id = 'dokarat' AND date <= '2026-04-27'").run();
+          const fs = require('fs');
+          const path = require('path');
+          
+          const entriesPath = path.join(__dirname, 'seed_entries.json');
+          if (fs.existsSync(entriesPath)) {
+            const insertStmt = lc.db.prepare("INSERT INTO entries (id, gym_id, date, timestamp, name, method, status, is_face) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+            const entriesData = JSON.parse(fs.readFileSync(entriesPath, 'utf8'));
+            entriesData.forEach(e => insertStmt.run(e.id, e.gym_id, e.date, e.timestamp, e.name, e.method, e.status, e.is_face));
+            console.log(`📦 Injected ${entriesData.length} raw entries into disk.`);
+          }
+          
+          const statsPath = path.join(__dirname, 'seed_daily_stats.json');
+          if (fs.existsSync(statsPath)) {
+            const statsData = JSON.parse(fs.readFileSync(statsPath, 'utf8'));
+            statsData.forEach(row => lc.upsertDailyStat(row.gym_id, row.date, row.count, row.raw_count || 0));
+            console.log(`📦 Injected ${statsData.length} daily_stats rows into disk.`);
+          }
+        })();
+        lc.setMeta('dokarat_hard_reset_2026_04_27', 'done');
+        console.log("✅ ONE-TIME HARD RESET COMPLETE!");
+      } catch (err) {
+        console.error("❌ Failed one-time hard reset:", err);
+      }
+    }
+    // --------------------------------------------------
+
     // Smart guard: run repair only if SQLite is missing data (< 20 days with real data)
     const existingStats = lc.getDailyStats('dokarat', 30).filter(s => s.count > 0);
     const hasFullData = existingStats.length >= 20;
