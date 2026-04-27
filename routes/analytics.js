@@ -840,10 +840,16 @@ ${fullContext}`
         }
 
         if (bestUnique > 0) {
+          // ✅ RESILIENT: If device reset its counter (bestUnique < localCount), use local database count instead
+          const localStats = lc.db.prepare("SELECT COUNT(DISTINCT name) as count, COUNT(*) as total FROM entries WHERE gym_id=? AND date=?").get(gid, today);
+          const finalUnique = Math.max(bestUnique, localStats.count || 0);
+          const finalTotal  = Math.max(bestTotal,  localStats.total || 0);
+
+          lc.upsertDailyStat(gid, today, finalUnique, finalTotal);
+          
           const prev = lc.getDailyStat(gid, today)?.count || 0;
-          lc.upsertDailyStat(gid, today, bestUnique, bestTotal);
-          if (bestUnique !== prev) {
-            console.log(`[DOOR POLL] ${gid}: ${bestUnique} unique / ${bestTotal} total today`);
+          if (finalUnique !== prev) {
+            console.log(`[DOOR POLL] ${gid}: ${finalUnique} unique / ${finalTotal} total today (Device: ${bestUnique}, Local: ${localStats.count})`);
           }
         }
 
