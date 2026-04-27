@@ -129,61 +129,61 @@
     "gym_id": "dokarat",
     "date": "2026-04-18",
     "count": 222,
-    "raw_count": 329
+    "raw_count": 328
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-19",
     "count": 89,
-    "raw_count": 252
+    "raw_count": 127
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-20",
     "count": 296,
-    "raw_count": 867
+    "raw_count": 436
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-21",
     "count": 329,
-    "raw_count": 1128
+    "raw_count": 567
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-22",
     "count": 254,
-    "raw_count": 869
+    "raw_count": 438
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-23",
     "count": 290,
-    "raw_count": 1052
+    "raw_count": 527
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-24",
     "count": 238,
-    "raw_count": 664
+    "raw_count": 333
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-25",
-    "count": 223,
-    "raw_count": 576
+    "count": 222,
+    "raw_count": 341
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-26",
     "count": 80,
-    "raw_count": 254
+    "raw_count": 132
   },
   {
     "gym_id": "dokarat",
     "date": "2026-04-27",
-    "count": 118,
-    "raw_count": 232
+    "count": 140,
+    "raw_count": 182
   },
   {
     "gym_id": "marjane",
@@ -338,7 +338,7 @@
   {
     "gym_id": "marjane",
     "date": "2026-04-27",
-    "count": 49,
-    "raw_count": 59
+    "count": 66,
+    "raw_count": 84
   }
 ]
