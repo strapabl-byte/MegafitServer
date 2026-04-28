@@ -63,21 +63,22 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
   const GYM_LABEL_MAP = { 'FES DOUKKARATE': 'dokarat', 'FES MARJANE': 'marjane', 'CASA 1': 'casa1', 'CASA 2': 'casa2' };
   const GYM_DISPLAY = { dokarat: 'Fès Doukkarate', marjane: 'Fès Saiss', casa1: 'Casa 1', casa2: 'Casa 2' };
 
-  /** Call Groq with top candidates, return best pick */
-  async function groqIdentify(rawName, userId, candidates) {
+  /** Call Groq with top candidates + gym context, return best pick */
+  async function groqIdentify(rawName, userId, candidates, extraContext = '') {
     try {
       const GROQ_KEY = process.env.GROQ_API_KEY || process.env.GROQ_API_KEY_FALLBACK;
       if (!GROQ_KEY) return null;
       const candidateList = candidates.map((c, i) =>
         `${i+1}. ${c.full_name} | ${GYM_DISPLAY[c.gym_id]||c.gym_id} | ${c.status} | expire: ${c.expires_on||'?'} | score: ${c.score}%`
       ).join('\n');
-      const prompt = `You are a gym reception AI. A door scanner registered the name "${rawName}"${userId ? ` (user_id: ${userId})` : ''}.
+      const prompt = `You are a gym reception AI. A door scanner registered the name "${rawName}"${userId ? ` (user_id: ${userId})` : ''}.${extraContext}
 Top fuzzy matches from member database:
 ${candidateList}
 
 Rules:
-- If one match is clearly correct (same name, maybe typo/missing space/reversed order) pick it.
-- If multiple matches look equally likely, pick the one at the correct gym.
+- If one match is clearly correct (same name, typo/missing space/reversed order) pick it.
+- A member can be registered at MULTIPLE gyms (multi-inscrit). If so, prefer the match at the scanning gym.
+- If multiple matches look equally likely, pick the one at the scanning gym.
 - If score < 50 and no match is convincing, pick UNKNOWN.
 Reply ONLY with valid JSON (no markdown):
 {"pick": <1-based index or 0 for UNKNOWN>, "confidence": <0-100>, "comment": "<short French comment, max 12 words>"}`;
@@ -97,58 +98,109 @@ Reply ONLY with valid JSON (no markdown):
     }
   }
 
-  /** Main identification function — returns cached or computed smart identity */
+  /** Main identification function — gym-specific cache + multi-gym detection */
   async function identifyEntry(entry, gymId, runGroq = true) {
-    const today = getMoroccanDateStr();
-    const cacheKey = entry.user_id ? `uid_${entry.user_id}` : `name_${normId(entry.name)}`;
+    // Cache key is GYM-SPECIFIC so a member at marjane+dokarat gets the right status at each gym
+    const cacheKey = entry.user_id
+      ? `uid_${entry.user_id}_at_${gymId}`
+      : `name_${normId(entry.name)}_at_${gymId}`;
 
-    // 1. Check SQLite identity cache
+    // 1. Check SQLite identity cache (gym-specific)
     const cached = lc.db.prepare('SELECT * FROM smart_identity_cache WHERE entry_key=?').get(cacheKey);
     if (cached) return cached;
 
-    // 2. Run fuzzy match
-    const top5 = fuzzyMatchMembers(entry.name, 5);
-    const best = top5[0];
+    // 2. Fetch top 10 matches across ALL gyms
+    const top10 = fuzzyMatchMembers(entry.name, 10);
+    const best   = top10[0];
+
+    // 3. Split matches by gym membership
+    const atCurrentGym  = top10.filter(m => m.gym_id === gymId);
+    const atOtherGyms   = top10.filter(m => m.gym_id !== gymId);
+    const bestAtCurrent = atCurrentGym[0]  || null;  // best match AT the scanning gym
+    const bestAtOther   = atOtherGyms[0]   || null;  // best match at any OTHER gym
+
+    // Detect multi-inscrit: same person found at current gym AND at least one other gym
+    const isMultiGym = bestAtCurrent && bestAtOther &&
+      (normId(bestAtCurrent.full_name) === normId(bestAtOther.full_name) ||
+       fuzzyScore(bestAtCurrent.full_name, bestAtOther.full_name) >= 85);
+
     let matched = null, status = 'unknown', confidence = 0, comment = '', groqUsed = 0;
 
-    if (best && best.score >= 90) {
-      // High confidence exact/near-exact match
-      matched = best;
-      confidence = best.score;
-      status = best.gym_id === gymId ? (best.status === 'Active' ? 'confirmed' : 'expired') : 'wrong_gym';
-      comment = status === 'wrong_gym'
-        ? `Inscrit à ${GYM_DISPLAY[best.gym_id]||best.gym_id}`
-        : status === 'expired'
-        ? `Abonnement expiré le ${best.expires_on || '?'}`
-        : `${best.full_name}`;
-    } else if (best && best.score >= 60 && runGroq) {
-      // Ambiguous — ask Groq
-      const groqResult = await groqIdentify(entry.name, entry.user_id, top5.filter(c => c.score >= 45));
+    // ── Case A: Strong match at current gym ─────────────────────────────────
+    if (bestAtCurrent && bestAtCurrent.score >= 85) {
+      matched    = bestAtCurrent;
+      confidence = bestAtCurrent.score;
+      if (bestAtCurrent.status !== 'Active') {
+        status  = 'expired';
+        comment = `Abonnement expiré le ${bestAtCurrent.expires_on || '?'}`;
+      } else if (isMultiGym) {
+        status  = 'confirmed';
+        const otherGyms = [...new Set(atOtherGyms.filter(m => m.score >= 70).map(m => GYM_DISPLAY[m.gym_id] || m.gym_id))].join(' + ');
+        comment = `Multi-inscrit${otherGyms ? ` · aussi à ${otherGyms}` : ''}`;
+      } else {
+        status  = 'confirmed';
+        comment = bestAtCurrent.full_name;
+      }
+
+    // ── Case B: Strong match ONLY at other gym(s) — no good current-gym match ─
+    } else if (bestAtOther && bestAtOther.score >= 85 && (!bestAtCurrent || bestAtCurrent.score < 70)) {
+      matched    = bestAtOther;
+      confidence = bestAtOther.score;
+      status     = 'wrong_gym';
+      const allRegisteredGyms = [...new Set(top10.filter(m => m.score >= 70).map(m => GYM_DISPLAY[m.gym_id] || m.gym_id))].join(', ');
+      comment = `Inscrit à ${allRegisteredGyms} — pas ici`;
+
+    // ── Case C: Ambiguous (score 55-84) — ask Groq ──────────────────────────
+    } else if (best && best.score >= 55 && runGroq) {
+      const candidates = top10.filter(c => c.score >= 45);
+      const atCurrentStr = atCurrentGym.length > 0
+        ? `\nMember HAS a match at the scanning gym (${GYM_DISPLAY[gymId]||gymId}).`
+        : `\nMember has NO match at the scanning gym (${GYM_DISPLAY[gymId]||gymId}) — could be wrong_gym or multi-inscrit.`;
+
+      const groqResult = await groqIdentify(
+        entry.name, entry.user_id,
+        candidates,
+        atCurrentStr // extra context passed as extra param
+      );
       groqUsed = 1;
+
       if (groqResult && groqResult.pick > 0) {
-        matched = top5[groqResult.pick - 1];
+        matched    = top10[groqResult.pick - 1];
         confidence = groqResult.confidence;
-        comment = groqResult.comment;
+        comment    = groqResult.comment;
         if (matched) {
-          status = matched.gym_id === gymId ? (matched.status === 'Active' ? 'probable' : 'expired') : 'wrong_gym';
-          if (!comment) comment = status === 'wrong_gym'
-            ? `Inscrit à ${GYM_DISPLAY[matched.gym_id]||matched.gym_id}`
-            : status === 'expired' ? `Abonnement expiré le ${matched.expires_on || '?'}` : '';
+          if (matched.status !== 'Active') {
+            status = 'expired';
+          } else if (matched.gym_id === gymId) {
+            status = 'probable';
+          } else {
+            // Check if there's ALSO a match at current gym → multi-inscrit
+            const currentGymMatch = atCurrentGym.find(m => m.score >= 55);
+            status = currentGymMatch ? 'probable' : 'wrong_gym';
+            if (!comment) comment = status === 'wrong_gym'
+              ? `Inscrit à ${GYM_DISPLAY[matched.gym_id]||matched.gym_id}`
+              : `Probablement multi-inscrit`;
+          }
         } else { status = 'unknown'; confidence = 0; }
       } else {
-        status = 'unknown'; confidence = groqResult?.confidence || 0;
+        status  = 'unknown';
+        confidence = groqResult?.confidence || 0;
         comment = groqResult?.comment || '? Inconnu — non trouvé dans la base';
       }
-    } else if (best && best.score >= 60) {
-      // Moderate match, no Groq yet (async path — will be filled on next call)
-      matched = best; confidence = best.score; status = 'probable';
-      comment = `Probablement ${best.full_name}`;
+
+    // ── Case D: Weak match (<55) — mark as pending, Groq will refine ────────
+    } else if (best && best.score >= 55) {
+      matched    = best; confidence = best.score;
+      status     = best.gym_id === gymId ? 'probable' : 'wrong_gym';
+      comment    = best.gym_id === gymId
+        ? `Probablement ${best.full_name}`
+        : `Inscrit à ${GYM_DISPLAY[best.gym_id]||best.gym_id}`;
     } else {
-      status = 'unknown'; confidence = best?.score || 0;
+      status  = 'unknown'; confidence = best?.score || 0;
       comment = '? Inconnu — non trouvé dans la base';
     }
 
-    // 3. Save to SQLite identity cache (permanent on Render disk)
+    // 4. Persist to SQLite identity cache (permanent on Render disk, gym-specific)
     const now = new Date().toISOString();
     lc.db.prepare(`
       INSERT OR REPLACE INTO smart_identity_cache
@@ -271,7 +323,9 @@ Reply ONLY with valid JSON (no markdown):
             : 'unknown';
 
           // ── Attach smart ID (SQLite cache: 0ms if known, Groq async if new) ──
-          const cacheKey = e.user_id ? `uid_${e.user_id}` : `name_${normId(e.name)}`;
+          const cacheKey = e.user_id
+            ? `uid_${e.user_id}_at_${gid}`
+            : `name_${normId(e.name)}_at_${gid}`;
           const cachedId = lc.db.prepare('SELECT * FROM smart_identity_cache WHERE entry_key=?').get(cacheKey);
           const visits   = getVisitStats(e, gid);
 
