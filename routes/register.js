@@ -201,6 +201,79 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
     }
   });
 
+  // ── GET /api/register/decaissements-history ───────────────────────────────
+  // Returns full history of décaissements (sortie d'espèces) with gym & date range filter.
+  // SQLite-first, Firestore fallback, writes through to SQLite on miss.
+  router.get('/decaissements-history', verifyAzureToken, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    try {
+      const { gymId = 'dokarat', startDate, endDate } = req.query;
+      if (!startDate || !endDate) return res.status(400).json({ error: 'startDate and endDate required (YYYY-MM-DD)' });
+
+      const gymIds = gymId === 'all' ? ['dokarat', 'marjane', 'casa1', 'casa2'] : [gymId];
+
+      // 1️⃣ SQLite primary: fetch all decaissements in date range
+      const placeholders = gymIds.map(() => '?').join(',');
+      const rows = lc.db.prepare(`
+        SELECT * FROM decaissements_cache
+        WHERE gym_id IN (${placeholders})
+          AND date >= ? AND date <= ?
+        ORDER BY date DESC, created_at DESC
+      `).all(...gymIds, startDate, endDate);
+
+      // 2️⃣ If SQLite is empty for this range, try Firestore fallback (quota-safe)
+      if (rows.length === 0 && !isQuotaExceeded()) {
+        try {
+          const start = new Date(startDate);
+          const end   = new Date(endDate);
+          for (const gid of gymIds) {
+            const cursor = new Date(start);
+            while (cursor <= end) {
+              const dateStr = cursor.toISOString().slice(0, 10);
+              cursor.setDate(cursor.getDate() + 1);
+              const snap = await db.collection('megafit_daily_register')
+                .doc(`${gid}_${dateStr}`)
+                .collection('decaissements')
+                .orderBy('createdAt', 'asc')
+                .get();
+              if (!snap.empty) {
+                const fetched = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                lc.upsertDecaissements(gid, dateStr, fetched);
+                fetched.forEach(d => rows.push({ ...d, gym_id: gid, date: dateStr }));
+              }
+            }
+          }
+        } catch (fsErr) {
+          console.warn('⚠️ [DECAISSEMENTS HISTORY] Firestore fallback failed:', fsErr.message);
+        }
+      }
+
+      // 3️⃣ Enrich & compute totals
+      const entries = rows.map(r => ({
+        id:          r.id,
+        gymId:       r.gym_id,
+        date:        r.date,
+        montant:     Number(r.montant) || 0,
+        raison:      r.raison || '',
+        commercial:  r.commercial || '',
+        signature:   r.signature || '',
+        status:      r.status || 'approved',
+        requestedBy: r.requested_by || '',
+        approvedBy:  r.approved_by || '',
+        createdAt:   r.created_at || '',
+      }));
+
+      const total = entries.reduce((sum, e) => sum + e.montant, 0);
+      const byGym = {};
+      entries.forEach(e => { byGym[e.gymId] = (byGym[e.gymId] || 0) + e.montant; });
+
+      res.json({ ok: true, gymId, startDate, endDate, entries, total, byGym, count: entries.length });
+    } catch (err) {
+      console.error('GET /api/register/decaissements-history error:', err);
+      res.status(500).json({ error: 'Failed to fetch history', entries: [] });
+    }
+  });
+
   // ── GET /api/register/search?gymId=dokarat&name=Boulaghnoud ─────────────
   // Returns all register entries matching a member name across all dates.
   // Used by the "Pay Rest" modal to show full payment history.
