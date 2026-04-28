@@ -96,19 +96,30 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
   });
 
   // ── PUT /api/register/entry/:id ───────────────────────────────────────────
-  // User requested bypassing Azure verification for now to allow editing quickly
   router.put('/entry/:id', verifyAzureToken, async (req, res) => {
     try {
       const { date, gymId = 'dokarat', ...entry } = req.body;
       if (!date) return res.status(400).json({ error: 'date required' });
-      
-      const docRef = db.collection('megafit_daily_register').doc(`${gymId}_${date}`).collection('entries').doc(req.params.id);
-      await docRef.update({ ...entry, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-      
-      const updatedDoc = await docRef.get();
-      // ✅ Update the local SQLite cache so the data doesn't revert to old values on page refresh
-      lc.upsertRegister(gymId, date, [{ id: req.params.id, ...updatedDoc.data() }]);
-      
+
+      const entryId = req.params.id;
+
+      // ✅ Always update SQLite first (works for both Firestore and manually-seeded entries)
+      lc.upsertRegister(gymId, date, [{ id: entryId, ...entry, created_at: entry.createdAt || new Date().toISOString() }]);
+
+      // ✅ Then try to sync to Firestore (best effort — won't crash if doc doesn't exist)
+      try {
+        const docRef = db.collection('megafit_daily_register').doc(`${gymId}_${date}`).collection('entries').doc(entryId);
+        const snap = await docRef.get();
+        if (snap.exists) {
+          await docRef.update({ ...entry, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+        } else {
+          // Document doesn't exist in Firestore (manually seeded) — create it
+          await docRef.set({ ...entry, gymId, date, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        }
+      } catch (fsErr) {
+        console.warn(`⚠️ [REGISTER PUT] Firestore sync failed for ${entryId} — SQLite updated successfully:`, fsErr.message);
+      }
+
       invalidateCache(apiCache.calendar, `${gymId}_${new Date(date).getFullYear()}`);
       res.json({ ok: true });
     } catch (err) {
