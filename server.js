@@ -726,6 +726,33 @@ app.listen(PORT, '0.0.0.0', () => {
     }
   }, 3000);
 
+  // ── ONE-TIME: Load Odoo members into SQLite for smart AI identification ────
+  setTimeout(() => {
+    try {
+      const count = lc.db.prepare('SELECT COUNT(*) as c FROM odoo_members_cache').get().c;
+      if (count > 0) {
+        console.log(`⚡ [SMART-ID] Odoo members already loaded: ${count} rows in SQLite.`);
+        return;
+      }
+      const slimPath = path.join(__dirname, 'data', 'odoo_members_slim.json');
+      if (!fs.existsSync(slimPath)) {
+        console.warn('⚠️  [SMART-ID] odoo_members_slim.json not found — smart identification will be limited.');
+        return;
+      }
+      const members = JSON.parse(fs.readFileSync(slimPath, 'utf8'));
+      const normName = s => (s || '').replace(/\s+/g, ' ').trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const insert = lc.db.prepare(`
+        INSERT OR IGNORE INTO odoo_members_cache (full_name, first_name, last_name, gym_id, status, expires_on, name_norm)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      const tx = lc.db.transaction((rows) => { for (const m of rows) insert.run(m.fullName, m.firstName, m.lastName, m.gymId, m.status, m.expiresOn, normName(m.fullName)); });
+      tx(members);
+      console.log(`✅ [SMART-ID] Loaded ${members.length} Odoo members into SQLite for smart identification.`);
+    } catch (err) {
+      console.error('❌ [SMART-ID] Failed to load Odoo members:', err.message);
+    }
+  }, 5000);
+
   setInterval(async () => {
     if (lc.getDailyStats('dokarat', 30).length < 7 || lc.getDailyStats('marjane', 30).length < 7) {
       await seedSQLiteHistoricalStats();

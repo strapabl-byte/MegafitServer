@@ -22,6 +22,155 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
 
   const DOOR_URL = `https://firestore.googleapis.com/v1/projects/${process.env.DOOR_PROJECT_ID || 'megadoor-b3ccb'}/databases/(default)/documents:runQuery?key=${process.env.DOOR_FIREBASE_API_KEY || ''}`;
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // 🤖 SMART MEMBER IDENTIFICATION — Levenshtein + Groq, SQLite-cached
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** Normalize a name for fuzzy comparison */
+  const normId = s => (s || '').replace(/\s+/g, ' ').trim().toUpperCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+  /** Levenshtein distance (O(n*m) — fast enough for 10k members) */
+  function levenshtein(a, b) {
+    const m = a.length, n = b.length;
+    const dp = Array.from({ length: m + 1 }, (_, i) => Array.from({ length: n + 1 }, (_, j) => i === 0 ? j : j === 0 ? i : 0));
+    for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++)
+      dp[i][j] = a[i-1] === b[j-1] ? dp[i-1][j-1] : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+    return dp[m][n];
+  }
+
+  /** Score 0-100 — higher is better match */
+  function fuzzyScore(query, candidate) {
+    if (!query || !candidate) return 0;
+    const q = normId(query), c = normId(candidate);
+    if (q === c) return 100;
+    // Token-set ratio: compare sorted word tokens
+    const qTokens = q.split(' ').sort().join(' ');
+    const cTokens = c.split(' ').sort().join(' ');
+    const maxLen = Math.max(qTokens.length, cTokens.length);
+    const dist = levenshtein(qTokens, cTokens);
+    return Math.round((1 - dist / maxLen) * 100);
+  }
+
+  /** Get top N fuzzy matches from odoo_members_cache */
+  function fuzzyMatchMembers(rawName, topN = 5) {
+    const allMembers = lc.db.prepare('SELECT * FROM odoo_members_cache').all();
+    const scored = allMembers.map(m => ({ ...m, score: fuzzyScore(rawName, m.name_norm) }));
+    return scored.sort((a, b) => b.score - a.score).slice(0, topN);
+  }
+
+  /** Convert gym label to gym_id */
+  const GYM_LABEL_MAP = { 'FES DOUKKARATE': 'dokarat', 'FES MARJANE': 'marjane', 'CASA 1': 'casa1', 'CASA 2': 'casa2' };
+  const GYM_DISPLAY = { dokarat: 'Fès Doukkarate', marjane: 'Fès Saiss', casa1: 'Casa 1', casa2: 'Casa 2' };
+
+  /** Call Groq with top candidates, return best pick */
+  async function groqIdentify(rawName, userId, candidates) {
+    try {
+      const GROQ_KEY = process.env.GROQ_API_KEY || process.env.GROQ_API_KEY_FALLBACK;
+      if (!GROQ_KEY) return null;
+      const candidateList = candidates.map((c, i) =>
+        `${i+1}. ${c.full_name} | ${GYM_DISPLAY[c.gym_id]||c.gym_id} | ${c.status} | expire: ${c.expires_on||'?'} | score: ${c.score}%`
+      ).join('\n');
+      const prompt = `You are a gym reception AI. A door scanner registered the name "${rawName}"${userId ? ` (user_id: ${userId})` : ''}.
+Top fuzzy matches from member database:
+${candidateList}
+
+Rules:
+- If one match is clearly correct (same name, maybe typo/missing space/reversed order) pick it.
+- If multiple matches look equally likely, pick the one at the correct gym.
+- If score < 50 and no match is convincing, pick UNKNOWN.
+Reply ONLY with valid JSON (no markdown):
+{"pick": <1-based index or 0 for UNKNOWN>, "confidence": <0-100>, "comment": "<short French comment, max 12 words>"}`;
+
+      const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'llama3-8b-8192', messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 120 }),
+      });
+      const data = await r.json();
+      const text = data.choices?.[0]?.message?.content?.trim() || '';
+      const json = JSON.parse(text.replace(/```json|```/g, '').trim());
+      return { pick: json.pick || 0, confidence: json.confidence || 0, comment: json.comment || '' };
+    } catch (err) {
+      console.warn('[SMART-ID] Groq error:', err.message);
+      return null;
+    }
+  }
+
+  /** Main identification function — returns cached or computed smart identity */
+  async function identifyEntry(entry, gymId, runGroq = true) {
+    const today = getMoroccanDateStr();
+    const cacheKey = entry.user_id ? `uid_${entry.user_id}` : `name_${normId(entry.name)}`;
+
+    // 1. Check SQLite identity cache
+    const cached = lc.db.prepare('SELECT * FROM smart_identity_cache WHERE entry_key=?').get(cacheKey);
+    if (cached) return cached;
+
+    // 2. Run fuzzy match
+    const top5 = fuzzyMatchMembers(entry.name, 5);
+    const best = top5[0];
+    let matched = null, status = 'unknown', confidence = 0, comment = '', groqUsed = 0;
+
+    if (best && best.score >= 90) {
+      // High confidence exact/near-exact match
+      matched = best;
+      confidence = best.score;
+      status = best.gym_id === gymId ? (best.status === 'Active' ? 'confirmed' : 'expired') : 'wrong_gym';
+      comment = status === 'wrong_gym'
+        ? `Inscrit à ${GYM_DISPLAY[best.gym_id]||best.gym_id}`
+        : status === 'expired'
+        ? `Abonnement expiré le ${best.expires_on || '?'}`
+        : `${best.full_name}`;
+    } else if (best && best.score >= 60 && runGroq) {
+      // Ambiguous — ask Groq
+      const groqResult = await groqIdentify(entry.name, entry.user_id, top5.filter(c => c.score >= 45));
+      groqUsed = 1;
+      if (groqResult && groqResult.pick > 0) {
+        matched = top5[groqResult.pick - 1];
+        confidence = groqResult.confidence;
+        comment = groqResult.comment;
+        if (matched) {
+          status = matched.gym_id === gymId ? (matched.status === 'Active' ? 'probable' : 'expired') : 'wrong_gym';
+          if (!comment) comment = status === 'wrong_gym'
+            ? `Inscrit à ${GYM_DISPLAY[matched.gym_id]||matched.gym_id}`
+            : status === 'expired' ? `Abonnement expiré le ${matched.expires_on || '?'}` : '';
+        } else { status = 'unknown'; confidence = 0; }
+      } else {
+        status = 'unknown'; confidence = groqResult?.confidence || 0;
+        comment = groqResult?.comment || '? Inconnu — non trouvé dans la base';
+      }
+    } else if (best && best.score >= 60) {
+      // Moderate match, no Groq yet (async path — will be filled on next call)
+      matched = best; confidence = best.score; status = 'probable';
+      comment = `Probablement ${best.full_name}`;
+    } else {
+      status = 'unknown'; confidence = best?.score || 0;
+      comment = '? Inconnu — non trouvé dans la base';
+    }
+
+    // 3. Save to SQLite identity cache (permanent on Render disk)
+    const now = new Date().toISOString();
+    lc.db.prepare(`
+      INSERT OR REPLACE INTO smart_identity_cache
+        (entry_key, gym_id, matched_name, matched_gym, id_status, confidence, comment, groq_used, cached_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(cacheKey, gymId, matched?.full_name || null, matched?.gym_id || null, status, confidence, comment, groqUsed, now);
+
+    return { entry_key: cacheKey, gym_id: gymId, matched_name: matched?.full_name || null, matched_gym: matched?.gym_id || null, id_status: status, confidence, comment, groq_used: groqUsed };
+  }
+
+  /** Count visits today and this week for an entry */
+  function getVisitStats(entry, gymId) {
+    const today = getMoroccanDateStr();
+    const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+    const byId  = entry.user_id ? lc.db.prepare('SELECT COUNT(*) as c FROM entries WHERE gym_id=? AND user_id=? AND date=?').get(gymId, entry.user_id, today)?.c || 0 : 0;
+    const byName = lc.db.prepare('SELECT COUNT(*) as c FROM entries WHERE gym_id=? AND name=? AND date=?').get(gymId, entry.name, today)?.c || 0;
+    const week  = entry.user_id
+      ? lc.db.prepare('SELECT COUNT(*) as c FROM entries WHERE gym_id=? AND user_id=? AND date>=?').get(gymId, entry.user_id, weekAgo)?.c || 0
+      : lc.db.prepare('SELECT COUNT(*) as c FROM entries WHERE gym_id=? AND name=? AND date>=?').get(gymId, entry.name, weekAgo)?.c || 0;
+    return { today: Math.max(byId, byName), week };
+  }
+
   // ?????? GET /api/analytics/megaeye-registrations ??????????????????????????????????????????????????????????????????????????????????????????
   router.get('/api/analytics/megaeye-registrations', verifyAzureToken, async (req, res) => {
     try {
@@ -121,22 +270,41 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
             ? (isSubActive(member.expiresOn) ? 'active' : 'expired')
             : 'unknown';
 
+          // ── Attach smart ID (SQLite cache: 0ms if known, Groq async if new) ──
+          const cacheKey = e.user_id ? `uid_${e.user_id}` : `name_${normId(e.name)}`;
+          const cachedId = lc.db.prepare('SELECT * FROM smart_identity_cache WHERE entry_key=?').get(cacheKey);
+          const visits   = getVisitStats(e, gid);
+
           merged.push({
-            docId:        e.id,
-            name:         e.name,
-            userId:       e.user_id || null,      // ZKTeco machine ID
-            gymId:        gid,
-            displayTime:  (e.timestamp || '').slice(11, 16),
-            timestamp:    e.timestamp,
-            status:       e.status,
-            method:       e.method,
-            isFace:       e.is_face === 1,
+            docId:          e.id,
+            name:           e.name,
+            userId:         e.user_id || null,
+            gymId:          gid,
+            displayTime:    (e.timestamp || '').slice(11, 16),
+            timestamp:      e.timestamp,
+            status:         e.status,
+            method:         e.method,
+            isFace:         e.is_face === 1,
             isKnown,
             memberStatus,
-            matchMethod,  // how the cross-ref was resolved (user_id / name_exact / name_partial / none)
-            expiresOn:    member ? member.expiresOn : null,
-            userTodayCount: lc.db.prepare('SELECT COUNT(*) as count FROM entries WHERE gym_id=? AND name=? AND date=?').get(gid, e.name, today)?.count || 1
+            matchMethod,
+            expiresOn:      member ? member.expiresOn : null,
+            userTodayCount: visits.today,
+            userWeekCount:  visits.week,
+            smartId: cachedId ? {
+              status:      cachedId.id_status,
+              matchedName: cachedId.matched_name,
+              matchedGym:  cachedId.matched_gym,
+              confidence:  cachedId.confidence,
+              comment:     cachedId.comment,
+              groqUsed:    !!cachedId.groq_used,
+            } : null,
           });
+
+          // 🔁 Fire Groq async for new unknowns — no await, instant response
+          if (!cachedId && !isKnown) {
+            identifyEntry(e, gid, true).catch(() => {});
+          }
         });
       });
 

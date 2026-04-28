@@ -141,6 +141,33 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_decaissements_gym_date ON decaissements_cache(gym_id, date);
 
+  -- ─── ODOO Members Reference (loaded from slim JSON on startup) ───────────
+  CREATE TABLE IF NOT EXISTS odoo_members_cache (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    full_name   TEXT NOT NULL,
+    first_name  TEXT,
+    last_name   TEXT,
+    gym_id      TEXT NOT NULL,
+    status      TEXT DEFAULT 'Active',
+    expires_on  TEXT,
+    name_norm   TEXT  -- pre-normalized for fast fuzzy matching
+  );
+  CREATE INDEX IF NOT EXISTS idx_odoo_members_norm  ON odoo_members_cache(name_norm);
+  CREATE INDEX IF NOT EXISTS idx_odoo_members_gym   ON odoo_members_cache(gym_id);
+
+  -- ─── Smart Identity Cache (Groq + fuzzy results, persist on Render disk) ─
+  CREATE TABLE IF NOT EXISTS smart_identity_cache (
+    entry_key     TEXT PRIMARY KEY,   -- user_id (preferred) or normalized name
+    gym_id        TEXT,
+    matched_name  TEXT,
+    matched_gym   TEXT,
+    id_status     TEXT DEFAULT 'unknown', -- confirmed|probable|wrong_gym|expired|unknown|pending
+    confidence    INTEGER DEFAULT 0,
+    comment       TEXT,
+    groq_used     INTEGER DEFAULT 0,
+    cached_at     TEXT
+  );
+
   CREATE TABLE IF NOT EXISTS pending_cache (
     id TEXT PRIMARY KEY,
     gym_id TEXT,
