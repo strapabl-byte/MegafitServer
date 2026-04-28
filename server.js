@@ -672,6 +672,29 @@ app.listen(PORT, '0.0.0.0', () => {
     }
     // --------------------------------------------------
 
+    // --- ONE-TIME MARJANE REGISTER SEED (Apr 25-27 2026) ---
+    if (!lc.getMeta('marjane_register_seed_2026_04_27')) {
+      try {
+        const regPath = path.join(__dirname, 'seed_register_marjane_apr2026.json');
+        if (fs.existsSync(regPath)) {
+          const regData = JSON.parse(fs.readFileSync(regPath, 'utf8'));
+          const stmt = lc.db.prepare(`
+            INSERT OR IGNORE INTO register_cache
+              (id, gym_id, date, nom, contrat, commercial, cin, tel, tpe, espece, virement, cheque, prix, reste, abonnement, note_reste, created_at, synced_at)
+            VALUES
+              (@id, @gym_id, @date, @nom, @contrat, @commercial, @cin, @tel, @tpe, @espece, @virement, @cheque, @prix, @reste, @abonnement, @note_reste, @created_at, @synced_at)
+          `);
+          const now = new Date().toISOString();
+          lc.db.transaction((rows) => { rows.forEach(r => stmt.run({ ...r, synced_at: now })); })(regData);
+          console.log(`📦 Injected ${regData.length} Marjane register entries (Apr 25-27).`);
+        }
+        lc.setMeta('marjane_register_seed_2026_04_27', 'done');
+      } catch (err) {
+        console.error('❌ Failed marjane register seed:', err);
+      }
+    }
+    // --------------------------------------------------
+
     // Smart guard: run repair only if SQLite is missing data (< 20 days with real data)
     const existingStats = lc.getDailyStats('dokarat', 30).filter(s => s.count > 0);
     const hasFullData = existingStats.length >= 20;
