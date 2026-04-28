@@ -263,8 +263,8 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
         createdAt:   r.created_at || '',
       }));
 
-      // Only sum approved + pending — NEVER rejected
-      const countable = entries.filter(e => e.status !== 'rejected');
+      // Only sum APPROVED — pending and rejected are NOT counted
+      const countable = entries.filter(e => e.status === 'approved');
       const total = countable.reduce((sum, e) => sum + e.montant, 0);
       const byGym = {};
       countable.forEach(e => { byGym[e.gymId] = (byGym[e.gymId] || 0) + e.montant; });
