@@ -248,7 +248,7 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
         }
       }
 
-      // 3️⃣ Enrich & compute totals
+      // 3️⃣ Enrich & compute totals (rejected entries shown in table but NOT counted)
       const entries = rows.map(r => ({
         id:          r.id,
         gymId:       r.gym_id,
@@ -263,9 +263,11 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
         createdAt:   r.created_at || '',
       }));
 
-      const total = entries.reduce((sum, e) => sum + e.montant, 0);
+      // Only sum approved + pending — NEVER rejected
+      const countable = entries.filter(e => e.status !== 'rejected');
+      const total = countable.reduce((sum, e) => sum + e.montant, 0);
       const byGym = {};
-      entries.forEach(e => { byGym[e.gymId] = (byGym[e.gymId] || 0) + e.montant; });
+      countable.forEach(e => { byGym[e.gymId] = (byGym[e.gymId] || 0) + e.montant; });
 
       res.json({ ok: true, gymId, startDate, endDate, entries, total, byGym, count: entries.length });
     } catch (err) {
