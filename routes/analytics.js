@@ -49,13 +49,55 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     const cTokens = c.split(' ').sort().join(' ');
     const maxLen = Math.max(qTokens.length, cTokens.length);
     const dist = levenshtein(qTokens, cTokens);
-    return Math.round((1 - dist / maxLen) * 100);
+    const tokenScore = Math.round((1 - dist / maxLen) * 100);
+
+    // 🇲🇦 MOROCCAN NAME BONUS: also compare with all spaces stripped.
+    // Handles cases where the door device omits the space (e.g. "rajaebouzoubaa" vs "RAJAE BOUZOUBAA")
+    const qNoSpace = q.replace(/\s+/g, '');
+    const cNoSpace = c.replace(/\s+/g, '');
+    const maxLenNS  = Math.max(qNoSpace.length, cNoSpace.length);
+    const distNS    = levenshtein(qNoSpace, cNoSpace);
+    const noSpaceScore = maxLenNS > 0 ? Math.round((1 - distNS / maxLenNS) * 100) : 0;
+
+    return Math.max(tokenScore, noSpaceScore);
+  }
+
+  /**
+   * 🇲🇦 Moroccan name splitter — tries every possible split of a no-space query
+   * e.g. "rajaebouzoubaa" → attempts "r|ajaebouzoubaa", "ra|jaebouzoubaa" ...
+   * and scores each <left> <right> combination against the full member name.
+   * Returns the best split score for a given candidate full_name.
+   */
+  function splitNameScore(rawQuery, candidateNormName) {
+    const q = normId(rawQuery).replace(/\s+/g, '');
+    const c = normId(candidateNormName).replace(/\s+/g, '');
+    if (q.length < 3 || q.includes(' ')) return 0; // already has spaces or too short
+    let best = 0;
+    // Try every split point (minimum 2 chars on each side)
+    for (let i = 2; i < q.length - 1; i++) {
+      const left  = q.slice(0, i);
+      const right = q.slice(i);
+      // Score the reconstructed "FIRST LAST" against the candidate's no-space name
+      const reconstructed = left + ' ' + right;
+      const sc = fuzzyScore(reconstructed, candidateNormName);
+      if (sc > best) best = sc;
+    }
+    return best;
   }
 
   /** Get top N fuzzy matches from odoo_members_cache */
   function fuzzyMatchMembers(rawName, topN = 5) {
     const allMembers = lc.db.prepare('SELECT * FROM odoo_members_cache').all();
-    const scored = allMembers.map(m => ({ ...m, score: fuzzyScore(rawName, m.name_norm) }));
+    const hasSpaces = rawName.trim().includes(' ');
+    const scored = allMembers.map(m => {
+      let score = fuzzyScore(rawName, m.name_norm);
+      // If the query has no spaces, also try the Moroccan split heuristic
+      if (!hasSpaces && rawName.length > 5) {
+        const splitSc = splitNameScore(rawName, m.name_norm);
+        if (splitSc > score) score = splitSc;
+      }
+      return { ...m, score };
+    });
     return scored.sort((a, b) => b.score - a.score).slice(0, topN);
   }
 
@@ -115,15 +157,23 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
       const candidateList = candidates.map((c, i) =>
         `${i+1}. ${c.full_name} | ${GYM_DISPLAY[c.gym_id]||c.gym_id} | ${c.status} | expire: ${c.expires_on||'?'} | score: ${c.score}%`
       ).join('\n');
-      const prompt = `You are a gym reception AI. A door scanner registered the name "${rawName}"${userId ? ` (user_id: ${userId})` : ''}.${extraContext}
+      const prompt = `You are a gym reception AI identifying Moroccan gym members from door scanner entries.
+IMPORTANT CONTEXT:
+- Moroccan names follow the format: FIRSTNAME FAMILYNAME
+- The door scanner sometimes sends names WITHOUT a space between first name and family name (e.g. "rajaebouzoubaa" is actually "RAJAE BOUZOUBAA")
+- RAJAE, FATIMA, KHADIJA, ZINEB, SARA, LAYLA, HAJAR, SOUKAINA, NADIA, IMANE, HANAE, SANAE, YOUNES, YOUSSEF, HAMZA, AMINE, MEHDI, KARIM, FOUAD, RACHID, ANASS, HASSAN, OMAR are common Moroccan first names
+- Always check if the raw name, when split intelligently, matches the candidate's first+last name
+- Gender matters: RAJAE, FATIMA, ZINEB, SARA, KHADIJA are female names — do NOT match them to male candidates
+
+A door scanner registered the name "${rawName}"${userId ? ` (user_id: ${userId})` : ''}.${extraContext}
 Top fuzzy matches from member database:
 ${candidateList}
 
 Rules:
-- If one match is clearly correct (same name, typo/missing space/reversed order) pick it.
-- A member can be registered at MULTIPLE gyms (multi-inscrit). If so, prefer the match at the scanning gym.
-- If multiple matches look equally likely, pick the one at the scanning gym.
-- If score < 50 and no match is convincing, pick UNKNOWN.
+- If one match is clearly correct (same name with typo/missing space/reversed order/unicode artifacts) pick it.
+- Prefer matching at the scanning gym if the person is registered there.
+- If score < 50 and no match is convincing, pick UNKNOWN (pick: 0).
+- If the query looks like a concatenated Moroccan name, try to split it and match first+last name.
 Reply ONLY with valid JSON (no markdown):
 {"pick": <1-based index or 0 for UNKNOWN>, "confidence": <0-100>, "comment": "<short French comment, max 12 words>"}`;
 
