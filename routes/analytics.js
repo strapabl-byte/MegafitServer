@@ -171,11 +171,7 @@ Reply ONLY with valid JSON (no markdown):
       ? `uid_${entry.user_id}_at_${gymId}`
       : `name_${normId(entry.name)}_at_${gymId}`;
 
-    // 1. Check SQLite identity cache (gym-specific)
-    const cached = lc.db.prepare('SELECT * FROM smart_identity_cache WHERE entry_key=?').get(cacheKey);
-    if (cached) return cached;
-
-    // ── STEP 0: Detect gym staff instantly (name-role pattern, no Groq needed) ─
+    // ── STEP 0: Detect gym staff instantly (name-role pattern, no Groq needed) ──
     const staffInfo = detectStaff(entry.name);
     if (staffInfo) {
       const now = new Date().toISOString();
@@ -187,6 +183,10 @@ Reply ONLY with valid JSON (no markdown):
       `).run(cacheKey, gymId, staffInfo.displayName, gymId, comment, now);
       return { entry_key: cacheKey, gym_id: gymId, matched_name: staffInfo.displayName, matched_gym: gymId, id_status: 'staff', confidence: 100, comment, groq_used: 0 };
     }
+
+    // 1. Check SQLite identity cache (gym-specific)
+    const cached = lc.db.prepare('SELECT * FROM smart_identity_cache WHERE entry_key=?').get(cacheKey);
+    if (cached) return cached;
 
     // 2. Fetch top 10 matches across ALL gyms
     const top10 = fuzzyMatchMembers(entry.name, 10);
