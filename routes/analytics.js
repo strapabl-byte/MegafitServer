@@ -293,7 +293,7 @@ Reply ONLY with valid JSON (no markdown):
   });
 
   // ?????? GET /api/live-entries ?????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
-  router.get('/api/live-entries', verifyAzureToken, (req, res) => {
+  router.get('/api/live-entries', verifyAzureToken, async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
@@ -343,8 +343,8 @@ Reply ONLY with valid JSON (no markdown):
       };
 
       let merged = [];
-      targetGymIds.forEach(gid => {
-        lc.getEntries(gid, today, limitCount).forEach(e => {
+      for (const gid of targetGymIds) {
+        for (const e of lc.getEntries(gid, today, limitCount)) {
           let member = null;
           let matchMethod = 'none';
 
@@ -426,8 +426,8 @@ Reply ONLY with valid JSON (no markdown):
           if (!cachedId && !isKnown) {
             identifyEntry(e, gid, true).catch(() => {});
           }
-        });
-      });
+        }
+      }
 
       merged.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
       res.json({ ok: true, gymId, count: merged.length, entries: merged.slice(0, limitCount) });
@@ -1232,6 +1232,11 @@ ${fullContext}`
     }
     console.log('[GAP FILL] Complete — SQLite disk is now the source of truth 💾');
   };
+
+  router.identifyEntry = identifyEntry;
+  router.fuzzyMatchMembers = fuzzyMatchMembers;
+  router.groqIdentify = groqIdentify;
+  router.detectStaff = detectStaff;
 
   return router;
 };
