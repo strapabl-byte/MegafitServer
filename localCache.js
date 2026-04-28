@@ -488,6 +488,7 @@ function upsertRegister(gymId, date, entriesArr) {
     note_reste: e.note_reste || '',
     abonnement: e.abonnement || '',
     created_at: typeof e.createdAt === 'string' ? e.createdAt : 
+               typeof e.created_at === 'string' ? e.created_at :
                (e.createdAt && typeof e.createdAt.toDate === 'function') ? e.createdAt.toDate().toISOString() :
                (e.createdAt?.toISOString ? e.createdAt.toISOString() : now),
     synced_at:  now
@@ -530,6 +531,7 @@ function upsertDecaissements(gymId, date, decsArr) {
     requested_by: d.requestedBy || null,
     approved_by:  d.approvedBy || null,
     created_at: typeof d.createdAt === 'string' ? d.createdAt : 
+               typeof d.created_at === 'string' ? d.created_at :
                (d.createdAt && typeof d.createdAt.toDate === 'function') ? d.createdAt.toDate().toISOString() :
                (d.createdAt?.toISOString ? d.createdAt.toISOString() : now),
     synced_at:  now

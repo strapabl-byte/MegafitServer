@@ -20,14 +20,25 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
       // 1️⃣ Try SQLite cache first
       const cached = lc.getRegister(gymId, date);
       const cachedDec = lc.getDecaissements(gymId, date);
-      if (cached && cached.length > 0) {
+      
+      // 🛡️ CORRUPTION DETECTION: If any entry has lost its name but has other data (prix, tel, cin), 
+      // it's a victim of the partial-update bug. Trigger "Self-Heal" re-sync.
+      const isCorrupt = cached && cached.length > 0 && cached.some(e => {
+        const hasData = (Number(e.prix) > 0 || Number(e.tpe) > 0 || Number(e.espece) > 0 || (e.tel && e.tel.length > 4) || (e.cin && e.cin.length > 2));
+        const noName = !e.nom || e.nom.trim() === '';
+        return hasData && noName;
+      });
+
+      if (cached && cached.length > 0 && !isCorrupt) {
         console.log(`⚡ [SQLITE HIT] ${cached.length} register entries for ${date}`);
         entries = cached.map(e => ({ ...e, createdAt: e.created_at }));
         decaissements = cachedDec.map(d => ({ ...d, createdAt: d.created_at }));
       } else {
-        // 2️⃣ Firestore fallback
+        if (isCorrupt) console.warn(`🩹 [SELF-HEAL] Detected missing names in SQLite for ${date}. Re-syncing from Firestore...`);
+        
+        // 2️⃣ Firestore fallback (or re-sync)
         if (isQuotaExceeded()) return res.status(429).json({ error: 'Quota exceeded. No local cache for this date.', quotaExceeded: true, entries: [] });
-        console.log(`🌐 [SQLITE MISS] Fetching register from Firestore for ${date}...`);
+        console.log(`🌐 [SQLITE MISS/REPAIR] Fetching register from Firestore for ${date}...`);
         await Promise.all(gymIds.map(async (gid) => {
           const snap = await db.collection('megafit_daily_register').doc(`${gid}_${date}`).collection('entries').orderBy('createdAt', 'asc').get();
           const fetched = snap.docs.map(d => ({ id: d.id, gymId: gid, ...d.data() }));
@@ -102,9 +113,13 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
       if (!date) return res.status(400).json({ error: 'date required' });
 
       const entryId = req.params.id;
+      
+      // 1️⃣ Fetch existing to prevent partial wipe
+      const existing = lc.getRegister(gymId, date).find(e => e.id === entryId);
+      const merged = existing ? { ...existing, ...entry } : { id: entryId, ...entry };
 
-      // ✅ Always update SQLite first (works for both Firestore and manually-seeded entries)
-      lc.upsertRegister(gymId, date, [{ id: entryId, ...entry, created_at: entry.createdAt || new Date().toISOString() }]);
+      // ✅ Always update SQLite first
+      lc.upsertRegister(gymId, date, [merged]);
 
       // ✅ Then try to sync to Firestore (best effort — won't crash if doc doesn't exist)
       try {
