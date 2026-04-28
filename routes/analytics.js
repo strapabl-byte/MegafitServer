@@ -130,12 +130,34 @@ Reply ONLY with valid JSON (no markdown):
       const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'llama3-8b-8192', messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 120 }),
+        body: JSON.stringify({ model: 'llama3-8b-8192', messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 150 }),
       });
+      if (!r.ok) {
+        const errText = await r.text();
+        throw new Error(`Groq API ${r.status}: ${errText.slice(0, 100)}`);
+      }
       const data = await r.json();
       const text = data.choices?.[0]?.message?.content?.trim() || '';
-      const json = JSON.parse(text.replace(/```json|```/g, '').trim());
-      return { pick: json.pick || 0, confidence: json.confidence || 0, comment: json.comment || '' };
+      
+      // Robust JSON extraction (finds the first { and last })
+      let json = null;
+      try {
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          json = JSON.parse(jsonMatch[0]);
+        } else {
+          throw new Error('No JSON object found in response');
+        }
+      } catch (parseErr) {
+        console.warn(`[SMART-ID] Failed to parse Groq response: "${text.slice(0, 50)}..."`);
+        return null;
+      }
+
+      return { 
+        pick: json.pick ?? 0, 
+        confidence: json.confidence ?? 0, 
+        comment: json.comment || '' 
+      };
     } catch (err) {
       console.warn('[SMART-ID] Groq error:', err.message);
       return null;
