@@ -63,6 +63,50 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
   const GYM_LABEL_MAP = { 'FES DOUKKARATE': 'dokarat', 'FES MARJANE': 'marjane', 'CASA 1': 'casa1', 'CASA 2': 'casa2' };
   const GYM_DISPLAY = { dokarat: 'Fès Doukkarate', marjane: 'Fès Saiss', casa1: 'Casa 1', casa2: 'Casa 2' };
 
+  // ── Known staff role keywords (after the hyphen) ─────────────────────────
+  const STAFF_ROLES = {
+    'comercial':    { role: 'Commercial',  emoji: '💼' },
+    'commercial':   { role: 'Commercial',  emoji: '💼' },
+    'coach':        { role: 'Coach',       emoji: '🏋️' },
+    'entraineur':   { role: 'Coach',       emoji: '🏋️' },
+    'employe':      { role: 'Employé',     emoji: '👔' },
+    'employee':     { role: 'Employé',     emoji: '👔' },
+    'reception':    { role: 'Réception',   emoji: '🪪' },
+    'receptionist': { role: 'Réception',   emoji: '🪪' },
+    'manager':      { role: 'Manager',     emoji: '🎯' },
+    'gerant':       { role: 'Gérant',      emoji: '🎯' },
+    'admin':        { role: 'Admin',       emoji: '⚙️' },
+    'staff':        { role: 'Staff',       emoji: '👔' },
+    'agent':        { role: 'Agent',       emoji: '🔑' },
+    'animateur':    { role: 'Animateur',   emoji: '🎤' },
+    'technique':    { role: 'Technique',   emoji: '🔧' },
+    'menage':       { role: 'Ménage',      emoji: '🧹' },
+    'nettoyage':    { role: 'Ménage',      emoji: '🧹' },
+    'securite':     { role: 'Sécurité',    emoji: '🛡️' },
+    'security':     { role: 'Sécurité',    emoji: '🛡️' },
+    'comptable':    { role: 'Comptable',   emoji: '📊' },
+    'directeur':    { role: 'Directeur',   emoji: '🏆' },
+  };
+
+  /**
+   * Detect staff from door entry name.
+   * Pattern: <name>-<role>  (always a single hyphen before the role keyword)
+   * e.g. "redamouss-comercial" → { displayName: 'REDAMOUSS', role: 'Commercial', emoji: '💼' }
+   * Returns null if not a staff entry.
+   */
+  function detectStaff(rawName) {
+    if (!rawName) return null;
+    const normalized = rawName.trim().toLowerCase();
+    // Match: anything then hyphen then role keyword at end
+    const hyphenIdx = normalized.lastIndexOf('-');
+    if (hyphenIdx < 1) return null;
+    const rolePart = normalized.slice(hyphenIdx + 1).trim();
+    const namePart = rawName.slice(0, hyphenIdx).trim().toUpperCase();
+    const staffInfo = STAFF_ROLES[rolePart];
+    if (!staffInfo || !namePart) return null;
+    return { displayName: namePart, role: staffInfo.role, emoji: staffInfo.emoji };
+  }
+
   /** Call Groq with top candidates + gym context, return best pick */
   async function groqIdentify(rawName, userId, candidates, extraContext = '') {
     try {
@@ -108,6 +152,19 @@ Reply ONLY with valid JSON (no markdown):
     // 1. Check SQLite identity cache (gym-specific)
     const cached = lc.db.prepare('SELECT * FROM smart_identity_cache WHERE entry_key=?').get(cacheKey);
     if (cached) return cached;
+
+    // ── STEP 0: Detect gym staff instantly (name-role pattern, no Groq needed) ─
+    const staffInfo = detectStaff(entry.name);
+    if (staffInfo) {
+      const now = new Date().toISOString();
+      const comment = `${staffInfo.emoji} ${staffInfo.role}`;
+      lc.db.prepare(`
+        INSERT OR REPLACE INTO smart_identity_cache
+          (entry_key, gym_id, matched_name, matched_gym, id_status, confidence, comment, groq_used, cached_at)
+        VALUES (?, ?, ?, ?, 'staff', 100, ?, 0, ?)
+      `).run(cacheKey, gymId, staffInfo.displayName, gymId, comment, now);
+      return { entry_key: cacheKey, gym_id: gymId, matched_name: staffInfo.displayName, matched_gym: gymId, id_status: 'staff', confidence: 100, comment, groq_used: 0 };
+    }
 
     // 2. Fetch top 10 matches across ALL gyms
     const top10 = fuzzyMatchMembers(entry.name, 10);
@@ -326,8 +383,18 @@ Reply ONLY with valid JSON (no markdown):
           const cacheKey = e.user_id
             ? `uid_${e.user_id}_at_${gid}`
             : `name_${normId(e.name)}_at_${gid}`;
-          const cachedId = lc.db.prepare('SELECT * FROM smart_identity_cache WHERE entry_key=?').get(cacheKey);
-          const visits   = getVisitStats(e, gid);
+          
+          let cachedId = lc.db.prepare('SELECT * FROM smart_identity_cache WHERE entry_key=?').get(cacheKey);
+          
+          // ── Synchronous Staff Detection (Instant on first scan) ────────────────
+          if (!cachedId) {
+            const staffInfo = detectStaff(e.name);
+            if (staffInfo) {
+              cachedId = await identifyEntry(e, gid, false); // Sync call for staff (skips Groq)
+            }
+          }
+
+          const visits = getVisitStats(e, gid);
 
           merged.push({
             docId:          e.id,
