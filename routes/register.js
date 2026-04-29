@@ -327,8 +327,8 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
           reason: 'Prix = 0 DH — inscription sans montant',
         }));
 
-      // ── 4. ANALYSE DIABOLIQUE (NEW) ───────────────────────────────────────
-      const devilFindings = [];
+      // ── 4. ANALYSE AVANCÉE ────────────────────────────────────────────────
+      const expertFindings = [];
 
       // A. Horaires Suspects (Basé sur les heures d'ouverture MegaFit)
       allEntries.forEach(e => {
@@ -348,7 +348,7 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
           }
 
           if (isSuspect) {
-            devilFindings.push({ type: 'horaire', entry: e, reason: `Inscription hors horaires (${hour}h) — vérifier l'ouverture du club.` });
+            expertFindings.push({ type: 'horaire', entry: e, reason: `Inscription hors horaires (${hour}h)` });
           }
         }
       });
@@ -364,7 +364,7 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
         const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
         allEntries.forEach(e => {
           if (e.abonnement === sub && Number(e.prix) < avg * 0.5 && Number(e.prix) > 0) {
-            devilFindings.push({ type: 'prix_bas', entry: e, reason: `Prix anormalement bas pour "${sub}" (${e.prix} DH vs moy. ${Math.round(avg)} DH)` });
+            expertFindings.push({ type: 'prix_bas', entry: e, reason: `Prix anormal pour "${sub}" (${e.prix} DH vs moy. ${Math.round(avg)} DH)` });
           }
         });
       });
@@ -381,7 +381,7 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
       Object.entries(commStats).forEach(([comm, s]) => {
         const resteRatio = s.total > 0 ? (s.reste / s.total) : 0;
         if (resteRatio > 0.4 && s.count > 2) {
-          devilFindings.push({ type: 'commercial_debt', comm, reason: `Ratio impayés critique : ${Math.round(resteRatio*100)}% des ventes de ce commercial sont en RESTE.` });
+          expertFindings.push({ type: 'commercial_debt', comm, reason: `Ratio impayés critique (${Math.round(resteRatio*100)}%) pour ce commercial.` });
         }
       });
 
@@ -390,27 +390,27 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
       const suspectCount = duplicates.filter(d => d.type === 'suspect').length;
       const totalEntries = allEntries.length;
 
-      // Devil Score: harder to get 100
+      // Score: harder to get 100
       let score = 100;
       score -= Math.min(35, (totalReste / Math.max(1, totalEntries * 300)) * 100); // penalize by debt volume
       score -= Math.min(30, suspectCount * 10);
       score -= Math.min(20, anomalies.length * 10);
-      score -= Math.min(15, devilFindings.length * 3);
+      score -= Math.min(15, expertFindings.length * 3);
       score = Math.max(0, Math.round(score));
 
       // ── 6. AURALIX INSIGHT TEXT ───────────────────────────────────────────
-      const gymName = { dokarat: 'Doukkarate', marjane: 'Marjane', casa1: 'Casa 1', casa2: 'Casa 2' }[gymId] || gymId;
+      const gymName = { dokarat: 'Doukkarate', marjane: 'Saiss', casa1: 'Casa Anfa', casa2: 'Casa Lady' }[gymId] || gymId;
       const monthFr = new Date(`${target}-15`).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
 
       let insight = '';
-      if (resteEntries.length === 0 && suspectCount === 0 && anomalies.length === 0 && devilFindings.length === 0) {
-        insight = `✨ ${gymName} — ${monthFr} : Registre impeccable. Analyse diabolique terminée sans faute.`;
+      if (resteEntries.length === 0 && suspectCount === 0 && anomalies.length === 0 && expertFindings.length === 0) {
+        insight = `${gymName} — ${monthFr} : Registre conforme. Audit terminé sans anomalie.`;
       } else {
         const parts = [];
         if (resteEntries.length > 0) parts.push(`${totalReste.toLocaleString()} DH impayés`);
-        if (suspectCount > 0) parts.push(`${suspectCount} doublons suspects`);
-        if (devilFindings.length > 0) parts.push(`${devilFindings.length} alertes avancées`);
-        insight = `😈 Mode "Devil Analyzer" actif : ${parts.join(', ')}. Santé : ${score}/100.`;
+        if (suspectCount > 0) parts.push(`${suspectCount} doublons`);
+        if (expertFindings.length > 0) parts.push(`${expertFindings.length} alertes audit`);
+        insight = `Analyse Auralix — ${gymName} : ${parts.join(', ')}. Santé : ${score}/100.`;
       }
 
       res.json({
@@ -420,14 +420,14 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
         reste: resteEntries,
         duplicates: duplicates.sort((a, b) => (a.type === 'suspect' ? -1 : 1)),
         anomalies,
-        devilFindings, // NEW: detailed advanced findings
+        expertFindings,
         stats: {
           totalReste,
           suspectDuplicates: suspectCount,
           renewals: duplicates.filter(d => d.type === 'renouvellement').length,
           nameOnlyDuplicates: duplicates.filter(d => d.type === 'nom_seulement').length,
           prixZero: anomalies.length,
-          advancedAlerts: devilFindings.length
+          advancedAlerts: expertFindings.length
         }
       });
     } catch (err) {
