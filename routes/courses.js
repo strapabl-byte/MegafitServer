@@ -9,8 +9,11 @@ module.exports = function coursesRouter({ db, admin }) {
   const router = Router();
 
   // ── Courses ───────────────────────────────────────────────────────────────
-  async function getCoursesWithCounts(weekday) {
-    const snap = await db.collection('courses').get();
+  async function getCoursesWithCounts(weekday, gymId) {
+    let query = db.collection('courses');
+    if (gymId && gymId !== 'all') query = query.where('gymId', '==', gymId);
+    
+    const snap = await query.get();
     return Promise.all(snap.docs.map(async (doc) => {
       const data = doc.data();
       const resSnap = await db.collection('reservations').where('sessionId', '==', doc.id).where('weekday', '==', weekday).where('status', '==', 'reserved').get();
@@ -22,7 +25,8 @@ module.exports = function coursesRouter({ db, admin }) {
   router.get('/api/courses', verifyAzureToken, async (req, res) => {
     try {
       const weekday = req.query.weekday !== undefined ? parseInt(req.query.weekday) : new Date().getDay();
-      res.json(await getCoursesWithCounts(weekday));
+      const gymId = req.query.gymId || (req.assignedGyms.includes('all') ? null : req.assignedGyms[0]);
+      res.json(await getCoursesWithCounts(weekday, gymId));
     } catch (err) { console.error('Failed to fetch courses:', err); res.status(500).json({ error: 'Failed to fetch courses' }); }
   });
 
@@ -35,9 +39,18 @@ module.exports = function coursesRouter({ db, admin }) {
 
   router.post('/api/courses', verifyAzureToken, async (req, res) => {
     try {
-      const { title, coach, days, time, capacity } = req.body;
-      if (!title || !coach || !days || !time) return res.status(400).json({ error: 'Missing fields' });
-      const docRef = await db.collection('courses').add({ title, coach, days, time, capacity: Number(capacity) || 20, createdAt: admin.firestore.FieldValue.serverTimestamp(), createdBy: req.user?.preferred_username || 'Admin' });
+      const { title, coach, days, time, capacity, gymId } = req.body;
+      if (!title || !coach || !days || !time || !gymId) return res.status(400).json({ error: 'Missing fields' });
+      
+      // Security check
+      if (!req.hasAccessToGym(gymId)) return res.status(403).json({ error: 'Unauthorized for this gym' });
+
+      const docRef = await db.collection('courses').add({ 
+        title, coach, days, time, capacity: Number(capacity) || 20, 
+        gymId,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(), 
+        createdBy: req.user?.preferred_username || 'Admin' 
+      });
       const snap = await docRef.get();
       res.json({ id: docRef.id, ...snap.data(), reserved: 0 });
     } catch (err) { res.status(500).json({ error: 'Failed to create course' }); }
@@ -83,17 +96,31 @@ module.exports = function coursesRouter({ db, admin }) {
   // ── Coaches ───────────────────────────────────────────────────────────────
   router.get('/api/coaches', verifyAzureToken, async (req, res) => {
     try {
-      const snap = await db.collection('coaches').orderBy('createdAt', 'desc').get();
+      const gymId = req.query.gymId || (req.assignedGyms.includes('all') ? null : req.assignedGyms[0]);
+      let query = db.collection('coaches');
+      if (gymId && gymId !== 'all') query = query.where('gymId', '==', gymId);
+      
+      const snap = await query.orderBy('createdAt', 'desc').get();
       res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     } catch (err) { res.status(500).json({ error: 'Failed to fetch coaches' }); }
   });
 
   router.post('/api/coaches', verifyAzureToken, async (req, res) => {
     try {
-      const { name, surname, specialty, phone, email, hireDate, bio, photo } = req.body;
-      if (!name || !surname || !specialty) return res.status(400).json({ error: 'name, surname and specialty required' });
+      const { name, surname, specialty, phone, email, hireDate, bio, photo, gymId } = req.body;
+      if (!name || !surname || !specialty || !gymId) return res.status(400).json({ error: 'name, surname, specialty and gymId required' });
+      
+      if (!req.hasAccessToGym(gymId)) return res.status(403).json({ error: 'Unauthorized for this gym' });
+
       const qrToken = crypto.randomBytes(16).toString('hex');
-      const docRef  = await db.collection('coaches').add({ name, surname, specialty, phone: phone || null, email: email || null, hireDate: hireDate || null, bio: bio || null, photo: photo || null, qrToken, createdAt: admin.firestore.FieldValue.serverTimestamp(), createdBy: req.user?.preferred_username || 'Admin' });
+      const docRef  = await db.collection('coaches').add({ 
+        name, surname, specialty, phone: phone || null, email: email || null, 
+        hireDate: hireDate || null, bio: bio || null, photo: photo || null, 
+        gymId,
+        qrToken, 
+        createdAt: admin.firestore.FieldValue.serverTimestamp(), 
+        createdBy: req.user?.preferred_username || 'Admin' 
+      });
       const snap = await docRef.get();
       res.json({ id: docRef.id, ...snap.data() });
     } catch (err) { res.status(500).json({ error: 'Failed to create coach' }); }
