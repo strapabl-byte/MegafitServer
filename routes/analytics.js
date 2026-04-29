@@ -605,7 +605,7 @@ Reply ONLY with valid JSON (no markdown):
       merged.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
 
       const responseData = { ok: true, gymId, count: merged.length, entries: merged.slice(0, limitCount) };
-      // ── Store in 5s cache so rapid gym switches don't reprocess ───────────
+      // ── Store in cache so concurrent users and rapid switches hit cache ──────
       liveEntriesCache.set(cacheKey, { ts: Date.now(), data: responseData });
       res.json(responseData);
 
@@ -614,6 +614,125 @@ Reply ONLY with valid JSON (no markdown):
       res.status(500).json({ error: 'Failed to fetch live entries' });
     }
   });
+
+  // ── Background Pre-Warmer ─────────────────────────────────────────────────
+  // Proactively computes live-entries for ALL active gyms every 10s.
+  // Result: any number of concurrent dashboards (5 gyms × N staff) all hit
+  // cache instantly — zero per-request CPU, no spikes on Render.
+  async function preWarmLiveEntries() {
+    const activeGyms = ['dokarat', 'marjane']; // add casa1/casa2 when they go live
+    const today = getMoroccanDateStr();
+
+    for (const gid of activeGyms) {
+      try {
+        const cacheKey = `${gid}:${today}`;
+        const existing = liveEntriesCache.get(cacheKey);
+        // Skip if cache is still fresh (< 8s old) — no work needed
+        if (existing && (Date.now() - existing.ts) < 8000) continue;
+
+        // ── Build the response (same logic as the route, without req/res) ────
+        const targetGymIds = [gid];
+        const placeholders = targetGymIds.map(() => '?').join(',');
+        const memberRows = lc.db.prepare(
+          `SELECT full_name, expires_on, zkteco_user_id FROM members_cache WHERE gym_id IN (${placeholders})`
+        ).all(...targetGymIds);
+
+        const normalize = s => (s || '').replace(/\s+/g, ' ').trim().toUpperCase();
+        const memberByUserId = new Map();
+        const memberByName   = new Map();
+        for (const m of memberRows) {
+          const key  = normalize(m.full_name);
+          const data = { fullName: m.full_name, expiresOn: m.expires_on };
+          const existingByName = memberByName.get(key);
+          if (!existingByName || (m.expires_on && (!existingByName.expiresOn || m.expires_on > existingByName.expiresOn))) {
+            if (key) memberByName.set(key, data);
+          }
+          if (m.zkteco_user_id) {
+            const uid = String(m.zkteco_user_id);
+            const existingByUid = memberByUserId.get(uid);
+            if (!existingByUid || (m.expires_on && (!existingByUid.expiresOn || m.expires_on > existingByUid.expiresOn))) {
+              memberByUserId.set(uid, data);
+            }
+          }
+        }
+
+        const isSubActive = (expiresOn) => {
+          if (!expiresOn) return false;
+          try { return new Date(expiresOn) >= new Date(today); } catch (e) { return false; }
+        };
+
+        // Build prefix index
+        const prefixIndex = new Map();
+        for (const [mName, mData] of memberByName.entries()) {
+          const prefix = mName.slice(0, 6);
+          if (!prefixIndex.has(prefix)) prefixIndex.set(prefix, []);
+          prefixIndex.get(prefix).push({ name: mName, data: mData });
+        }
+
+        // Batch load all entries + identity cache
+        const allEntries = lc.getEntries(gid, today, 50).map(e => ({ ...e, _gid: gid }));
+        const cacheKeys = allEntries.map(e =>
+          e.user_id ? `uid_${e.user_id}_at_${gid}` : `name_${normId(e.name)}_at_${gid}`
+        );
+        const cachedIds = new Map();
+        if (cacheKeys.length > 0) {
+          const phId = cacheKeys.map(() => '?').join(',');
+          const rows = lc.db.prepare(`SELECT * FROM smart_identity_cache WHERE entry_key IN (${phId})`).all(...cacheKeys);
+          for (const row of rows) cachedIds.set(row.entry_key, row);
+        }
+
+        const merged = [];
+        for (const e of allEntries) {
+          let member = null, matchMethod = 'none';
+          if (e.user_id) { member = memberByUserId.get(String(e.user_id)) || null; if (member) matchMethod = 'user_id'; }
+          if (!member) {
+            const entryNorm = normalize(e.name);
+            member = memberByName.get(entryNorm) || null;
+            if (member) matchMethod = 'name_exact';
+            if (!member && entryNorm.length > 3) {
+              const prefix = entryNorm.slice(0, 6);
+              for (const { name: mName, data: mData } of (prefixIndex.get(prefix) || [])) {
+                if (mName.includes(entryNorm)) { member = mData; matchMethod = 'name_partial'; break; }
+              }
+            }
+          }
+          const isKnown = !!member;
+          const memberStatus = isKnown ? (isSubActive(member.expiresOn) ? 'active' : 'expired') : 'unknown';
+          const ck = e.user_id ? `uid_${e.user_id}_at_${gid}` : `name_${normId(e.name)}_at_${gid}`;
+          const cachedId = cachedIds.get(ck) || null;
+          const visits   = getVisitStats(e, gid);
+          merged.push({
+            docId: e.id, name: e.name, userId: e.user_id || null, gymId: gid,
+            displayTime: (e.timestamp || '').slice(11, 16), timestamp: e.timestamp,
+            status: e.status, method: e.method, isFace: e.is_face === 1,
+            isKnown, memberStatus, matchMethod, expiresOn: member ? member.expiresOn : null,
+            userTodayCount: visits.today, userWeekCount: visits.week,
+            smartId: cachedId ? {
+              status: cachedId.id_status, matchedName: cachedId.matched_name,
+              matchedGym: cachedId.matched_gym, confidence: cachedId.confidence,
+              comment: cachedId.comment, groqUsed: !!cachedId.groq_used,
+            } : null,
+          });
+          if (!cachedId && !isKnown) identifyEntry(e, gid, true).catch(() => {});
+        }
+        merged.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+        liveEntriesCache.set(cacheKey, { ts: Date.now(), data: { ok: true, gymId: gid, count: merged.length, entries: merged } });
+
+      } catch (err) {
+        // Silent — don't crash the pre-warmer if one gym fails
+      }
+      // 2s gap between gyms to spread CPU load
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+
+  // Start pre-warmer 8s after boot, then every 10s
+  setTimeout(() => {
+    preWarmLiveEntries();
+    setInterval(preWarmLiveEntries, 10000);
+  }, 8000);
+
+
 
 
   // GET /api/live-count
