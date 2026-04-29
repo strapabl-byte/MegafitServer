@@ -330,12 +330,25 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
       // ── 4. ANALYSE DIABOLIQUE (NEW) ───────────────────────────────────────
       const devilFindings = [];
 
-      // A. Horaires Suspects (Ex: Inscriptions à 3h du matin)
+      // A. Horaires Suspects (Basé sur les heures d'ouverture MegaFit)
       allEntries.forEach(e => {
         if (e.created_at) {
-          const hour = new Date(e.created_at).getHours();
-          if (hour >= 22 || hour <= 7) {
-            devilFindings.push({ type: 'horaire', entry: e, reason: `Inscription tardive (${hour}h) — vérifier l'heure de présence.` });
+          const d = new Date(e.created_at);
+          const hour = d.getHours();
+          const day = d.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+          const isWeekend = (day === 0 || day === 6);
+          
+          let isSuspect = false;
+          if (isWeekend) {
+            // Weekend: Ouvert 06:00 - 22:00
+            if (hour < 6 || hour >= 22) isSuspect = true;
+          } else {
+            // Semaine: Ouvert 06:00 - 00:00
+            if (hour < 6) isSuspect = true;
+          }
+
+          if (isSuspect) {
+            devilFindings.push({ type: 'horaire', entry: e, reason: `Inscription hors horaires (${hour}h) — vérifier l'ouverture du club.` });
           }
         }
       });
