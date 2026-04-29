@@ -149,15 +149,52 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
     return { displayName: namePart, role: staffInfo.role, emoji: staffInfo.emoji };
   }
 
+  // ── Groq Rate Limiter ─────────────────────────────────────────────────────
+  // Prevents 429 storms: enforces a 2s gap between calls and a 60s cooldown
+  // after any 429 response. During cooldown, Groq is silently skipped.
+  const groqLimiter = {
+    cooldownUntil: 0,          // timestamp (ms) until which Groq is paused
+    lastCallAt:    0,          // timestamp of the last successful call attempt
+    minGapMs:      2000,       // minimum ms between Groq calls
+    cooldownMs:    60000,      // cooldown duration after a 429
+    queue:         Promise.resolve(), // serializes calls
+
+    isCoolingDown() {
+      return Date.now() < this.cooldownUntil;
+    },
+    trigger429() {
+      this.cooldownUntil = Date.now() + this.cooldownMs;
+      console.warn(`[SMART-ID] Groq rate limit hit — pausing AI for ${this.cooldownMs/1000}s`);
+    },
+    async wait() {
+      const gap = this.minGapMs - (Date.now() - this.lastCallAt);
+      if (gap > 0) await new Promise(r => setTimeout(r, gap));
+      this.lastCallAt = Date.now();
+    }
+  };
+
   /** Call Groq with top candidates + gym context, return best pick */
   async function groqIdentify(rawName, userId, candidates, extraContext = '') {
-    try {
-      const GROQ_KEY = process.env.GROQ_API_KEY || process.env.GROQ_API_KEY_FALLBACK;
-      if (!GROQ_KEY) return null;
-      const candidateList = candidates.map((c, i) =>
-        `${i+1}. ${c.full_name} | ${GYM_DISPLAY[c.gym_id]||c.gym_id} | ${c.status} | expire: ${c.expires_on||'?'} | score: ${c.score}%`
-      ).join('\n');
-      const prompt = `You are a gym reception AI identifying Moroccan gym members from door scanner entries.
+    // Skip entirely during cooldown — fall back to fuzzy-only
+    if (groqLimiter.isCoolingDown()) {
+      const remainS = Math.ceil((groqLimiter.cooldownUntil - Date.now()) / 1000);
+      console.log(`[SMART-ID] Groq paused (cooldown ${remainS}s left) — using fuzzy fallback for "${rawName}"`);
+      return null;
+    }
+
+    // Serialize calls through the queue so they never overlap
+    const result = await (groqLimiter.queue = groqLimiter.queue.then(async () => {
+      // Re-check cooldown inside the queue (another call may have triggered it)
+      if (groqLimiter.isCoolingDown()) return null;
+      await groqLimiter.wait();
+
+      try {
+        const GROQ_KEY = process.env.GROQ_API_KEY || process.env.GROQ_API_KEY_FALLBACK;
+        if (!GROQ_KEY) return null;
+        const candidateList = candidates.map((c, i) =>
+          `${i+1}. ${c.full_name} | ${GYM_DISPLAY[c.gym_id]||c.gym_id} | ${c.status} | expire: ${c.expires_on||'?'} | score: ${c.score}%`
+        ).join('\n');
+        const prompt = `You are a gym reception AI identifying Moroccan gym members from door scanner entries.
 IMPORTANT CONTEXT:
 - Moroccan names follow the format: FIRSTNAME FAMILYNAME
 - The door scanner sometimes sends names WITHOUT a space between first name and family name (e.g. "rajaebouzoubaa" is actually "RAJAE BOUZOUBAA")
@@ -177,41 +214,54 @@ Rules:
 Reply ONLY with valid JSON (no markdown):
 {"pick": <1-based index or 0 for UNKNOWN>, "confidence": <0-100>, "comment": "<short French comment, max 12 words>"}`;
 
-      const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'llama-3.1-8b-instant', messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 150 }),
-      });
-      if (!r.ok) {
-        const errText = await r.text();
-        throw new Error(`Groq API ${r.status}: ${errText.slice(0, 100)}`);
-      }
-      const data = await r.json();
-      const text = data.choices?.[0]?.message?.content?.trim() || '';
-      
-      // Robust JSON extraction (finds the first { and last })
-      let json = null;
-      try {
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          json = JSON.parse(jsonMatch[0]);
-        } else {
-          throw new Error('No JSON object found in response');
+        const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: 'llama-3.1-8b-instant', messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 150 }),
+        });
+
+        // Handle 429 specifically — trigger cooldown
+        if (r.status === 429) {
+          groqLimiter.trigger429();
+          return null;
         }
-      } catch (parseErr) {
-        console.warn(`[SMART-ID] Failed to parse Groq response: "${text.slice(0, 50)}..."`);
+
+        if (!r.ok) {
+          const errText = await r.text();
+          throw new Error(`Groq API ${r.status}: ${errText.slice(0, 100)}`);
+        }
+
+        const data = await r.json();
+        const text = data.choices?.[0]?.message?.content?.trim() || '';
+        
+        let json = null;
+        try {
+          const jsonMatch = text.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            json = JSON.parse(jsonMatch[0]);
+          } else {
+            throw new Error('No JSON object found in response');
+          }
+        } catch (parseErr) {
+          console.warn(`[SMART-ID] Failed to parse Groq response: "${text.slice(0, 50)}..."`);
+          return null;
+        }
+
+        return { 
+          pick: json.pick ?? 0, 
+          confidence: json.confidence ?? 0, 
+          comment: json.comment || '' 
+        };
+      } catch (err) {
+        // Only log non-429 errors (429 handled above)
+        if (!err.message?.includes('429')) {
+          console.warn('[SMART-ID] Groq error:', err.message);
+        }
         return null;
       }
+    }).catch(() => null));
 
-      return { 
-        pick: json.pick ?? 0, 
-        confidence: json.confidence ?? 0, 
-        comment: json.comment || '' 
-      };
-    } catch (err) {
-      console.warn('[SMART-ID] Groq error:', err.message);
-      return null;
-    }
+    return result;
   }
 
   /** Main identification function — gym-specific cache + multi-gym detection */
