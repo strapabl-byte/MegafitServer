@@ -417,7 +417,7 @@ Reply ONLY with valid JSON (no markdown):
   }
 
   // ?????? GET /api/analytics/megaeye-registrations ??????????????????????????????????????????????????????????????????????????????????????????
-  router.get('/api/analytics/megaeye-registrations', verifyAzureToken, async (req, res) => {
+  router.get('/api/analytics/auralix-registrations', verifyAzureToken, async (req, res) => {
     try {
       const { gymId, timeFilter } = req.query; // 'day' or 'week'
       const rows = lc.getPending(gymId, timeFilter || 'day');
@@ -961,9 +961,92 @@ Reply ONLY with valid JSON (no markdown):
     }
   });
 
-  // ?????? POST /api/analytics/megaeye-chat ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
+  // ── GET /api/analytics/auralix-instructions ────────────────────────────────
+  router.get('/api/analytics/auralix-instructions', verifyAzureToken, async (req, res) => {
+    try {
+      const instructions = lc.getMeta('auralix_global_instructions') || '';
+      res.json({ ok: true, instructions });
+    } catch (err) {
+      console.error('GET /api/analytics/auralix-instructions error:', err);
+      res.status(500).json({ error: 'Failed to fetch instructions' });
+    }
+  });
+
+  // ── POST /api/analytics/auralix-instructions ───────────────────────────────
+  router.post('/api/analytics/auralix-instructions', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const { instructions } = req.body;
+      lc.setMeta('auralix_global_instructions', instructions || '');
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('POST /api/analytics/auralix-instructions error:', err);
+      res.status(500).json({ error: 'Failed to save instructions' });
+    }
+  });
+
+  // ── POST /api/analytics/auralix-learn ──────────────────────────────────────
+  // "Learning" chat: Admin talks to Auralix to update global directives
+  router.post('/api/analytics/auralix-learn', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const { message } = req.body;
+      if (!message) return res.status(400).json({ error: 'message required' });
+
+      const currentInstructions = lc.getMeta('auralix_global_instructions') || 'No instructions yet.';
+      const GROQ_KEY = process.env.GROQ_API_KEY || process.env.GROQ_API_KEY_FALLBACK;
+
+      const prompt = `You are AURALIX CORE MANAGEMENT SYSTEM.
+The Super Admin is giving you a tactical instruction or logic update.
+Your goal is to update the current "GLOBAL TACTICAL DIRECTIVES" list.
+
+CURRENT DIRECTIVES:
+"""
+${currentInstructions}
+"""
+
+NEW USER MESSAGE:
+"${message}"
+
+Rules:
+1. Analyse the message. If it adds, modifies or removes a rule, update the list accordingly.
+2. If the user says "forget everything" or similar, clear the list.
+3. Be smart: if the user says "dont count X", add it as a rule.
+4. Respond in JSON format ONLY:
+{
+  "updatedInstructions": "the full new version of the directives list",
+  "response": "A short, sharp tactical confirmation in French to the user (e.g. 'Instruction mémorisée. Protocoles de calcul mis à jour.')",
+  "understood": true
+}
+5. If the message is not an instruction or is totally unclear, set "understood" to false and ask for clarification in "response".`;
+
+      const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'llama-3.1-8b-instant',
+          messages: [{ role: 'system', content: prompt }],
+          response_format: { type: 'json_object' },
+          temperature: 0.2
+        })
+      });
+
+      if (!groqRes.ok) throw new Error('Groq failed');
+      const data = await groqRes.json();
+      const result = JSON.parse(data.choices[0].message.content);
+
+      if (result.understood) {
+        lc.setMeta('auralix_global_instructions', result.updatedInstructions);
+      }
+
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      console.error('Auralix Learn Error:', err);
+      res.status(500).json({ error: 'Learning process failed' });
+    }
+  });
+
+  // ?????? POST /api/analytics/auralix-chat ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
   // Interactive Groq chat: accepts a user question + context, returns AI answer
-  router.post('/api/analytics/megaeye-chat', verifyAzureToken, requireAdmin, async (req, res) => {
+  router.post('/api/analytics/auralix-chat', verifyAzureToken, requireAdmin, async (req, res) => {
     const { question, sector, kpis, dailyStats, liveEntries } = req.body;
     if (!question) return res.status(400).json({ error: 'question required' });
 
@@ -1057,12 +1140,35 @@ Reply ONLY with valid JSON (no markdown):
          console.error("Megaeye subs context error:", e);
       }
 
-      const fullContext = [kpiContext, trafficContext, liveContext, courseContext, subsContext].filter(Boolean).join('\n\n');
+      // 📈 Sales Context (Last 20 register entries from SQLite)
+      let salesContext = '';
+      try {
+        const salesRows = lc.db.prepare(`
+          SELECT date, nom, prix, tpe, espece, virement, cheque, reste, note_reste, abonnement 
+          FROM register_cache 
+          WHERE gym_id = ? OR ? = 'all'
+          ORDER BY date DESC, created_at DESC 
+          LIMIT 20
+        `).all(sector, sector);
+        if (salesRows.length > 0) {
+          salesContext = `\n--- RECENT SALES & REGISTER ENTRIES ---\n` +
+            salesRows.map(s => `  ${s.date} | ${s.nom} | ${s.prix}DH | ${s.abonnement} | Note: ${s.note_reste||'none'}`).join('\n');
+        }
+      } catch (err) {
+        console.error("Auralix sales context error:", err);
+      }
+
+      const fullContext = [kpiContext, trafficContext, liveContext, courseContext, subsContext, salesContext].filter(Boolean).join('\n\n');
+
+      const globalInstructions = lc.getMeta('auralix_global_instructions') || '';
 
       const messages = [
         {
           role: 'system',
-          content: `You are MEGAEYE, an elite, hyper-intelligent tactical AI assistant for the MegaFit gym empire.
+          content: `You are AURALIX, an elite, hyper-intelligent tactical AI assistant for the MegaFit gym empire.
+
+USER-DEFINED TACTICAL RULES & LEARNED BEHAVIORS:
+${globalInstructions || 'No specific custom rules provided.'}
 
 IMPORTANT RULES FOR YOUR ANALYSIS:
 1. DELIVER ULTRA-CONDENSED, HIGH-DENSITY TACTICAL INTEL. Do not write long narrative paragraphs. Use extremely concise military/corporate logic. Get straight to the point.

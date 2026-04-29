@@ -418,19 +418,68 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
       score -= Math.min(15, expertFindings.length * 3);
       score = Math.max(0, Math.round(score));
 
-      // ── 6. AURALIX INSIGHT TEXT ───────────────────────────────────────────
-      const gymName = { dokarat: 'Doukkarate', marjane: 'Saiss', casa1: 'Casa Anfa', casa2: 'Casa Lady' }[gymId] || gymId;
-      const monthFr = new Date(`${target}-15`).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
-
+      // ── 6. AURALIX SMART SUMMARY (Groq) ──────────────────────────────────
       let insight = '';
-      if (resteEntries.length === 0 && suspectCount === 0 && anomalies.length === 0 && expertFindings.length === 0) {
-        insight = `${gymName} — ${monthFr} : Registre conforme. Audit terminé sans anomalie.`;
-      } else {
-        const parts = [];
-        if (resteEntries.length > 0) parts.push(`${totalReste.toLocaleString()} DH impayés`);
-        if (suspectCount > 0) parts.push(`${suspectCount} doublons`);
-        if (expertFindings.length > 0) parts.push(`${expertFindings.length} alertes audit`);
-        insight = `Analyse Auralix — ${gymName} : ${parts.join(', ')}. Santé : ${score}/100.`;
+      const globalInstructions = lc.getMeta('auralix_global_instructions') || '';
+      const GROQ_KEY = process.env.GROQ_API_KEY || process.env.GROQ_API_KEY_FALLBACK;
+
+      if (GROQ_KEY) {
+        try {
+          const prompt = `You are AURALIX, the audit AI for MegaFit.
+Analyse the following audit data for ${gymName} (${monthFr}) and provide a sharp, executive summary in French.
+
+USER-DEFINED TACTICAL RULES & LEARNED BEHAVIORS:
+${globalInstructions || 'No specific custom rules provided.'}
+
+AUDIT DATA SUMMARY:
+- Total entries: ${totalEntries}
+- Health Score: ${score}/100
+- Total Debt: ${totalReste} DH (${resteEntries.length} entries)
+- Suspect Duplicates: ${suspectCount}
+- Anomalies (Price 0): ${anomalies.length}
+- Advanced Alerts: ${expertFindings.length}
+
+DETAILED ANOMALIES (Context for your analysis):
+- Debtors: ${JSON.stringify(resteEntries.slice(0, 20).map(e => ({ nom: e.nom, reste: e.reste, note: e.note })))}
+- Suspects: ${JSON.stringify(duplicates.filter(d => d.type === 'suspect').slice(0, 10).map(d => ({ names: d.entries.map(en => en.nom), reason: d.reason })))}
+- Price 0: ${JSON.stringify(anomalies.slice(0, 10).map(e => ({ nom: e.nom, abonnement: e.abonnement })))}
+
+Rules:
+1. Be extremely concise and tactical.
+2. If the user has provided specific "learned behaviors" above, apply them strictly to your interpretation.
+3. Output ONLY the summary text in French. No preamble.
+4. Keep it under 250 characters if possible.`;
+
+          const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: 'llama-3.1-8b-instant',
+              messages: [{ role: 'system', content: prompt }],
+              max_tokens: 200,
+              temperature: 0.3
+            })
+          });
+          if (groqRes.ok) {
+            const groqData = await groqRes.json();
+            insight = groqData.choices?.[0]?.message?.content?.trim();
+          }
+        } catch (groqErr) {
+          console.error('Auralix Smart Summary Error:', groqErr);
+        }
+      }
+
+      // Fallback if Groq fails or no key
+      if (!insight) {
+        if (resteEntries.length === 0 && suspectCount === 0 && anomalies.length === 0 && expertFindings.length === 0) {
+          insight = `${gymName} — ${monthFr} : Registre conforme. Audit terminé sans anomalie.`;
+        } else {
+          const parts = [];
+          if (resteEntries.length > 0) parts.push(`${totalReste.toLocaleString()} DH impayés`);
+          if (suspectCount > 0) parts.push(`${suspectCount} doublons`);
+          if (expertFindings.length > 0) parts.push(`${expertFindings.length} alertes audit`);
+          insight = `Analyse Auralix — ${gymName} : ${parts.join(', ')}. Santé : ${score}/100.`;
+        }
       }
 
       res.json({
@@ -573,6 +622,19 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
     } catch (err) {
       console.error('GET /api/register/search error:', err);
       res.status(500).json({ error: 'Search failed', entries: [] });
+    }
+  });
+
+  // ── POST /api/register/force-sync ─────────────────────────────────────────
+  // Triggers an immediate pull from Firestore for today's data across all gyms.
+  router.post('/force-sync', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      console.log(`⚡ [FORCE SYNC] Triggered by ${req.user?.name || 'admin'}`);
+      await syncGymCounts(db, apiCache, 0, isQuotaExceeded, true);
+      res.json({ ok: true, message: 'Sync complete' });
+    } catch (err) {
+      console.error('Force sync error:', err);
+      res.status(500).json({ error: 'Sync failed' });
     }
   });
 

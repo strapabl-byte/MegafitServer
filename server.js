@@ -211,7 +211,7 @@ app.get('/api/admin/export-all-stats', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// System Stats — live SQLite disk usage for Megaeye dashboard
+// System Stats — live SQLite disk usage for Auralix dashboard
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/api/system-stats', (req, res) => {
   try {

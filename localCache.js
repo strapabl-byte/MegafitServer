@@ -600,7 +600,7 @@ function setLastSync(gymId) {
   setMeta(`last_full_sync_${gymId}`, new Date().toISOString());
 }
 
-// ── PENDING MEMBERS (MEGAEYE FAST ANALYTICS) ────────────────────────────────
+// ── PENDING MEMBERS (AURALIX FAST ANALYTICS) ────────────────────────────────
 function setPending(data) {
   if (!data || !data.id) return;
   try {
@@ -812,7 +812,7 @@ module.exports = {
   upsertPayments, getPayments, deletePayment,
   // meta
   getMeta, setMeta, getLastSync, setLastSync,
-  // pending (megaeye)
+  // pending (auralix)
   setPending, updatePendingStatus, getPending, getPendingWithPdf, getPendingById,
   // incidents cache
   upsertIncidents, getIncidents, resolveIncidentCache,

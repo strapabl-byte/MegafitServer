@@ -109,7 +109,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
 
       console.log(`📝 Inscription N° ${finalContractNumber} — ${normalizedGymId}`);
       
-      // ✅ MEGAEYE FAST SYNC: Send lightweight copy to local 1GB SQLite disk 
+      // ✅ AURALIX FAST SYNC: Send lightweight copy to local 1GB SQLite disk 
       lc.setPending({
         id: result.id, 
         gymId: normalizedGymId, 
@@ -384,7 +384,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
 
       await insRef.update({ status: 'awaiting_payment', memberId: memberRef.id, memberCreatedAt: admin.firestore.FieldValue.serverTimestamp(), memberCreatedBy: req.user?.preferred_username || 'Admin' });
       
-      // ✅ MEGAEYE FAST SYNC: Flag as accepted in local SQLite
+      // ✅ AURALIX FAST SYNC: Flag as accepted in local SQLite
       lc.updatePendingStatus(req.params.id, 'accepted');
 
       invalidateCache(apiCache.inscriptions);
