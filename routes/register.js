@@ -244,13 +244,27 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
 
       // ── 1. RESTE EN ATTENTE ───────────────────────────────────────────────
       const resteEntries = allEntries
-        .filter(e => Number(e.reste) > 0)
-        .map(e => ({
-          id: e.id, nom: e.nom, cin: e.cin, tel: e.tel,
-          gym_id: e.gym_id, date: e.date,
-          reste: Number(e.reste), note: e.note_reste || null,
-          prix: Number(e.prix), commercial: e.commercial,
-        }));
+        .map(e => {
+          const paid = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
+          const prix = Number(e.prix) || 0;
+          let r = Number(e.reste) || 0;
+          
+          // If no explicit reste, compute it from price - paid
+          if (r <= 0 && prix > paid) {
+            r = prix - paid;
+          }
+
+          if (r > 0) {
+            return {
+              id: e.id, nom: e.nom, cin: e.cin, tel: e.tel,
+              gym_id: e.gym_id, date: e.date,
+              reste: r, note: e.note_reste || null,
+              prix: prix, commercial: e.commercial,
+            };
+          }
+          return null;
+        })
+        .filter(Boolean);
 
       // ── 2. DOUBLONS ───────────────────────────────────────────────────────
       const byCin = {};
@@ -374,8 +388,14 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
       allEntries.forEach(e => {
         const c = e.commercial || 'SANS_COMMERCIAL';
         if (!commStats[c]) commStats[c] = { total: 0, reste: 0, count: 0 };
-        commStats[c].total += Number(e.prix) + (Number(e.reste) || 0);
-        commStats[c].reste += (Number(e.reste) || 0);
+        
+        const paid = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
+        const prix = Number(e.prix) || 0;
+        let r = Number(e.reste) || 0;
+        if (r <= 0 && prix > paid) r = prix - paid;
+
+        commStats[c].total += (prix > 0 ? prix : (paid + r));
+        commStats[c].reste += r;
         commStats[c].count++;
       });
       Object.entries(commStats).forEach(([comm, s]) => {
