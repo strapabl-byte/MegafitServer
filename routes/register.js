@@ -216,6 +216,168 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
     }
   });
 
+  // ── GET /api/register/auralix-analysis ───────────────────────────────────
+  // AURALIX AI: Scans the full month's register for a gym and returns:
+  //   - reste: unpaid balances
+  //   - duplicates: suspect or renewal entries (by CIN/name)
+  //   - anomalies: prix=0 entries
+  //   - summary: auto-generated French insight text
+  router.get('/auralix-analysis', verifyAzureToken, async (req, res) => {
+    try {
+      const { gymId = 'dokarat', month } = req.query;
+      // month format: YYYY-MM (defaults to current month)
+      const target = month || (() => {
+        const d = new Date();
+        return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+      })();
+
+      const gymIds = gymId === 'all' ? ['dokarat','marjane','casa1','casa2'] : [gymId];
+
+      // ── Load all entries for the target month from SQLite ─────────────────
+      const phGym = gymIds.map(() => '?').join(',');
+      const allEntries = lc.db.prepare(`
+        SELECT * FROM register_cache
+        WHERE gym_id IN (${phGym})
+          AND date >= ? AND date <= ?
+        ORDER BY date ASC
+      `).all(...gymIds, `${target}-01`, `${target}-31`);
+
+      // ── 1. RESTE EN ATTENTE ───────────────────────────────────────────────
+      const resteEntries = allEntries
+        .filter(e => Number(e.reste) > 0)
+        .map(e => ({
+          id: e.id, nom: e.nom, cin: e.cin, tel: e.tel,
+          gym_id: e.gym_id, date: e.date,
+          reste: Number(e.reste), note: e.note_reste || null,
+          prix: Number(e.prix), commercial: e.commercial,
+        }));
+
+      // ── 2. DOUBLONS ───────────────────────────────────────────────────────
+      const byCin = {};
+      const byName = {};
+      allEntries.forEach(e => {
+        // Group by CIN
+        const cin = (e.cin || '').trim().toUpperCase();
+        if (cin && cin !== '-' && cin.length > 2) {
+          if (!byCin[cin]) byCin[cin] = [];
+          byCin[cin].push(e);
+        }
+        // Group by normalised name (for no-CIN entries)
+        const nom = (e.nom || '').trim().toUpperCase().replace(/\s+/g, ' ');
+        if (nom) {
+          if (!byName[nom]) byName[nom] = [];
+          byName[nom].push(e);
+        }
+      });
+
+      const duplicates = [];
+
+      // CIN-based duplicates
+      Object.entries(byCin).forEach(([cin, entries]) => {
+        if (entries.length < 2) return;
+        // Sort by date
+        entries.sort((a, b) => a.date.localeCompare(b.date));
+        for (let i = 1; i < entries.length; i++) {
+          const prev = entries[i-1], curr = entries[i];
+          const daysDiff = Math.round((new Date(curr.date) - new Date(prev.date)) / 86400000);
+          const sameGym = prev.gym_id === curr.gym_id;
+          const type = (sameGym && daysDiff < 45) ? 'suspect' : 'renouvellement';
+          duplicates.push({
+            type, cin,
+            entries: [prev, curr].map(e => ({
+              id: e.id, nom: e.nom, gym_id: e.gym_id, date: e.date,
+              prix: Number(e.prix), abonnement: e.abonnement, commercial: e.commercial
+            })),
+            daysDiff,
+            reason: type === 'suspect'
+              ? `Même CIN inscrit 2× en ${daysDiff} jours — probable doublon`
+              : `Même CIN — renouvellement après ${daysDiff} jours`,
+          });
+        }
+      });
+
+      // Name-only duplicates (no CIN match already found above)
+      Object.entries(byName).forEach(([nom, entries]) => {
+        if (entries.length < 2) return;
+        const hasCin = entries.some(e => {
+          const cin = (e.cin||'').trim().toUpperCase();
+          return cin && cin !== '-' && cin.length > 2 && byCin[cin]?.length > 1;
+        });
+        if (hasCin) return; // already captured by CIN logic
+        entries.sort((a, b) => a.date.localeCompare(b.date));
+        const daysDiff = Math.round((new Date(entries[entries.length-1].date) - new Date(entries[0].date)) / 86400000);
+        duplicates.push({
+          type: 'nom_seulement',
+          cin: null,
+          entries: entries.map(e => ({
+            id: e.id, nom: e.nom, gym_id: e.gym_id, date: e.date,
+            prix: Number(e.prix), abonnement: e.abonnement, commercial: e.commercial
+          })),
+          daysDiff,
+          reason: `Même nom sans CIN — vérification requise`,
+        });
+      });
+
+      // ── 3. ANOMALIES PRIX ─────────────────────────────────────────────────
+      const anomalies = allEntries
+        .filter(e => Number(e.prix) === 0 && e.nom && e.nom.trim())
+        .map(e => ({
+          id: e.id, nom: e.nom, gym_id: e.gym_id, date: e.date,
+          abonnement: e.abonnement, commercial: e.commercial,
+          reason: 'Prix = 0 DH — inscription sans montant',
+        }));
+
+      // ── 4. FINANCIAL HEALTH ───────────────────────────────────────────────
+      const totalReste = resteEntries.reduce((s, e) => s + e.reste, 0);
+      const suspectCount = duplicates.filter(d => d.type === 'suspect').length;
+      const totalEntries = allEntries.length;
+      // Score: 100 → penalise for reste, suspect dups, anomalies
+      const score = Math.max(0, 100
+        - Math.min(30, resteEntries.length * 10)
+        - Math.min(30, suspectCount * 8)
+        - Math.min(20, anomalies.length * 5));
+
+      // ── 5. AURALIX INSIGHT TEXT ───────────────────────────────────────────
+      const gymName = { dokarat: 'Doukkarate', marjane: 'Marjane', casa1: 'Casa 1', casa2: 'Casa 2' }[gymId] || gymId;
+      const monthFr = new Date(`${target}-15`).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+
+      let insight = '';
+      if (resteEntries.length === 0 && suspectCount === 0 && anomalies.length === 0) {
+        insight = `✨ ${gymName} — ${monthFr} : Aucun problème détecté. Registre propre.`;
+      } else {
+        const parts = [];
+        if (resteEntries.length > 0)
+          parts.push(`${resteEntries.length} reste${resteEntries.length>1?'s':''} impayé${resteEntries.length>1?'s':''} (${totalReste.toLocaleString()} DH au total)`);
+        if (suspectCount > 0)
+          parts.push(`${suspectCount} doublon${suspectCount>1?'s':''} suspect${suspectCount>1?'s':''} à vérifier`);
+        if (anomalies.length > 0)
+          parts.push(`${anomalies.length} inscription${anomalies.length>1?'s':''} à prix zéro`);
+        insight = `🔍 ${gymName} — ${monthFr} : ${parts.join(', ')}. Score santé : ${score}/100.`;
+      }
+
+      res.json({
+        ok: true, gymId, month: target,
+        totalEntries, score,
+        insight,
+        reste: resteEntries,
+        duplicates: duplicates.sort((a, b) => (a.type === 'suspect' ? -1 : 1)),
+        anomalies,
+        stats: {
+          totalReste,
+          suspectDuplicates: suspectCount,
+          renewals: duplicates.filter(d => d.type === 'renouvellement').length,
+          nameOnlyDuplicates: duplicates.filter(d => d.type === 'nom_seulement').length,
+          prixZero: anomalies.length,
+        }
+      });
+    } catch (err) {
+      console.error('GET /api/register/auralix-analysis error:', err);
+      res.status(500).json({ error: 'Auralix analysis failed' });
+    }
+  });
+
+
+
   // ── GET /api/register/decaissements-history ───────────────────────────────
   // Returns full history of décaissements (sortie d'espèces) with gym & date range filter.
   // SQLite-first, Firestore fallback, writes through to SQLite on miss.
