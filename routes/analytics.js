@@ -285,8 +285,13 @@ Reply ONLY with valid JSON (no markdown):
     }
 
     // 1. Check SQLite identity cache (gym-specific)
+    // TTL: 24h — so renewals are reflected the next day
     const cached = lc.db.prepare('SELECT * FROM smart_identity_cache WHERE entry_key=?').get(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      const ageMs = Date.now() - new Date(cached.cached_at || 0).getTime();
+      if (ageMs < 86400000) return cached; // < 24h → use cache
+      // > 24h → fall through and re-identify (picks up renewals)
+    }
 
     // 2. Fetch top 10 matches across ALL gyms
     const top10 = fuzzyMatchMembers(entry.name, 10);
@@ -305,13 +310,22 @@ Reply ONLY with valid JSON (no markdown):
 
     let matched = null, status = 'unknown', confidence = 0, comment = '', groqUsed = 0;
 
+    // ── Helper: use expires_on DATE not Odoo status string (can be stale after renewal) ──
+    const today = getMoroccanDateStr();
+    const isSubCurrentlyActive = (m) => {
+      if (m.expires_on) {
+        try { return new Date(m.expires_on) >= new Date(today); } catch (_) {}
+      }
+      return m.status === 'Active';
+    };
+
     // ── Case A: Strong match at current gym ─────────────────────────────────
     if (bestAtCurrent && bestAtCurrent.score >= 85) {
       matched    = bestAtCurrent;
       confidence = bestAtCurrent.score;
-      if (bestAtCurrent.status !== 'Active') {
+      if (!isSubCurrentlyActive(bestAtCurrent)) {
         status  = 'expired';
-        comment = `Abonnement expiré le ${bestAtCurrent.expires_on || '?'}`;
+        comment = `Abonnement expire le ${bestAtCurrent.expires_on || '?'}`;
       } else if (isMultiGym) {
         status  = 'confirmed';
         const otherGyms = [...new Set(atOtherGyms.filter(m => m.score >= 70).map(m => GYM_DISPLAY[m.gym_id] || m.gym_id))].join(' + ');
@@ -348,7 +362,7 @@ Reply ONLY with valid JSON (no markdown):
         confidence = groqResult.confidence;
         comment    = groqResult.comment;
         if (matched) {
-          if (matched.status !== 'Active') {
+          if (!isSubCurrentlyActive(matched)) {
             status = 'expired';
           } else if (matched.gym_id === gymId) {
             status = 'probable';
