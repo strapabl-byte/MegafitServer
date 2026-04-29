@@ -232,6 +232,11 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
       })();
 
       const gymIds = gymId === 'all' ? ['dokarat','marjane','casa1','casa2'] : [gymId];
+      const gymMap = { dokarat: 'Dokkarat', marjane: 'Marjane', casa1: 'Casa 1', casa2: 'Casa 2', all: 'Tous les clubs' };
+      const gymName = gymMap[gymId] || gymId;
+
+      const dateObj = new Date(target + "-01");
+      const monthFr = dateObj.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
 
       // ── Load all entries for the target month from SQLite ─────────────────
       const phGym = gymIds.map(() => '?').join(',');
