@@ -14,6 +14,15 @@ const jwks = jwksClient({
   cacheMaxAge: 10 * 60 * 60 * 1000, // 10 hours
 });
 
+// 🔒 SECURITY: Mapping emails to specific Gym IDs
+// Managers will be automatically restricted to these clubs.
+const MANAGER_MAPPING = {
+  'megafitsaiss@outlook.com': 'marjane',
+  // 'email_dukkarate': 'dokarat',
+  // 'email_casa1': 'casa1',
+  // 'email_casa2': 'casa2',
+};
+
 function getKey(header, cb) {
   jwks.getSigningKey(header.kid, (err, key) => {
     if (err) return cb(err, null);
@@ -63,9 +72,23 @@ function verifyAzureToken(req, res, next) {
     if (!audOk) return res.status(401).json({ error: 'Invalid audience' });
 
     req.user      = decoded;
-    req.isAdmin   = !decoded.extension_Gym;
-    req.isManager = !!(decoded.roles?.includes('Manager') || decoded.extension_Role === 'manager' || decoded.extension_Gym);
-    req.assignedGyms   = decoded.extension_Gym ? [decoded.extension_Gym] : ['all'];
+    const email = (decoded.preferred_username || decoded.upn || '').toLowerCase();
+    
+    // Check if user is a pre-configured manager
+    const assignedGym = MANAGER_MAPPING[email];
+    
+    if (assignedGym) {
+      // Automatic Manager Role
+      req.isAdmin   = false;
+      req.isManager = true;
+      req.assignedGyms = [assignedGym];
+    } else {
+      // Default Logic (Azure attributes)
+      req.isAdmin   = !decoded.extension_Gym;
+      req.isManager = !!(decoded.roles?.includes('Manager') || decoded.extension_Role === 'manager' || decoded.extension_Gym);
+      req.assignedGyms   = decoded.extension_Gym ? [decoded.extension_Gym] : ['all'];
+    }
+
     req.hasAccessToGym = (gymId) => {
       if (req.assignedGyms.includes('all')) return true;
       return req.assignedGyms.includes(gymId);
