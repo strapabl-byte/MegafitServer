@@ -464,94 +464,117 @@ Reply ONLY with valid JSON (no markdown):
         try { return new Date(expiresOn) >= new Date(today); } catch (e) { return false; }
       };
 
-      let merged = [];
+      // ── PRE-BUILD prefix index for fast partial name lookups (O(1) per entry) ──
+      // Avoids iterating all 9k members for every single entry
+      const prefixIndex = new Map();
+      for (const [mName, mData] of memberByName.entries()) {
+        const prefix = mName.slice(0, 6);
+        if (!prefixIndex.has(prefix)) prefixIndex.set(prefix, []);
+        prefixIndex.get(prefix).push({ name: mName, data: mData });
+      }
+
+      // ── BATCH-LOAD all entries + identity cache in 1 query (not N queries) ──
+      const allEntries = [];
       for (const gid of targetGymIds) {
         for (const e of lc.getEntries(gid, today, limitCount)) {
-          let member = null;
-          let matchMethod = 'none';
+          allEntries.push({ ...e, _gid: gid });
+        }
+      }
+      const cacheKeys = allEntries.map(e =>
+        e.user_id ? `uid_${e.user_id}_at_${e._gid}` : `name_${normId(e.name)}_at_${e._gid}`
+      );
+      const cachedIds = new Map();
+      if (cacheKeys.length > 0) {
+        const placeholdersId = cacheKeys.map(() => '?').join(',');
+        const rows = lc.db.prepare(`SELECT * FROM smart_identity_cache WHERE entry_key IN (${placeholdersId})`).all(...cacheKeys);
+        for (const row of rows) cachedIds.set(row.entry_key, row);
+      }
 
-          // ── 1. Exact match by ZKTeco user_id (most reliable, Doukkarate new format) ──
-          if (e.user_id) {
-            member = memberByUserId.get(String(e.user_id)) || null;
-            if (member) matchMethod = 'user_id';
-          }
+      let merged = [];
+      for (const e of allEntries) {
+        const gid = e._gid;
+        let member = null;
+        let matchMethod = 'none';
 
-          // ── 2. Fallback: exact name match ─────────────────────────────────────────
-          if (!member) {
-            // Use the clean display name (already stripped of [ID] prefix by pollDoorEntries)
-            const entryNorm = normalize(e.name);
-            member = memberByName.get(entryNorm) || null;
-            if (member) matchMethod = 'name_exact';
+        // ── 1. Exact match by ZKTeco user_id ──────────────────────────────────
+        if (e.user_id) {
+          member = memberByUserId.get(String(e.user_id)) || null;
+          if (member) matchMethod = 'user_id';
+        }
 
-            // ── 3. Partial name match (legacy names, single-word entries) ───────────
-            if (!member && entryNorm.length > 3) {
-              const entryFirst = entryNorm.split(' ')[0];
-              for (const [mName, mData] of memberByName.entries()) {
-                if (mName.includes(entryNorm) || (entryFirst.length > 3 && mName.startsWith(entryFirst))) {
-                  member = mData;
-                  matchMethod = 'name_partial';
-                  break;
-                }
+        // ── 2. Exact name match ───────────────────────────────────────────────
+        if (!member) {
+          const entryNorm = normalize(e.name);
+          member = memberByName.get(entryNorm) || null;
+          if (member) matchMethod = 'name_exact';
+
+          // ── 3. Fast prefix partial match (O(1) via prefix index) ───────────
+          if (!member && entryNorm.length > 3) {
+            const prefix = entryNorm.slice(0, 6);
+            const candidates = prefixIndex.get(prefix) || [];
+            for (const { name: mName, data: mData } of candidates) {
+              if (mName.includes(entryNorm)) {
+                member = mData;
+                matchMethod = 'name_partial';
+                break;
               }
             }
           }
+        }
 
-          const isKnown = !!member;
-          const memberStatus = isKnown
-            ? (isSubActive(member.expiresOn) ? 'active' : 'expired')
-            : 'unknown';
+        const isKnown = !!member;
+        const memberStatus = isKnown
+          ? (isSubActive(member.expiresOn) ? 'active' : 'expired')
+          : 'unknown';
 
-          // ── Attach smart ID (SQLite cache: 0ms if known, Groq async if new) ──
-          const cacheKey = e.user_id
-            ? `uid_${e.user_id}_at_${gid}`
-            : `name_${normId(e.name)}_at_${gid}`;
-          
-          let cachedId = lc.db.prepare('SELECT * FROM smart_identity_cache WHERE entry_key=?').get(cacheKey);
-          
-          // ── Synchronous Staff Detection (Instant on first scan) ────────────────
-          if (!cachedId) {
-            const staffInfo = detectStaff(e.name);
-            if (staffInfo) {
-              cachedId = await identifyEntry(e, gid, false); // Sync call for staff (skips Groq)
-            }
-          }
+        const cacheKey = e.user_id
+          ? `uid_${e.user_id}_at_${gid}`
+          : `name_${normId(e.name)}_at_${gid}`;
 
-          const visits = getVisitStats(e, gid);
+        let cachedId = cachedIds.get(cacheKey) || null;
 
-          merged.push({
-            docId:          e.id,
-            name:           e.name,
-            userId:         e.user_id || null,
-            gymId:          gid,
-            displayTime:    (e.timestamp || '').slice(11, 16),
-            timestamp:      e.timestamp,
-            status:         e.status,
-            method:         e.method,
-            isFace:         e.is_face === 1,
-            isKnown,
-            memberStatus,
-            matchMethod,
-            expiresOn:      member ? member.expiresOn : null,
-            userTodayCount: visits.today,
-            userWeekCount:  visits.week,
-            smartId: cachedId ? {
-              status:      cachedId.id_status,
-              matchedName: cachedId.matched_name,
-              matchedGym:  cachedId.matched_gym,
-              confidence:  cachedId.confidence,
-              comment:     cachedId.comment,
-              groqUsed:    !!cachedId.groq_used,
-            } : null,
-          });
+        // Sync staff detection for uncached staff entries (no Groq needed)
+        if (!cachedId) {
+          const staffInfo = detectStaff(e.name);
+          if (staffInfo) cachedId = await identifyEntry(e, gid, false);
+        }
 
-          // 🔁 Fire Groq async for new unknowns — no await, instant response
-          if (!cachedId && !isKnown) {
-            identifyEntry(e, gid, true).catch(() => {});
-          }
+        const visits = getVisitStats(e, gid);
+
+        merged.push({
+          docId:          e.id,
+          name:           e.name,
+          userId:         e.user_id || null,
+          gymId:          gid,
+          displayTime:    (e.timestamp || '').slice(11, 16),
+          timestamp:      e.timestamp,
+          status:         e.status,
+          method:         e.method,
+          isFace:         e.is_face === 1,
+          isKnown,
+          memberStatus,
+          matchMethod,
+          expiresOn:      member ? member.expiresOn : null,
+          userTodayCount: visits.today,
+          userWeekCount:  visits.week,
+          smartId: cachedId ? {
+            status:      cachedId.id_status,
+            matchedName: cachedId.matched_name,
+            matchedGym:  cachedId.matched_gym,
+            confidence:  cachedId.confidence,
+            comment:     cachedId.comment,
+            groqUsed:    !!cachedId.groq_used,
+          } : null,
+        });
+
+        // 🔁 Fire Groq async for new unknowns — no await, instant response
+        if (!cachedId && !isKnown) {
+          identifyEntry(e, gid, true).catch(() => {});
         }
       }
 
       merged.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+
       res.json({ ok: true, gymId, count: merged.length, entries: merged.slice(0, limitCount) });
     } catch (err) {
       console.error('Live Entries Error:', err);
