@@ -428,6 +428,11 @@ Reply ONLY with valid JSON (no markdown):
     }
   });
 
+  // ── 5-second server-side cache for /api/live-entries ─────────────────────
+  // Protects Render (0.5 CPU) from rapid gym-switching storms.
+  // Each gymId gets its own cache slot; expires after 5s.
+  const liveEntriesCache = new Map(); // key: `${gymId}:${date}` → { ts, data }
+
   // ?????? GET /api/live-entries ?????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
   router.get('/api/live-entries', verifyAzureToken, async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
@@ -438,7 +443,17 @@ Reply ONLY with valid JSON (no markdown):
       if (!gymId) return res.status(400).json({ error: 'gymId required' });
       const limitCount = Math.min(parseInt(limitParam) || 50, 200);
       const today = getMoroccanDateStr();
+
+      // ── Server-side cache hit? Return instantly, skip all processing ──────
+      const cacheKey = `${gymId}:${today}`;
+      const cached = liveEntriesCache.get(cacheKey);
+      if (cached && (Date.now() - cached.ts) < 5000) {
+        res.setHeader('X-Cache', 'HIT');
+        return res.json(cached.data);
+      }
+
       const targetGymIds = gymId === 'all' ? Object.keys(GYM_DOOR_MAP) : [gymId];
+
 
       // Cross-reference: load members from SQLite — include zkteco_user_id for precise matching
       const placeholders = targetGymIds.map(() => '?').join(',');
@@ -589,7 +604,11 @@ Reply ONLY with valid JSON (no markdown):
 
       merged.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
 
-      res.json({ ok: true, gymId, count: merged.length, entries: merged.slice(0, limitCount) });
+      const responseData = { ok: true, gymId, count: merged.length, entries: merged.slice(0, limitCount) };
+      // ── Store in 5s cache so rapid gym switches don't reprocess ───────────
+      liveEntriesCache.set(cacheKey, { ts: Date.now(), data: responseData });
+      res.json(responseData);
+
     } catch (err) {
       console.error('Live Entries Error:', err);
       res.status(500).json({ error: 'Failed to fetch live entries' });
