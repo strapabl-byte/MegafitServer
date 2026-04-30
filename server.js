@@ -403,6 +403,7 @@ app.use('/',                require('./routes/inscriptions')(deps));// /public/*
 app.use('/',                require('./routes/config')(deps));      // /public/pass, /api/chat, config
 app.use('/',                require('./routes/activity')(deps));    // /api/activity/logs
 app.use('/',                require('./routes/recruitment')(deps)); // /api/recruitment/applications
+app.use('/',                require('./routes/scan')());          // /public/scan-cin (Groq Vision)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Healthcheck
