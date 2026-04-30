@@ -393,8 +393,9 @@ app.post('/admin/inject-stats', (req, res) => {
 app.use('/api/members',     require('./routes/members')(deps));
 app.use('/api/register',    require('./routes/register')(deps));
 app.use('/api/payments',    require('./routes/payments')(deps));
-app.use('/api/commercials', require('./routes/commercials')(deps));
+app.use('/api/sales',       require('./routes/sales')(deps));
 // analytics router — stored so we can call pollDoorEntries() from the interval
+
 const analyticsRouter = require('./routes/analytics')(deps);
 app.use('/', analyticsRouter); // mounts /api/live-entries, /api/live-count, /api/analytics/*
 app.use('/',                require('./routes/courses')(deps));     // /api/courses, /api/coaches, /public/courses, etc.
