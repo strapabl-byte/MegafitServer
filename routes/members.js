@@ -174,7 +174,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           cin:            member.cin            || null,
           balance:        member.balance        || 0,
           isFrozen:       member.isFrozen       || !!member.is_frozen     || false,
-          inscriptionId:  member.inscriptionId  || null,
+          inscriptionId:  member.inscriptionId  || member.inscription_id || null,
           createdAtStr:   member.createdAt      || member.created_at      || null,
           source: 'disk',
         };

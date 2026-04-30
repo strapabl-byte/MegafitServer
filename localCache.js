@@ -69,6 +69,7 @@ db.exec(`
     ville       TEXT,
     is_archive  INTEGER DEFAULT 0,
     bonus_3months INTEGER DEFAULT 0,
+    inscription_id TEXT,
     PRIMARY KEY (id, gym_id)
   );
   CREATE INDEX IF NOT EXISTS idx_members_gym ON members_cache(gym_id);
@@ -81,7 +82,8 @@ const migrations = [
   'ALTER TABLE members_cache ADD COLUMN adresse TEXT',
   'ALTER TABLE members_cache ADD COLUMN ville TEXT',
   'ALTER TABLE members_cache ADD COLUMN is_archive INTEGER DEFAULT 0',
-  'ALTER TABLE members_cache ADD COLUMN bonus_3months INTEGER DEFAULT 0'
+  'ALTER TABLE members_cache ADD COLUMN bonus_3months INTEGER DEFAULT 0',
+  'ALTER TABLE members_cache ADD COLUMN inscription_id TEXT'
 ];
 
 for (const m of migrations) {
@@ -395,9 +397,9 @@ function getDailyStat(gymId, date) {
 
 const insertMember = db.prepare(`
   INSERT OR REPLACE INTO members_cache
-    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date, email, adresse, ville, is_archive, bonus_3months)
+    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date, email, adresse, ville, is_archive, bonus_3months, inscription_id)
   VALUES
-    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date, @email, @adresse, @ville, @is_archive, @bonus_3months)
+    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date, @email, @adresse, @ville, @is_archive, @bonus_3months, @inscription_id)
 `);
 
 function upsertMembers(gymId, membersArr) {
@@ -437,12 +439,13 @@ function upsertMembers(gymId, membersArr) {
     ville:             m.ville || '',
     is_archive:        (m.isArchive || m.is_archive || m.importedFromOdoo) ? 1 : 0,
     bonus_3months:     m.bonus3Months ? 1 : 0,
+    inscription_id:    m.inscriptionId || m.inscription_id || null,
   })));
 }
 
 function getMembers(gymId) {
   const g = buildInClause(getGymIds(gymId));
-  const sql = `SELECT * FROM members_cache WHERE ${g.sql} ORDER BY full_name`;
+  const sql = `SELECT * FROM members_cache WHERE ${g.sql} ORDER BY created_at DESC, full_name ASC`;
   return db.prepare(sql).all(...g.params);
 }
 
@@ -497,7 +500,7 @@ function upsertRegister(gymId, date, entriesArr) {
 
 function getRegister(gymId, date) {
   const g = buildInClause(getGymIds(gymId));
-  const sql = `SELECT * FROM register_cache WHERE ${g.sql} AND date=? ORDER BY created_at ASC`;
+  const sql = `SELECT * FROM register_cache WHERE ${g.sql} AND date=? ORDER BY created_at DESC`;
   return db.prepare(sql).all(...g.params, date);
 }
 

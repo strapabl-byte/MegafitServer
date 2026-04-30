@@ -22,6 +22,8 @@ const GYM_SYNC_MAP = [
     locationTags: ["fes saiss", "fes marjane"], // flexible matching
     collections: ["saiss entrees logs", "mega_fit_logs"], // aggregate leaked logs
   },
+  { id: "casa1", collection: null, collections: [] },
+  { id: "casa2", collection: null, collections: [] },
 ];
 
 function moroccoDateStr(date = new Date()) {
@@ -183,13 +185,14 @@ const parseNum = (field) => {
   return null;
 };
 
-async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => false, forceManual = false) {
+async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => false, forceManual = false, options = {}) {
   if (checkQuota()) {
     console.warn("⚠️ [SYNC SKIPPED] Quota exceeded. Silence mode active.");
     return;
   }
   const admin = require("firebase-admin");
   const today = moroccoDateStr();
+  const syncRegisterOnly = options.syncRegisterOnly || false;
 
   // Build list of dates to sync (today + past N days)
   const dates = [];
@@ -197,95 +200,89 @@ async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => fals
     dates.push(moroccoDateStr(new Date(Date.now() - i * 86400000)));
   }
 
-  console.log(`🔄 Auto-sync starting for: ${dates.join(", ")} (Force Manual: ${forceManual})`);
+  console.log(`🔄 Sync starting for: ${dates.join(", ")} (Register Only: ${syncRegisterOnly}, Force Manual: ${forceManual})`);
 
-  for (const gym of GYM_SYNC_MAP) {
-    for (const dateStr of dates) {
-      try {
-        let unique = 0, raw = 0;
-        const allCollections = gym.collections || [gym.collection];
-        const tags = (gym.locationTags || [gym.locationTag || '']).map(t => t.toLowerCase().trim());
+  // 1️⃣ Sync Doors (Skip if syncRegisterOnly is true)
+  if (!syncRegisterOnly) {
+    for (const gym of GYM_SYNC_MAP) {
+      if (!gym.collection && (!gym.collections || gym.collections.length === 0)) continue;
+      for (const dateStr of dates) {
+        try {
+          let unique = 0, raw = 0;
+          const allCollections = gym.collections || [gym.collection];
+          const tags = (gym.locationTags || [gym.locationTag || '']).map(t => t.toLowerCase().trim());
 
-        if (dateStr === today && !forceManual) {
-          // ── TODAY: incremental — only fetch docs newer than what's in SQLite ──
-          // The live pollDoorEntries (every 60s) already handles this continuously.
-          // Here we just make sure daily_stats is up to date from SQLite counts.
-          const sqliteUnique = getLC().getUniqueEntryCount(gym.id, dateStr);
-          const sqliteRaw    = getLC().getEntryCount(gym.id, dateStr);
+          if (dateStr === today && !forceManual) {
+            const sqliteUnique = getLC().getUniqueEntryCount(gym.id, dateStr);
+            const sqliteRaw    = getLC().getEntryCount(gym.id, dateStr);
 
-          // Also try to get the latest device-reported total (1 read per collection)
-          let deviceUnique = 0, deviceRaw = 0;
-          for (const coll of allCollections) {
-            const latestDoc = await fetchLatestDoc(coll, dateStr);
-            if (!latestDoc) continue;
-            const f = latestDoc.fields || {};
-            const loc = (f.location?.stringValue || '').toLowerCase();
-            if (!tags.some(t => loc === t || loc.includes(t) || t.includes(loc))) continue;
-            const du = parseNum(f.daily_unique);
-            const dt = parseNum(f.daily_total);
-            if (du !== null) { deviceUnique = Math.max(deviceUnique, du); deviceRaw = Math.max(deviceRaw, dt || du); }
-          }
-
-          // Use whichever is higher — device counter or SQLite count
-          unique = Math.max(sqliteUnique, deviceUnique);
-          raw    = Math.max(sqliteRaw, deviceRaw);
-          console.log(`  📡 ${gym.id} / ${dateStr}: ${unique} unique (device:${deviceUnique} sqlite:${sqliteUnique})`);
-
-        } else {
-          // ── PAST DAYS: 1 read per collection — last doc carries the day's total ──
-          // The door device embeds daily_unique/daily_total in every scan.
-          // The last scan of the day has the final count. Zero Firestore waste.
-          for (const coll of allCollections) {
-            const latestDoc = await fetchLatestDoc(coll, dateStr);
-            if (!latestDoc) continue;
-            const f = latestDoc.fields || {};
-            // Verify this doc belongs to this gym location
-            const loc = (f.location?.stringValue || '').toLowerCase();
-            if (!tags.some(t => loc === t || loc.includes(t) || t.includes(loc))) continue;
-            const du = parseNum(f.daily_unique);
-            const dt = parseNum(f.daily_total);
-            if (du !== null) {
-              unique = Math.max(unique, du);
-              raw    = Math.max(raw, dt || du);
+            let deviceUnique = 0, deviceRaw = 0;
+            for (const coll of allCollections) {
+              const latestDoc = await fetchLatestDoc(coll, dateStr);
+              if (!latestDoc) continue;
+              const f = latestDoc.fields || {};
+              const loc = (f.location?.stringValue || '').toLowerCase();
+              if (!tags.some(t => loc === t || loc.includes(t) || t.includes(loc))) continue;
+              const du = parseNum(f.daily_unique);
+              const dt = parseNum(f.daily_total);
+              if (du !== null) { deviceUnique = Math.max(deviceUnique, du); deviceRaw = Math.max(deviceRaw, dt || du); }
             }
-          }
 
-          // Fallback or explicit full scan: fetch all logs to build historical entry list
-          if (unique === 0 || forceManual) {
-            const docs = await fetchRecentLogsFromCollections(allCollections, dateStr);
-            const res  = deduplicateForDate(docs, tags, dateStr);
-            unique = res.unique;
-            raw    = res.raw;
-            if (res.rawEntries && res.rawEntries.length > 0) {
-               getLC().upsertEntries(gym.id, res.rawEntries);
-            }
-            if (unique > 0) console.log(`  🔍 ${gym.id} / ${dateStr}: ${unique} unique (${forceManual ? 'Deep Scan repair/historical' : 'Manual count fallback'})`);
-            else            console.log(`  ⚠️  ${gym.id} / ${dateStr}: no data found even in logs`);
+            unique = Math.max(sqliteUnique, deviceUnique);
+            raw    = Math.max(sqliteRaw, deviceRaw);
+            console.log(`  📡 ${gym.id} / ${dateStr}: ${unique} unique (device:${deviceUnique} sqlite:${sqliteUnique})`);
+
           } else {
-            console.log(`  ✅ ${gym.id} / ${dateStr}: ${unique} unique, ${raw} raw (1-read from device counter)`);
+            for (const coll of allCollections) {
+              const latestDoc = await fetchLatestDoc(coll, dateStr);
+              if (!latestDoc) continue;
+              const f = latestDoc.fields || {};
+              const loc = (f.location?.stringValue || '').toLowerCase();
+              if (!tags.some(t => loc === t || loc.includes(t) || t.includes(loc))) continue;
+              const du = parseNum(f.daily_unique);
+              const dt = parseNum(f.daily_total);
+              if (du !== null) {
+                unique = Math.max(unique, du);
+                raw    = Math.max(raw, dt || du);
+              }
+            }
+
+            if (unique === 0 || forceManual) {
+              const docs = await fetchRecentLogsFromCollections(allCollections, dateStr);
+              const res  = deduplicateForDate(docs, tags, dateStr);
+              unique = res.unique;
+              raw    = res.raw;
+              if (res.rawEntries && res.rawEntries.length > 0) {
+                 getLC().upsertEntries(gym.id, res.rawEntries);
+              }
+              if (unique > 0) console.log(`  🔍 ${gym.id} / ${dateStr}: ${unique} unique (${forceManual ? 'Deep Scan repair/historical' : 'Manual count fallback'})`);
+              else            console.log(`  ⚠️  ${gym.id} / ${dateStr}: no data found even in logs`);
+            } else {
+              console.log(`  ✅ ${gym.id} / ${dateStr}: ${unique} unique, ${raw} raw (1-read from device counter)`);
+            }
           }
+
+          getLC().upsertDailyStat(gym.id, dateStr, unique, raw);
+
+          db.collection("gym_daily_stats").doc(`${gym.id}_${dateStr}`).set(
+            { gym_id: gym.id, date: dateStr, count: unique, rawCount: raw, lastSyncedAt: admin.firestore.FieldValue.serverTimestamp() },
+            { merge: true }
+          ).catch(e => console.warn(`  ⚠️ Firestore write failed for ${gym.id}/${dateStr}:`, e.message));
+
+          if (apiCache?.dailyStats) delete apiCache.dailyStats[gym.id];
+        } catch (err) {
+          console.error(`  ❌ Door sync failed for ${gym.id} / ${dateStr}:`, err.message);
         }
-
-        // Save to SQLite daily_stats (the chart reads from here — zero Firestore cost)
-        getLC().upsertDailyStat(gym.id, dateStr, unique, raw);
-
-        // Write summary to Firestore gym_daily_stats (fire-and-forget backup)
-        db.collection("gym_daily_stats").doc(`${gym.id}_${dateStr}`).set(
-          { gym_id: gym.id, date: dateStr, count: unique, rawCount: raw, lastSyncedAt: admin.firestore.FieldValue.serverTimestamp() },
-          { merge: true }
-        ).catch(e => console.warn(`  ⚠️ Firestore write failed for ${gym.id}/${dateStr}:`, e.message));
-
-        // Invalidate RAM cache
-        if (apiCache?.dailyStats) delete apiCache.dailyStats[gym.id];
-      } catch (err) {
-        console.error(`  ❌ Sync failed for ${gym.id} / ${dateStr}:`, err.message);
       }
     }
-    
-    // 💸 SYNC DAILY REGISTER (Payments)
+  }
+
+  // 2️⃣ Sync Daily Register (Payments) — for all gyms in GYM_SYNC_MAP
+  for (const gym of GYM_SYNC_MAP) {
     try {
       for (const dateStr of dates) {
         const gymId = gym.id;
+        console.log(`  🔍 [REGISTER] Checking ${gymId} for ${dateStr}...`);
         const docId = `${gymId}_${dateStr}`;
         const snap = await db.collection("megafit_daily_register")
           .doc(docId)
@@ -296,24 +293,68 @@ async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => fals
         if (!snap.empty) {
           const entries = snap.docs.map(d => {
             const data = d.data();
-            // Convert Firestore timestamps to ISO strings for SQLite
             const createdAtStr = data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : 
                                  (data.createdAt || new Date().toISOString());
-            return { 
-              id: d.id, 
-              ...data, 
-              createdAt: createdAtStr 
-            };
+            return { id: d.id, ...data, createdAt: createdAtStr };
           });
           getLC().upsertRegister(gymId, dateStr, entries);
           console.log(`  💸 Synced ${entries.length} register entries for ${gymId} / ${dateStr}`);
+        }
+
+        const decSnap = await db.collection("megafit_daily_register")
+          .doc(docId)
+          .collection("decaissements")
+          .orderBy("createdAt", "asc")
+          .get();
+        if (!decSnap.empty) {
+          getLC().upsertDecaissements(gymId, dateStr, decSnap.docs.map(d => ({ id: d.id, ...d.data() })));
         }
       }
     } catch (err) {
       console.error(`  ❌ Register sync failed for ${gym.id}:`, err.message);
     }
   }
-  console.log("✨ Auto-sync complete.");
+
+  // 3️⃣ Optimized Member/Pending Sync (Only if syncRegisterOnly)
+  if (syncRegisterOnly) {
+    console.log("  👥 Optimized Member/Pending Sync...");
+    try {
+      // Pull latest members (last 48 hours)
+      const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
+      const membersSnap = await db.collection('members').where('updatedAt', '>=', twoDaysAgo).get();
+      if (!membersSnap.empty) {
+        const gyms = {};
+        membersSnap.docs.forEach(d => {
+          const m = { id: d.id, ...d.data() };
+          const gid = (m.location || 'dokarat').toLowerCase().includes('marjane') ? 'marjane' : 
+                      (m.location || 'dokarat').toLowerCase().includes('casa1') ? 'casa1' :
+                      (m.location || 'dokarat').toLowerCase().includes('casa2') ? 'casa2' : 'dokarat';
+          if (!gyms[gid]) gyms[gid] = [];
+          gyms[gid].push(m);
+        });
+        for (const [gid, list] of Object.entries(gyms)) {
+          getLC().upsertMembers(gid, list);
+        }
+        console.log(`  ✅ Synced ${membersSnap.size} recently updated members.`);
+      }
+
+      // Pull latest pending inscriptions (last 48h)
+      const twoDaysAgoPending = new Date(Date.now() - 48 * 60 * 60 * 1000);
+      const pendingSnap = await db.collection('pending_members')
+        .where('createdAt', '>=', twoDaysAgoPending)
+        .get();
+      if (!pendingSnap.empty) {
+        pendingSnap.docs.forEach(d => {
+          getLC().setPending({ id: d.id, ...d.data() });
+        });
+        console.log(`  ✅ Synced ${pendingSnap.size} recent pending inscriptions with PDFs.`);
+      }
+    } catch (err) {
+      console.warn("  ⚠️ Optimized Member Sync failed:", err.message);
+    }
+  }
+
+  console.log("✨ Sync complete.");
 }
 
 /**
@@ -346,5 +387,7 @@ function scheduleNightlySync(db, apiCache, checkQuota = () => false) {
 
   console.log(`⏱️  Hourly sync active (every 60min, 07:00–23:00 Morocco)`);
 }
+
+module.exports = { syncGymCounts, scheduleNightlySync };
 
 module.exports = { syncGymCounts, scheduleNightlySync };

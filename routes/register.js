@@ -4,7 +4,7 @@
 const { Router } = require('express');
 const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 
-module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExceeded, getCachedOrFetch, invalidateCache }) {
+module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExceeded, getCachedOrFetch, invalidateCache, syncGymCounts }) {
   const router = Router();
 
   // ── GET /api/register ─────────────────────────────────────────────────────
@@ -52,7 +52,8 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
         }));
       }
 
-      entries.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime() || 0);
+      // Show newest payments at the top
+      entries.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime() || 0);
 
       const totals = entries.reduce((acc, e) => ({
         tpe:      acc.tpe      + (Number(e.tpe)      || 0),
@@ -630,12 +631,12 @@ Rules:
     }
   });
 
-  // ── POST /api/register/force-sync ─────────────────────────────────────────
-  // Triggers an immediate pull from Firestore for today's data across all gyms.
   router.post('/force-sync', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
       console.log(`⚡ [FORCE SYNC] Triggered by ${req.user?.name || 'admin'}`);
-      await syncGymCounts(db, apiCache, 0, isQuotaExceeded, true);
+      // Optimized sync: focuses on Register + Members, skips Door logs to save quota
+      // We sync last 2 days to ensure any late entries from yesterday are also pulled
+      await syncGymCounts(db, apiCache, 2, isQuotaExceeded, false, { syncRegisterOnly: true });
       res.json({ ok: true, message: 'Sync complete' });
     } catch (err) {
       console.error('Force sync error:', err);
