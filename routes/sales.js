@@ -248,6 +248,90 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
   });
 
   // ─────────────────────────────────────────────────────────────────────────────
+  // GET /api/sales/multi-stats?gymId=dokarat&months=6
+  // Returns per-commercial stats for each of the last N months
+  // Used by the Commercial Performance Matrix in Auralix
+  // ─────────────────────────────────────────────────────────────────────────────
+  router.get('/multi-stats', verifyAzureToken, async (req, res) => {
+    try {
+      const { gymId = 'dokarat', months: monthsParam = '6' } = req.query;
+      const N = Math.min(parseInt(monthsParam) || 6, 12);
+
+      const gymIds = gymId === 'all'
+        ? ['dokarat', 'marjane', 'casa1', 'casa2']
+        : gymId.split(',').map(s => s.trim());
+      const placeholders = gymIds.map(() => '?').join(',');
+
+      // Build list of last N month strings (YYYY-MM)
+      const now = new Date();
+      const monthList = [];
+      for (let i = N - 1; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        monthList.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+      }
+
+      // Alias normalization (same as stats endpoint)
+      const CANONICAL = { 'HAJARE':'HAJAR','AHLALM':'AHLAM' };
+      function canonical(name) {
+        let up = (name || '').trim().toUpperCase();
+        if (!up || up==='-' || up.includes('@') || up.startsWith('MR') || ['OFFERT','GRATUIT','TEST','SYSTEM','NULL'].includes(up)) return null;
+        return CANONICAL[up] || up;
+      }
+
+      // Fetch all rows across all N months in one query
+      const firstMonth = monthList[0];
+      const lastMonth  = monthList[monthList.length - 1];
+
+      const rows = lc.db.prepare(`
+        SELECT
+          UPPER(TRIM(commercial)) AS commercial,
+          substr(date, 1, 7)       AS month,
+          COUNT(*)                 AS inscriptions,
+          SUM(CAST(tpe AS NUMERIC) + CAST(espece AS NUMERIC) + CAST(virement AS NUMERIC) + CAST(cheque AS NUMERIC)) AS revenue
+        FROM register_cache
+        WHERE gym_id IN (${placeholders})
+          AND date >= ? AND date <= ?
+        GROUP BY UPPER(TRIM(commercial)), substr(date, 1, 7)
+        ORDER BY month ASC
+      `).all(...gymIds, `${firstMonth}-01`, `${lastMonth}-31`);
+
+      // Build matrix: { commercial -> { month -> {revenue, inscriptions} } }
+      const matrix = {};
+      const gymTotals = {};
+      monthList.forEach(m => { gymTotals[m] = { revenue: 0, inscriptions: 0 }; });
+
+      rows.forEach(r => {
+        const name = canonical(r.commercial);
+        if (!name || !monthList.includes(r.month)) return;
+        if (!matrix[name]) matrix[name] = {};
+        matrix[name][r.month] = { revenue: Math.round(r.revenue || 0), inscriptions: r.inscriptions || 0 };
+        gymTotals[r.month].revenue      += Math.round(r.revenue || 0);
+        gymTotals[r.month].inscriptions += r.inscriptions || 0;
+      });
+
+      // Compute per-commercial totals
+      const commercials = Object.entries(matrix).map(([name, perMonth]) => {
+        const totalRevenue      = Object.values(perMonth).reduce((s, m) => s + m.revenue, 0);
+        const totalInscriptions = Object.values(perMonth).reduce((s, m) => s + m.inscriptions, 0);
+        return { name, perMonth, totalRevenue, totalInscriptions };
+      }).sort((a, b) => b.totalRevenue - a.totalRevenue);
+
+      // Fetch goals for those months for goal vs actual comparison
+      const snap = await db.collection('commercial_goals')
+        .where('gymId', 'in', [...gymIds, 'all'])
+        .get();
+      const goals = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+      res.json({ ok: true, months: monthList, commercials, gymTotals, goals });
+    } catch (err) {
+      console.error('GET /api/sales/multi-stats error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+
+
+  // ─────────────────────────────────────────────────────────────────────────────
   // GET /api/commercials — list registered commercial names (legacy)
   // ─────────────────────────────────────────────────────────────────────────────
   router.get('/', verifyAzureToken, async (req, res) => {
