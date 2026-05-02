@@ -219,20 +219,58 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
 
 
 
-  // ── GET /api/inscriptions ─────────────────────────────────────────────────
+  // ── GET /api/inscriptions ─────────────────────────────────────────────
   router.get('/api/inscriptions', verifyAzureToken, async (req, res) => {
     try {
-      const gymId = req.query.gymId;
-      const key   = gymId || 'all';
-      let query = db.collection('pending_members').where('source', '==', 'web').where('status', 'in', ['pending', 'awaiting_payment']);
-      if (gymId) query = query.where('gymId', '==', gymId);
+      const isFullAdmin = req.assignedGyms?.includes('all');
 
-      const cached = apiCache.inscriptions[key];
+      // 🔒 SERVER-SIDE GYM ENFORCEMENT
+      // Admins : respect ?gymId param (or return all if missing)
+      // Managers: ALWAYS restrict to their assignedGyms, ignore client param
+      let gymIdsToFetch;
+      if (isFullAdmin) {
+        gymIdsToFetch = req.query.gymId ? [req.query.gymId] : null; // null = all
+      } else {
+        gymIdsToFetch = req.assignedGyms || [];
+        if (gymIdsToFetch.length === 0) return res.json([]);
+      }
+
+      const cacheKey = gymIdsToFetch ? gymIdsToFetch.join(',') : 'all';
+      const cached = apiCache.inscriptions[cacheKey];
       if (cached && Date.now() - cached.ts < 30000) return res.json(cached.data);
 
-      const snap = await query.get();
-      const data = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (b.createdAt?._seconds || 0) - (a.createdAt?._seconds || 0));
-      apiCache.inscriptions[key] = { data, ts: Date.now() };
+      let allDocs = [];
+
+      if (gymIdsToFetch === null) {
+        // Admin, no filter
+        const snap = await db.collection('pending_members')
+          .where('source', '==', 'web')
+          .where('status', 'in', ['pending', 'awaiting_payment'])
+          .get();
+        allDocs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      } else if (gymIdsToFetch.length === 1) {
+        const snap = await db.collection('pending_members')
+          .where('source', '==', 'web')
+          .where('status', 'in', ['pending', 'awaiting_payment'])
+          .where('gymId', '==', gymIdsToFetch[0])
+          .get();
+        allDocs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      } else {
+        // Multiple gyms — parallel queries
+        const snaps = await Promise.all(
+          gymIdsToFetch.map(gid =>
+            db.collection('pending_members')
+              .where('source', '==', 'web')
+              .where('status', 'in', ['pending', 'awaiting_payment'])
+              .where('gymId', '==', gid)
+              .get()
+          )
+        );
+        snaps.forEach(snap => snap.docs.forEach(d => allDocs.push({ id: d.id, ...d.data() })));
+      }
+
+      const data = allDocs.sort((a, b) => (b.createdAt?._seconds || 0) - (a.createdAt?._seconds || 0));
+      apiCache.inscriptions[cacheKey] = { data, ts: Date.now() };
       res.json(data);
     } catch (err) {
       console.error('Inscriptions Fetch Error:', err);
