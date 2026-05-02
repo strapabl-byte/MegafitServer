@@ -17,8 +17,8 @@ const jwks = jwksClient({
 // 🔒 SECURITY: Mapping emails to specific Gym IDs
 // Managers will be automatically restricted to these clubs.
 const MANAGER_MAPPING = {
-  'megafitsaiss@outlook.com': 'marjane',
-  // 'email_dukkarate': 'dokarat',
+  'megafitsaiss@outlook.com':    'marjane',
+  'megafitdokkarat@outlook.com': 'dokarat',
   // 'email_casa1': 'casa1',
   // 'email_casa2': 'casa2',
 };
