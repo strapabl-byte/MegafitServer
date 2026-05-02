@@ -365,13 +365,17 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         if (totalPaid > 0) {
           const method = carte > 0 ? 'Carte Bancaire' : espece > 0 ? 'Espèces' : virement > 0 ? 'Virement' : 'Chèque';
           const chequePhoto = ins.chequePhoto?.startsWith('data:image')
-            ? await uploadBase64ToStorage(ins.chequePhoto, `members/${memberId}/cheques/${Date.now()}.jpg`)
+            ? await uploadBase64ToStorage(ins.chequePhoto, `members/${memberId}/cheques/${Date.now()}_recto.jpg`)
             : ins.chequePhoto || null;
+          const chequePhotoBack = ins.chequePhotoVerso?.startsWith('data:image')
+            ? await uploadBase64ToStorage(ins.chequePhotoVerso, `members/${memberId}/cheques/${Date.now()}_verso.jpg`)
+            : ins.chequePhotoVerso || null;
             await db.collection('payments').add({
               memberId, inscriptionId: req.params.id, gymId,
               amount: totalPaid, plan, date: new Date().toISOString(), method,
               paymentsSplit: { espece, carte, virement, cheque },
-              chequePhoto, note: 'Paiement inscription initiale — À confirmer sur la page Paiements',
+              chequePhoto, chequePhotoBack,
+              note: 'Paiement inscription initiale — À confirmer sur la page Paiements',
               createdAt: admin.firestore.FieldValue.serverTimestamp(),
               recordedBy: req.user?.preferred_username || 'Admin', type: 'registration',
             });
