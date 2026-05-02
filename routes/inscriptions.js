@@ -307,25 +307,65 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         expiresOn = start.toISOString().split('T')[0];
       }
 
-      // Only link if explicitly selected via autocomplete in the form
+      // ── Deduplication: find existing member before creating a duplicate ──────
+      // Priority: 1) explicit form link, 2) CIN, 3) phone, 4) full name
       let existingMember = null;
+
+      // 1. Explicit autocomplete link from inscription form
       if (ins.selectedMemberId) {
         const doc = await db.collection('members').doc(ins.selectedMemberId).get();
-        if (doc.exists) existingMember = doc;
+        if (doc.exists && !doc.data().deleted && !doc.data().isDeleted) {
+          existingMember = doc;
+          console.log(`🔗 Dedup: selectedMemberId → ${existingMember.id}`);
+        }
+      }
+
+      // 2. CIN match — most reliable unique identifier
+      if (!existingMember && ins.cin && ins.cin.trim().length > 3) {
+        const cinSnap = await db.collection('members')
+          .where('cin', '==', ins.cin.trim().toUpperCase())
+          .limit(1).get();
+        if (!cinSnap.empty) {
+          existingMember = cinSnap.docs[0];
+          console.log(`🔍 Dedup by CIN (${ins.cin}) → ${existingMember.id}`);
+        }
+      }
+
+      // 3. Phone match
+      if (!existingMember && ins.telephone) {
+        const phone = ins.telephone.replace(/\s/g, '');
+        if (phone.length >= 9) {
+          const phoneSnap = await db.collection('members')
+            .where('phone', '==', phone).limit(1).get();
+          if (!phoneSnap.empty) {
+            existingMember = phoneSnap.docs[0];
+            console.log(`📱 Dedup by phone (${phone}) → ${existingMember.id}`);
+          }
+        }
+      }
+
+      // 4. Full-name match (last resort)
+      if (!existingMember) {
+        const fullNameCheck = `${ins.prenom || ''} ${ins.nom || ''}`.trim();
+        if (fullNameCheck.length > 5) {
+          const nameSnap = await db.collection('members')
+            .where('fullName', '==', fullNameCheck).limit(1).get();
+          if (!nameSnap.empty) {
+            existingMember = nameSnap.docs[0];
+            console.log(`👤 Dedup by name (${fullNameCheck}) → ${existingMember.id}`);
+          }
+        }
       }
 
       const memberData = {
         fullName: `${ins.prenom || ''} ${ins.nom || ''}`.trim(),
         phone: ins.telephone || null, plan,
-        // ✅ FIX: Save the real subscription label (e.g. "24 MOIS LOCAL") on the member
         subscriptionName: ins.subscriptionName || null,
         birthday: ins.dateNaissance || null,
-        // ✅ FIX: Use form-calculated periodTo directly
         expiresOn,
         periodFrom: ins.periodFrom || null,
         periodTo:   expiresOn,
         photo: ins.profilePicture || null, email: ins.email || null,
-        // ✅ CIN always propagated
         cin: ins.cin || null,
         adresse: ins.adresse || null, ville: ins.ville || null,
         location: gymId,
@@ -338,10 +378,23 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
 
       let memberId, memberRef;
       if (existingMember) {
+        // ✅ UPDATE existing — no duplicate
         memberId = existingMember.id; memberRef = existingMember.ref;
-        if (memberData.photo?.startsWith('data:image')) memberData.photo = await uploadBase64ToStorage(memberData.photo, `members/${memberId}/profile.jpg`);
+        const prev = existingMember.data();
+        // Preserve existing fields the inscription may not have
+        if (!memberData.phone)   memberData.phone   = prev.phone   || null;
+        if (!memberData.email)   memberData.email   = prev.email   || null;
+        if (!memberData.cin)     memberData.cin     = prev.cin     || null;
+        if (!memberData.adresse) memberData.adresse = prev.adresse || null;
+        if (!memberData.ville)   memberData.ville   = prev.ville   || null;
+        if (memberData.photo?.startsWith('data:image')) {
+          memberData.photo = await uploadBase64ToStorage(memberData.photo, `members/${memberId}/profile.jpg`);
+        } else if (!memberData.photo) {
+          memberData.photo = prev.photo || null; // keep existing photo
+        }
         await memberRef.update(memberData);
       } else {
+        // 🆕 CREATE — only when truly no match found
         const qrToken = crypto.randomBytes(16).toString('hex');
         memberRef = await db.collection('members').add({ ...memberData, qrToken, createdAt: admin.firestore.FieldValue.serverTimestamp(), confirmedBy: req.user?.preferred_username || 'Admin' });
         memberId = memberRef.id;
