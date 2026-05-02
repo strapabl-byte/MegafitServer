@@ -14,9 +14,10 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
   // ─────────────────────────────────────────────────────────────────────────────
   router.get('/stats', verifyAzureToken, (req, res) => {
     try {
-      const { gymId = 'dokarat', month } = req.query;
+      const { gymId = 'dokarat', month, startDate, endDate } = req.query;
 
-      // Default to current month
+      // Support either a custom date range OR a month (YYYY-MM)
+      const useRange = startDate && endDate;
       const now    = new Date();
       const target = month || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 
@@ -26,8 +27,14 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
 
       const placeholders = gymIds.map(() => '?').join(',');
 
-      // Aggregate per commercial for the target month — normalize name case+whitespace
-      // Exclude: emails (@), OFFERT, MR_ prefix (manager overrides)
+      // Build WHERE date clause — range or month prefix
+      const dateWhere = useRange
+        ? `date >= ? AND date <= ?`
+        : `date LIKE ?`;
+      const dateArgs  = useRange
+        ? [startDate, endDate]
+        : [`${target}%`];
+
       const rows = lc.db.prepare(`
         SELECT
           UPPER(TRIM(commercial))  AS commercial,
@@ -38,10 +45,10 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
           MAX(date)                AS last_sale
         FROM register_cache
         WHERE gym_id IN (${placeholders})
-          AND date LIKE ?
+          AND ${dateWhere}
         GROUP BY UPPER(TRIM(commercial)), gym_id
         ORDER BY revenue DESC
-      `).all(...gymIds, `${target}%`);
+      `).all(...gymIds, ...dateArgs);
 
       // Daily breakdown per commercial — normalized
       const daily = lc.db.prepare(`
@@ -53,10 +60,10 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
           SUM(CAST(tpe AS NUMERIC) + CAST(espece AS NUMERIC) + CAST(virement AS NUMERIC) + CAST(cheque AS NUMERIC))  AS revenue
         FROM register_cache
         WHERE gym_id IN (${placeholders})
-          AND date LIKE ?
+          AND ${dateWhere}
         GROUP BY UPPER(TRIM(commercial)), gym_id, date
         ORDER BY date ASC
-      `).all(...gymIds, `${target}%`);
+      `).all(...gymIds, ...dateArgs);
 
       // ── Alias / typo normalization map ────────────────────────────────────
       // Key = any known variant (already UPPER-TRIMMED), Value = official name
@@ -166,23 +173,32 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
       // Dynamically calculate the actual real-time revenue for the Gym and Period
       // This includes ALL commercials (even unspecified or dashes) so the Challenge matches the Register Total perfectly!
       for (let g of goals) {
-        if (!g.period) {
+        // Support both legacy period (YYYY-MM) and custom date range (startDate/endDate)
+        const hasRange = g.startDate && g.endDate;
+        if (!hasRange && !g.period) {
           g.currentRevenue = 0; g.currentInscriptions = 0; continue; 
         }
         
         let targetGyms = g.gymId === 'all' ? ['dokarat', 'marjane', 'casa1', 'casa2'] : [g.gymId];
         const placeholders = targetGyms.map(() => '?').join(',');
         
+        const dateWhere = hasRange
+          ? `date >= ? AND date <= ?`
+          : `date LIKE ?`;
+        const dateArgs  = hasRange
+          ? [g.startDate, g.endDate]
+          : [`${g.period}%`];
+
         const stats = lc.db.prepare(`
           SELECT 
             COUNT(*) as inscriptions, 
             SUM(CAST(tpe AS NUMERIC) + CAST(espece AS NUMERIC) + CAST(virement AS NUMERIC) + CAST(cheque AS NUMERIC)) as revenue 
           FROM register_cache 
-          WHERE gym_id IN (${placeholders}) AND date LIKE ?
-        `).get(...targetGyms, `${g.period}%`);
+          WHERE gym_id IN (${placeholders}) AND ${dateWhere}
+        `).get(...targetGyms, ...dateArgs);
         
-        g.currentRevenue = stats.revenue || 0;
-        g.currentInscriptions = stats.inscriptions || 0;
+        g.currentRevenue = Math.round(stats?.revenue || 0);
+        g.currentInscriptions = stats?.inscriptions || 0;
       }
 
       res.json({ ok: true, goals });
@@ -198,19 +214,25 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
   // ─────────────────────────────────────────────────────────────────────────────
   router.post('/goals', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
-      const { gymId, period, targetRevenue, targetInscriptions, reward, label } = req.body;
-      if (!gymId || !period) return res.status(400).json({ error: 'gymId et period sont obligatoires' });
+      const { gymId, period, startDate, endDate, targetRevenue, targetInscriptions, reward, label, challengeType } = req.body;
+      // Either period (monthly) or startDate+endDate (custom range) required
+      if (!gymId) return res.status(400).json({ error: 'gymId est obligatoire' });
+      if (challengeType === 'range' && (!startDate || !endDate)) return res.status(400).json({ error: 'startDate et endDate obligatoires pour un défi libre' });
+      if (challengeType !== 'range' && !period) return res.status(400).json({ error: 'period obligatoire pour un défi mensuel' });
 
       const doc = {
         gymId,
-        period,          // '2026-04' or '2026-W18' or custom label
-        label:           label || period,
-        targetRevenue:   Number(targetRevenue) || 0,
+        challengeType: challengeType || 'month',  // 'month' | 'range'
+        period:        challengeType === 'range' ? null : period,
+        startDate:     challengeType === 'range' ? startDate : null,
+        endDate:       challengeType === 'range' ? endDate   : null,
+        label:         label || (challengeType === 'range' ? `${startDate} → ${endDate}` : period),
+        targetRevenue:      Number(targetRevenue) || 0,
         targetInscriptions: Number(targetInscriptions) || 0,
-        reward:          reward || '',
-        createdBy:       req.user?.preferred_username || 'Admin',
-        createdAt:       admin.firestore.FieldValue.serverTimestamp(),
-        active:          true,
+        reward:        reward || '',
+        createdBy:     req.user?.preferred_username || 'Admin',
+        createdAt:     admin.firestore.FieldValue.serverTimestamp(),
+        active:        true,
       };
 
       const ref = await db.collection('commercial_goals').add(doc);
