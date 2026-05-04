@@ -12,7 +12,7 @@ const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 // Uses bigram index for O(k) candidate pre-filter before Levenshtein on top-N.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const ODOO_CSV_PATH = path.join(__dirname, '../../odoo/all_members_all_clubs.csv');
+const ODOO_CSV_PATH = path.join(__dirname, '../odoo/all_members_all_clubs.csv');
 
 // Club name → gym_id mapping
 const CLUB_TO_GYM = {
