@@ -242,6 +242,7 @@ try { db.exec("ALTER TABLE members_cache ADD COLUMN period_from TEXT;"); } catch
 try { db.exec("ALTER TABLE members_cache ADD COLUMN total_paid REAL DEFAULT 0;"); } catch (e) {}
 try { db.exec("ALTER TABLE members_cache ADD COLUMN last_payment_date TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE members_cache ADD COLUMN is_archive INTEGER DEFAULT 0;"); } catch (e) {}
+try { db.exec("ALTER TABLE members_cache ADD COLUMN contract_number TEXT;"); } catch (e) {}
 // register_cache extensions
 try { db.exec("ALTER TABLE register_cache ADD COLUMN cin TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE register_cache ADD COLUMN tel TEXT;"); } catch (e) {}
@@ -249,6 +250,19 @@ try { db.exec("ALTER TABLE register_cache ADD COLUMN prix REAL DEFAULT 0;"); } c
 try { db.exec("ALTER TABLE register_cache ADD COLUMN reste REAL DEFAULT 0;"); } catch (e) {}
 try { db.exec("ALTER TABLE register_cache ADD COLUMN note_reste TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE pending_cache ADD COLUMN pdf_url TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE pending_cache ADD COLUMN totals TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE pending_cache ADD COLUMN payments TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE pending_cache ADD COLUMN cin TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE pending_cache ADD COLUMN adresse TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE pending_cache ADD COLUMN ville TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE pending_cache ADD COLUMN email TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE pending_cache ADD COLUMN commercial TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE pending_cache ADD COLUMN contract_number TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE pending_cache ADD COLUMN period_from TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE pending_cache ADD COLUMN period_to TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE pending_cache ADD COLUMN telephone TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE pending_cache ADD COLUMN date_naissance TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE pending_cache ADD COLUMN profile_picture TEXT;"); } catch (e) {}
 try { db.exec(`
   CREATE TABLE IF NOT EXISTS incidents_cache (
     id TEXT PRIMARY KEY, gym_id TEXT, gym_name TEXT, title TEXT, cause TEXT,
@@ -438,9 +452,9 @@ function getDailyStat(gymId, date) {
 
 const insertMember = db.prepare(`
   INSERT OR REPLACE INTO members_cache
-    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date, email, adresse, ville, is_archive, bonus_3months, inscription_id)
+    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date, email, adresse, ville, is_archive, bonus_3months, inscription_id, contract_number)
   VALUES
-    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date, @email, @adresse, @ville, @is_archive, @bonus_3months, @inscription_id)
+    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date, @email, @adresse, @ville, @is_archive, @bonus_3months, @inscription_id, @contract_number)
 `);
 
 function upsertMembers(gymId, membersArr) {
@@ -481,6 +495,7 @@ function upsertMembers(gymId, membersArr) {
     is_archive:        (m.isArchive || m.is_archive || m.importedFromOdoo) ? 1 : 0,
     bonus_3months:     m.bonus3Months ? 1 : 0,
     inscription_id:    m.inscriptionId || m.inscription_id || null,
+    contract_number:   m.contractNumber || m.contract_number || null,
   })));
 }
 
@@ -650,10 +665,12 @@ function setPending(data) {
   try {
     const stmt = db.prepare(`
       INSERT OR REPLACE INTO pending_cache 
-      (id, gym_id, date, nom, prenom, subscriptionName, total, paid, balance, status, pdf_url)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, gym_id, date, nom, prenom, subscriptionName, total, paid, balance, status, pdf_url, totals, payments, cin, adresse, ville, email, commercial, contract_number, period_from, period_to, telephone, date_naissance, profile_picture)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    const ts = data.createdAt ? new Date(data.createdAt._seconds * 1000) : new Date();
+    const ts = data.createdAt
+      ? (data.createdAt._seconds ? new Date(data.createdAt._seconds * 1000) : new Date(data.createdAt))
+      : new Date();
     const dStr = ts.toISOString().split('T')[0];
     
     stmt.run(
@@ -667,7 +684,20 @@ function setPending(data) {
       data.totals?.paid || 0,
       data.totals?.balance || 0,
       data.status || 'pending',
-      data.pdfUrl || data.pdf_url || null
+      data.pdfUrl || data.pdf_url || null,
+      data.totals ? JSON.stringify(data.totals) : null,
+      data.payments ? JSON.stringify(data.payments) : null,
+      data.cin || null,
+      data.adresse || null,
+      data.ville || null,
+      data.email || null,
+      data.commercial || null,
+      data.contractNumber || null,
+      data.periodFrom || null,
+      data.periodTo || null,
+      data.telephone || null,
+      data.dateNaissance || null,
+      data.profilePicture || null
     );
   } catch (err) {
     console.error('SQLite setPending error:', err.message);

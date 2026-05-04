@@ -37,13 +37,76 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
 
       // 2️⃣ Merge pending members who have a signed PDF contract
       const pdfMembers = lc.getPendingWithPdf(gymId);
+      
       if (pdfMembers && pdfMembers.length > 0) {
-        const normalizedPdf = pdfMembers.map(p => ({
-          id: p.id, gym_id: p.gym_id,
-          full_name: `${p.prenom || ''} ${p.nom || ''}`.trim(),
-          plan: p.subscriptionName, status: p.status,
-          pdf_url: p.pdf_url, created_at: p.date, isPendingWithPdf: true
-        }));
+        const normalizeName = (name) => (name || '').toLowerCase().replace(/\s+/g, '');
+        
+        // Override member plans with their official inscription subscriptionName
+        // If a member lacks an inscription_id, try to auto-link them by name!
+        finalMembers = finalMembers.map(m => {
+          let linkedPdf = null;
+          if (m.inscription_id) {
+            linkedPdf = pdfMembers.find(p => p.id === m.inscription_id);
+          } else {
+            // Fallback: match by full name (checking both First Last and Last First)
+            const mName = normalizeName(m.full_name || m.fullName);
+            if (mName) {
+              linkedPdf = pdfMembers.find(p => {
+                const pName1 = normalizeName(`${p.prenom || ''}${p.nom || ''}`);
+                const pName2 = normalizeName(`${p.nom || ''}${p.prenom || ''}`);
+                return pName1 === mName || pName2 === mName;
+              });
+              if (linkedPdf) {
+                m.inscription_id = linkedPdf.id; // Auto-link in memory to prevent duplication below
+              }
+            }
+          }
+          
+          if (linkedPdf) {
+            if (linkedPdf.subscriptionName) m.plan = linkedPdf.subscriptionName;
+            if (linkedPdf.contract_number) m.contractNumber = linkedPdf.contract_number;
+          }
+          return m;
+        });
+
+        // Collect ALL linked inscription IDs (including the ones we just auto-linked by name)
+        const allLinkedIds = new Set(finalMembers.map(m => m.inscription_id).filter(Boolean));
+
+        // Only add pdfMembers that are NOT already linked to an existing member
+        const unlinkedPdfMembers = pdfMembers.filter(p => !allLinkedIds.has(p.id));
+        
+        const normalizedPdf = unlinkedPdfMembers.map(p => {
+          // Parse totals JSON if needed
+          const totals = p.totals ? (typeof p.totals === 'string' ? JSON.parse(p.totals) : p.totals) : null;
+          return {
+            id: p.id,
+            gym_id: p.gym_id,
+            full_name: `${p.prenom || ''} ${p.nom || ''}`.trim(),
+            plan: p.subscriptionName || '',
+            subscription_name: p.subscriptionName || '',
+            status: p.status || 'pending',
+            pdf_url: p.pdf_url || null,
+            pdfUrl: p.pdf_url || null,
+            created_at: p.date || null,
+            createdAt: p.date || null,
+            phone: p.telephone || null,
+            birthday: p.date_naissance || null,
+            expires_on: p.period_to || null,
+            expiresOn: p.period_to || null,
+            period_from: p.period_from || null,
+            photo: p.profile_picture || null,
+            image: p.profile_picture || null,
+            cin: p.cin || null,
+            email: p.email || null,
+            adresse: p.adresse || null,
+            ville: p.ville || null,
+            contract_number: p.contract_number || null,
+            contractNumber: p.contract_number || null,
+            balance: totals?.balance ?? p.balance ?? 0,
+            isPendingWithPdf: true,
+          };
+        });
+        
         finalMembers = [...finalMembers, ...normalizedPdf];
       }
 
@@ -80,7 +143,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           qrToken: m.qrToken || '', image: m.photo || null,
           pdfUrl: m.pdfUrl || null, isRestricted: true,
           createdAt: m.createdAt || null, isPendingWithPdf: m.isPendingWithPdf || false,
-          isArchive: m.isArchive || false,
+          isArchive: m.isArchive || false, contractNumber: m.contractNumber || null,
         }));
       }
 
@@ -109,6 +172,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         birthday: birthday || null,
         expiresOn: expiresOn || new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0],
         photo: photo || null, email: email || null, location: location || 'dokarat',
+        contractNumber: req.body.contractNumber || null,
         qrToken, createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
       const snap = await docRef.get();
@@ -200,7 +264,13 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       // 4️⃣ Resolve inscription (disk-first via getPendingById if available)
       let inscription = null;
       if (member.inscriptionId) {
-        const diskIns = lc.getPendingById ? lc.getPendingById(member.inscriptionId) : null;
+        let diskIns = lc.getPendingById ? lc.getPendingById(member.inscriptionId) : null;
+        
+        // If the local cache exists but is missing critical financial data, force a fallback
+        if (diskIns && !diskIns.payments && !diskIns.totals) {
+          diskIns = null; 
+        }
+
         if (diskIns) {
           inscription = {
             cin: diskIns.cin, adresse: diskIns.adresse, ville: diskIns.ville, email: diskIns.email,
@@ -222,6 +292,9 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
             const insDoc = await db.collection('pending_members').doc(member.inscriptionId).get();
             if (insDoc.exists) {
               const ins = insDoc.data();
+              // Repair the local SQLite cache so next time it's instant
+              lc.setPending ? lc.setPending({ id: insDoc.id, ...ins }) : null;
+              
               inscription = {
                 cin: ins.cin, adresse: ins.adresse, ville: ins.ville, email: ins.email,
                 commercial: ins.commercial, subscriptionName: ins.subscriptionName,
@@ -253,7 +326,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
   router.put('/:id', verifyAzureToken, async (req, res) => {
     try {
       const ref = db.collection('members').doc(req.params.id);
-      const allowed = ['fullName', 'phone', 'plan', 'birthday', 'expiresOn', 'photo', 'status', 'email', 'location', 'bonus3Months'];
+      const allowed = ['fullName', 'phone', 'plan', 'birthday', 'expiresOn', 'photo', 'status', 'email', 'location', 'bonus3Months', 'contractNumber'];
       const update  = Object.fromEntries(allowed.filter(k => req.body[k] !== undefined).map(k => [k, req.body[k]]));
       update.updatedAt = admin.firestore.FieldValue.serverTimestamp();
       await ref.update(update);
@@ -274,15 +347,27 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       const ref  = db.collection('members').doc(id);
       const snap = await ref.get();
       if (!snap.exists) {
+        // It might be an inscription (pending member with PDF) merged into the list
+        const pendingRef = db.collection('pending_members').doc(id);
+        const pendingSnap = await pendingRef.get();
+        if (pendingSnap.exists) {
+            await pendingRef.delete();
+            try {
+                lc.db.prepare('DELETE FROM pending_cache WHERE id=?').run(id);
+            } catch(e) {}
+            return res.json({ ok: true, note: 'Pending inscription deleted' });
+        }
+
         // Stale SQLite cache entry — no longer in Firestore.
         // Remove from all gym caches silently and tell the client it's gone.
         try {
           for (const gymId of ['marjane', 'dokarat', 'casa1', 'casa2', 'all']) {
             lc.pruneStaleMember ? lc.pruneStaleMember(id) : null;
           }
-          // Use raw SQL if no helper available
+          // Also try to clear from pending_cache just in case
+          lc.db.prepare('DELETE FROM pending_cache WHERE id=?').run(id);
           require('better-sqlite3') &&
-            console.log(`🧹 Pruned stale member ${id} from SQLite cache`);
+            console.log(`🧹 Pruned stale member/inscription ${id} from SQLite cache`);
         } catch (_) {}
         return res.json({ ok: true, note: 'Stale entry cleared' });
       }
