@@ -622,6 +622,39 @@ app.listen(PORT, '0.0.0.0', () => {
     }
   }
 
+  // ── Pending Cache Self-Heal: backfill phone/birthday/photo if missing ─────
+  // Runs once on Render after deploying the new schema. Detected by checking
+  // if telephone column is empty when we have pdf records with no phone.
+  setTimeout(async () => {
+    try {
+      const metaKey = 'pending_cache_backfill_v2';
+      if (lc.getMeta(metaKey)) return; // already done
+      
+      const missing = lc.db.prepare(
+        `SELECT COUNT(*) as cnt FROM pending_cache WHERE telephone IS NULL AND pdf_url IS NOT NULL`
+      ).get();
+      
+      if (!missing || missing.cnt === 0) {
+        lc.setMeta(metaKey, new Date().toISOString());
+        console.log('⏭️  Pending cache backfill skipped — all records already have phone data. ✅');
+        return;
+      }
+      
+      console.log(`🔄 [BACKFILL] ${missing.cnt} pending records missing phone/birthday — syncing from Firebase...`);
+      const snap = await db.collection('pending_members').get();
+      let count = 0;
+      snap.forEach(doc => {
+        const data = doc.data();
+        lc.setPending({ id: doc.id, ...data });
+        count++;
+      });
+      lc.setMeta(metaKey, new Date().toISOString());
+      console.log(`✅ [BACKFILL] Pending cache fully refreshed: ${count} records updated with phone/birthday/photo!`);
+    } catch (e) {
+      console.warn('[BACKFILL] pending_cache self-heal error:', e.message);
+    }
+  }, 20000); // 20s after startup
+
 
 
   setTimeout(async () => {
