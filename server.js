@@ -761,3 +761,6 @@ app.listen(PORT, '0.0.0.0', () => {
     }
   }, 60 * 60 * 1000);
 });
+// ?? TEMPORARY: Clear Auralix cache once to fix the '0 members' issue
+lc.db.prepare('DELETE FROM resub_intelligence_cache').run();
+console.log('?? [STARTUP] Auralix Intelligence Cache Cleared');
