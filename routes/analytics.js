@@ -771,34 +771,58 @@ Reply ONLY with valid JSON (no markdown):
       const gymIds = gymId === 'all' ? ['marjane', 'dokarat'] : gymId.split(',');
       const today = getMoroccanDateStr();
 
-      // Build date range:
-      // - includeToday=true  ??? 30 days ending AT today (home page chart, shows live)
-      // - includeToday=false ??? 30 days ending at YESTERDAY (Revenue Chronology, no mid-day drop)
-      const days = 30;
-      const offset = includeToday ? 0 : 1; // 0 = include today, 1 = stop at yesterday
-      const dateStrs = Array.from({ length: days }, (_, i) =>
-        new Date(Date.now() + 3600000 - (days - 1 - i + offset) * 86400000).toISOString().slice(0, 10)
-      );
+      // Build date range
+      const customStart = req.query.startDate;
+      const customEnd = req.query.endDate;
+      const groupBy = req.query.groupBy || 'day';
+
+      let dateStrs = [];
+      let days = 30;
+
+      if (customStart && customEnd) {
+         let current = new Date(customStart);
+         const end = new Date(customEnd);
+         while (current <= end) {
+            dateStrs.push(current.toISOString().slice(0, 10));
+            current.setDate(current.getDate() + 1);
+         }
+      } else {
+         if (groupBy === 'month') days = 365;
+         if (groupBy === 'year') days = 1825;
+         const offset = includeToday ? 0 : 1;
+         dateStrs = Array.from({ length: days }, (_, i) =>
+            new Date(Date.now() + 3600000 - (days - 1 - i + offset) * 86400000).toISOString().slice(0, 10)
+         );
+      }
+      
+      dateStrs.sort(); // ensure chronological order
 
       const map = {};
       dateStrs.forEach(d => map[d] = { count: 0, rawCount: 0, revenue: 0, revPerGym: {} });
 
       for (const gid of gymIds) {
-        lc.getDailyStats(gid, 31).forEach(s => {
+        let statsArray = [];
+        if (customStart && customEnd) {
+           statsArray = lc.getDailyStatsRange(gid, customStart, customEnd);
+        } else {
+           statsArray = lc.getDailyStats(gid, days + 1);
+        }
+        
+        statsArray.forEach(s => {
           if (map[s.date]) {
             map[s.date].count    += s.count    || 0;
             map[s.date].rawCount += s.rawCount || 0;
           }
         });
-          // daily_stats for today is updated every 60s by pollDoorEntries — already included above
-          // Fallback only if daily_stats has no data for today yet
-          if (includeToday && map[today] !== undefined) {
-            const statToday = lc.getDailyStat(gid, today);
-            if (!statToday || statToday.count === 0) {
-              map[today].count    += lc.getUniqueEntryCount(gid, today);
-              map[today].rawCount += lc.getEntryCount(gid, today);
-            }
+        
+        // Fallback only if daily_stats has no data for today yet (and we want today included)
+        if (includeToday && map[today] !== undefined) {
+          const statToday = lc.getDailyStat(gid, today);
+          if (!statToday || statToday.count === 0) {
+            map[today].count    += lc.getUniqueEntryCount(gid, today);
+            map[today].rawCount += lc.getEntryCount(gid, today);
           }
+        }
       }
 
       // Revenue from SQLite register (completed days) + today register if requested
@@ -817,7 +841,26 @@ Reply ONLY with valid JSON (no markdown):
          map[d].revPerGym = revPerGym;
       });
 
-      res.json(dateStrs.map(date => ({ gym_id: gymId, date, count: map[date].count, rawCount: map[date].rawCount, revenue: map[date].revenue, revPerGym: map[date].revPerGym })));
+      let resultList = dateStrs.map(date => ({ gym_id: gymId, date, count: map[date].count, rawCount: map[date].rawCount, revenue: map[date].revenue, revPerGym: map[date].revPerGym }));
+
+      if (groupBy === 'month' || groupBy === 'year') {
+         const groupedMap = {};
+         resultList.forEach(item => {
+            const groupKey = groupBy === 'month' ? item.date.slice(0, 7) : item.date.slice(0, 4);
+            if (!groupedMap[groupKey]) {
+               groupedMap[groupKey] = { gym_id: gymId, date: groupKey, count: 0, rawCount: 0, revenue: 0, revPerGym: {} };
+            }
+            groupedMap[groupKey].count += item.count;
+            groupedMap[groupKey].rawCount += item.rawCount;
+            groupedMap[groupKey].revenue += item.revenue;
+            for (const [g, rev] of Object.entries(item.revPerGym)) {
+               groupedMap[groupKey].revPerGym[g] = (groupedMap[groupKey].revPerGym[g] || 0) + rev;
+            }
+         });
+         resultList = Object.values(groupedMap).sort((a, b) => a.date.localeCompare(b.date));
+      }
+
+      res.json(resultList);
     } catch (err) {
       console.error('Daily Stats Error:', err);
       res.status(500).json({ error: 'Failed to fetch analytics' });

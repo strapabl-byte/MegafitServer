@@ -260,6 +260,31 @@ try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN status TEXT DEFAULT 'a
 try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN requested_by TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN approved_by TEXT;"); } catch (e) {}
 
+// ── ReSubIntelligence Cache — persists AI+fuzzy verdicts to avoid re-running Groq ──
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS resub_intelligence_cache (
+    register_id   TEXT NOT NULL,
+    gym_id        TEXT NOT NULL,
+    nom_key       TEXT NOT NULL,           -- cleanedNom (normalized)
+    type          TEXT NOT NULL,           -- NEW | RESUB | POSSIBLE
+    confidence    INTEGER DEFAULT 0,
+    matched_name  TEXT,
+    prev_club     TEXT,
+    prev_gym_id   TEXT,
+    prev_status   TEXT,
+    last_sub      TEXT,
+    ai_verified   INTEGER DEFAULT 0,       -- 1 if Groq confirmed
+    ai_reason     TEXT,
+    detection_mode TEXT DEFAULT 'FUZZY',   -- FUZZY | AI+FUZZY
+    used_variant  TEXT,                    -- what name was actually matched
+    was_split     INTEGER DEFAULT 0,       -- 1 if Moroccan name splitter was used
+    cached_at     TEXT NOT NULL,           -- ISO timestamp
+    PRIMARY KEY (register_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_resub_cache_gym ON resub_intelligence_cache(gym_id);
+  CREATE INDEX IF NOT EXISTS idx_resub_cache_nom ON resub_intelligence_cache(nom_key);
+`); } catch (e) {}
+
 
 console.log(`💾 SQLite cache initialised → ${DB_PATH}`);
 
@@ -381,6 +406,22 @@ function getDailyStats(gymId, days = 30) {
   }
   
   const results = db.prepare(sql).all(...g.params, days);
+  return results.map(r => ({ date: r.date, count: r.count, rawCount: r.raw_count }));
+}
+
+function getDailyStatsRange(gymId, startDate, endDate) {
+  const g = buildInClause(getGymIds(gymId));
+  let sql = '';
+  if (getGymIds(gymId).length <= 1 && gymId !== 'all') {
+    sql = `SELECT date, count, raw_count FROM daily_stats WHERE ${g.sql} AND date >= ? AND date <= ? ORDER BY date DESC`;
+  } else {
+    // Aggregation mode
+    sql = `SELECT date, SUM(count) as count, SUM(raw_count) as raw_count 
+           FROM daily_stats WHERE ${g.sql} AND date >= ? AND date <= ?
+           GROUP BY date ORDER BY date DESC`;
+  }
+  
+  const results = db.prepare(sql).all(...g.params, startDate, endDate);
   return results.map(r => ({ date: r.date, count: r.count, rawCount: r.raw_count }));
 }
 
@@ -804,7 +845,7 @@ module.exports = {
   // entries
   upsertEntries, getEntries, getEntryCount, getUniqueEntryCount,
   // daily stats
-  upsertDailyStat, getDailyStats, getDailyStat,
+  upsertDailyStat, getDailyStats, getDailyStatsRange, getDailyStat,
   // members
   upsertMembers, getMembers, getMemberById, pruneStaleMember,
   // register
