@@ -886,11 +886,13 @@ Reply ONLY with valid JSON (no markdown):
 
       const now = new Date();
       const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      const dayOfWeek = now.getDay();
-      const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() + (dayOfWeek === 0 ? -6 : 1 - dayOfWeek));
+      // Rolling windows — always show real data regardless of where we are in the calendar
+      const weekStart  = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);   // last 7 days
       weekStart.setHours(0, 0, 0, 0);
-      const monthStart  = new Date(now.getFullYear(), now.getMonth(), 1);
-      const yearStart   = new Date(now.getFullYear(), 0, 1);
+      const monthStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29);  // last 30 days
+      monthStart.setHours(0, 0, 0, 0);
+      const yearStart  = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 364); // last 365 days
+      yearStart.setHours(0, 0, 0, 0);
 
       // 🔒 DISK-ONLY: All KPI data comes from SQLite register_cache. No Firebase reads.
 
@@ -958,7 +960,13 @@ Reply ONLY with valid JSON (no markdown):
       const kpis = {
         newMembers: { day: countRegisterInRange(todayStart), week: countRegisterInRange(weekStart), month: countRegisterInRange(monthStart), year: countRegisterInRange(yearStart) },
         income:     { day: incomeDay.total, week: incomeWeek.total, month: incomeMonth.total, year: incomeYear.total },
-        paymentMethods: { espece: incomeMonth.espece, tpe: incomeMonth.tpe, virement: incomeMonth.virement, cheque: incomeMonth.cheque }
+        paymentMethods: { espece: incomeMonth.espece, tpe: incomeMonth.tpe, virement: incomeMonth.virement, cheque: incomeMonth.cheque },
+        paymentMethodsByPeriod: {
+          day:   { espece: incomeDay.espece,   tpe: incomeDay.tpe,   virement: incomeDay.virement,   cheque: incomeDay.cheque   },
+          week:  { espece: incomeWeek.espece,  tpe: incomeWeek.tpe,  virement: incomeWeek.virement,  cheque: incomeWeek.cheque  },
+          month: { espece: incomeMonth.espece, tpe: incomeMonth.tpe, virement: incomeMonth.virement, cheque: incomeMonth.cheque },
+          year:  { espece: incomeYear.espece,  tpe: incomeYear.tpe,  virement: incomeYear.virement,  cheque: incomeYear.cheque  },
+        }
       };
 
       apiCache.kpis[gymId] = { data: kpis, ts: Date.now() };
