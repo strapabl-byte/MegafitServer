@@ -445,12 +445,20 @@ Reply ONLY with valid JSON (no markdown):
 
   // ?????? GET /api/live-entries ?????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
   router.get('/api/live-entries', verifyAzureToken, async (req, res) => {
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
     try {
-      const { gymId, limit: limitParam } = req.query;
+      let { gymId, limit: limitParam } = req.query;
       if (!gymId) return res.status(400).json({ error: 'gymId required' });
+      
+      // 🔒 SECURITY: Restrict non-admins to their assigned gym
+      if (!req.isAdmin) {
+          const assigned = req.assignedGyms[0];
+          if (assigned && assigned !== 'all') {
+              gymId = assigned;
+          }
+      }
       const limitCount = Math.min(parseInt(limitParam) || 50, 200);
       const today = getMoroccanDateStr();
 
@@ -748,8 +756,18 @@ Reply ONLY with valid JSON (no markdown):
   // GET /api/live-count
   router.get('/api/live-count', verifyAzureToken, async (req, res) => {
     try {
-      const { gymId } = req.query;
+      let { gymId } = req.query;
       if (!gymId) return res.status(400).json({ error: 'gymId required' });
+      
+      // 🔒 SECURITY: Restrict non-admins to their assigned gym
+      if (!req.isAdmin) {
+          const assigned = req.assignedGyms?.[0];
+          if (assigned && assigned !== 'all') {
+              gymId = assigned;
+          } else {
+              gymId = 'none';
+          }
+      }
       const today = getMoroccanDateStr();
       const cacheKey = `live_count_${gymId}`;
       const result = await getCachedOrFetch(apiCache.general, cacheKey, 30000, async () => {
@@ -776,7 +794,17 @@ Reply ONLY with valid JSON (no markdown):
   // ?????? GET /api/analytics/daily-stats/:gymId ????????????????????????????????????????????????????????????????????????
   router.get('/api/analytics/daily-stats/:gymId', verifyAzureToken, async (req, res) => {
     try {
-      const { gymId } = req.params;
+      let { gymId } = req.params;
+      
+      // 🔒 SECURITY: Restrict non-admins to their assigned gym
+      if (!req.isAdmin) {
+          const assigned = req.assignedGyms?.[0];
+          if (assigned && assigned !== 'all') {
+              gymId = assigned;
+          } else {
+              gymId = 'none';
+          }
+      }
       const includeToday = req.query.includeToday === 'true';
       const gymIds = gymId === 'all' ? ['marjane', 'dokarat'] : gymId.split(',');
       const today = getMoroccanDateStr();
@@ -880,7 +908,17 @@ Reply ONLY with valid JSON (no markdown):
   // ?????? GET /api/analytics/kpis/:gymId ???????????????????????????????????????????????????????????????????????????????????????
   router.get('/api/analytics/kpis/:gymId', verifyAzureToken, async (req, res) => {
     try {
-      const { gymId } = req.params;
+      let { gymId } = req.params;
+      
+      // 🔒 SECURITY: Restrict non-admins to their assigned gym
+      if (!req.isAdmin) {
+          const assigned = req.assignedGyms?.[0];
+          if (assigned && assigned !== 'all') {
+              gymId = assigned;
+          } else {
+              gymId = 'none';
+          }
+      }
       const cached = apiCache.kpis[gymId];
       if (cached && Date.now() - cached.ts < 30 * 1000) return res.json(cached.data);
 

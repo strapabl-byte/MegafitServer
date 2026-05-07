@@ -74,6 +74,22 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
     try {
       const snap = await db.collection('payments').where('memberId', '==', req.params.memberId).get();
       let payments = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+      // 🔒 SECURITY: Restrict non-admins to their assigned gym
+      if (!req.isAdmin) {
+          const assigned = req.assignedGyms?.[0];
+          let gymId;
+          if (assigned && assigned !== 'all') {
+              gymId = assigned;
+          } else {
+              gymId = 'none';
+          }
+          const diskMember = lc.getMemberById ? lc.getMemberById(req.params.memberId) : null;
+          if (diskMember && diskMember.gym_id && !req.hasAccessToGym(diskMember.gym_id)) {
+              return res.status(403).json({ error: 'Access Denied: This member belongs to another gym' });
+          }
+      }
+
       payments.sort((a, b) => new Date(b.date || b.createdAt?._seconds * 1000 || 0) - new Date(a.date || a.createdAt?._seconds * 1000 || 0));
 
       // Virtual backfill: inject registration payment if missing
@@ -202,6 +218,12 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
   router.post('/', verifyAzureToken, async (req, res) => {
     try {
       const { memberId, amount, plan, date, method, contrat, commercial, location, payments: splitPayments, type, note, reste, balanceDeadline, cin: passedCin, subscriptionName, inscriptionId } = req.body;
+      
+      // 🔒 SECURITY: Restrict non-admins to their assigned gym
+      if (!req.isAdmin && location && !req.hasAccessToGym(location)) {
+          return res.status(403).json({ error: 'Access Denied: You cannot record payments for another gym' });
+      }
+      
       let nom = '', tel = '', loc = location || 'dokarat', cin = passedCin || '';
       try {
         // 🔒 DISK-FIRST: Read member data from SQLite, not Firebase

@@ -29,7 +29,18 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
   // Firebase is NEVER called here. Only add/edit/delete touches Firebase.
   router.get('/', verifyAzureToken, async (req, res) => {
     try {
-      const gymId       = req.query.gymId || 'all';
+      let gymId = req.query.gymId || 'all';
+
+      // 🔒 SECURITY: Restrict non-admins to their assigned gym
+      if (!req.isAdmin) {
+          const assigned = req.assignedGyms?.[0];
+          if (assigned && assigned !== 'all') {
+              gymId = assigned;
+          } else {
+              // 🚨 SECURITY: If no gym is assigned and they aren't admin, return NOTHING.
+              gymId = 'none';
+          }
+      }
       const searchQuery = req.query.search || '';
 
       // 1️⃣ Load from disk
@@ -204,6 +215,16 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
     } catch (err) { res.status(500).json({ error: 'Failed to fetch member' }); }
   });
 
+  router.get('/api/debug-auth', verifyAzureToken, (req, res) => {
+    res.json({
+      user: req.user?.preferred_username || req.user?.email || 'unknown',
+      isAdmin: req.isAdmin,
+      isManager: req.isManager,
+      assignedGyms: req.assignedGyms,
+      envAdminEmails: process.env.ADMIN_EMAILS
+    });
+  });
+
   // ── GET /api/members/:id/profile ──────────────────────────────────────────
   // 🔒 DISK-FIRST: Reads member + inscription from SQLite. Firebase only as last resort.
   router.get('/:id/profile', verifyAzureToken, async (req, res) => {
@@ -258,7 +279,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       // Access control
       if (!req.isAdmin && member.location && !req.hasAccessToGym(member.location)) {
         console.warn(`🚫 Manager ${req.user?.name} tried to access member ${memberId} from gym ${member.location}`);
-        return res.status(403).json({ error: 'Access denied: member belongs to a different gym' });
+        return res.status(403).json({ error: 'Access Denied: This member belongs to another gym' });
       }
 
       // 4️⃣ Resolve inscription (disk-first via getPendingById if available)

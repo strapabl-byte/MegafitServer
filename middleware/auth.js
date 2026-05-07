@@ -19,7 +19,7 @@ const jwks = jwksClient({
 const MANAGER_MAPPING = {
   'megafitsaiss@outlook.com':    'marjane',
   'megafitdokkarat@outlook.com': 'dokarat',
-  // 'email_casa1': 'casa1',
+  'megafitanfa@outlook.com':     'casa1',   // ✅ Casa Anfa — added 2026-05-07
   // 'email_casa2': 'casa2',
 };
 
@@ -72,25 +72,32 @@ function verifyAzureToken(req, res, next) {
     if (!audOk) return res.status(401).json({ error: 'Invalid audience' });
 
     req.user      = decoded;
-    const email = (decoded.preferred_username || decoded.upn || '').toLowerCase();
+    const email = (decoded.preferred_username || decoded.upn || decoded.email || '').toLowerCase();
+    console.log(`🔐 Auth: Verifying token for ${email}`);
     
-    // Check if user is a pre-configured manager
+    // 🔒 STRICT RBAC: Determine if user is Admin or Manager
+    const adminEmails = (process.env.ADMIN_EMAILS || '').toLowerCase().split(',');
+    const isExplicitAdmin = adminEmails.includes(email) || (decoded.roles && decoded.roles.includes('Admin')) || decoded.extension_Role === 'admin';
+    
     const assignedGym = MANAGER_MAPPING[email];
     
     if (assignedGym) {
-      // Automatic Manager Role
       req.isAdmin   = false;
       req.isManager = true;
       req.assignedGyms = [assignedGym];
+    } else if (isExplicitAdmin) {
+      req.isAdmin   = true;
+      req.isManager = false;
+      req.assignedGyms = ['all'];
     } else {
-      // Default Logic (Azure attributes)
-      req.isAdmin   = !decoded.extension_Gym;
-      req.isManager = !!(decoded.roles?.includes('Manager') || decoded.extension_Role === 'manager' || decoded.extension_Gym);
-      req.assignedGyms   = decoded.extension_Gym ? [decoded.extension_Gym] : ['all'];
+      // Default: Restricted Manager if they have a gym attribute, otherwise Guest (Access Denied)
+      req.isAdmin   = false;
+      req.isManager = true;
+      req.assignedGyms = decoded.extension_Gym ? [decoded.extension_Gym] : [];
     }
 
     req.hasAccessToGym = (gymId) => {
-      if (req.assignedGyms.includes('all')) return true;
+      if (req.isAdmin || req.assignedGyms.includes('all')) return true;
       return req.assignedGyms.includes(gymId);
     };
     next();

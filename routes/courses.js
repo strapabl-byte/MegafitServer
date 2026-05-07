@@ -25,7 +25,21 @@ module.exports = function coursesRouter({ db, admin }) {
   router.get('/api/courses', verifyAzureToken, async (req, res) => {
     try {
       const weekday = req.query.weekday !== undefined ? parseInt(req.query.weekday) : new Date().getDay();
-      const gymId = req.query.gymId || (req.assignedGyms.includes('all') ? null : req.assignedGyms[0]);
+      
+      const isAdmin = req.isAdmin;
+      let gymId = req.query.gymId;
+
+      // 🔒 SECURITY: Restrict non-admins to their assigned gym
+      if (!isAdmin) {
+          const assigned = req.assignedGyms?.[0];
+          if (assigned && assigned !== 'all') {
+              gymId = assigned;
+          } else {
+              gymId = 'none';
+          }
+      } else if (!gymId) {
+          gymId = 'all';
+      }
       res.json(await getCoursesWithCounts(weekday, gymId));
     } catch (err) { console.error('Failed to fetch courses:', err); res.status(500).json({ error: 'Failed to fetch courses' }); }
   });

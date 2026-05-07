@@ -10,7 +10,17 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
   // ── GET /api/register ─────────────────────────────────────────────────────
   router.get('/', verifyAzureToken, async (req, res) => {
     try {
-      const { date, gymId = 'dokarat' } = req.query;
+      let { date, gymId = 'dokarat' } = req.query;
+      
+      // 🔒 SECURITY: Restrict non-admins to their assigned gym
+      if (!req.isAdmin) {
+          const assigned = req.assignedGyms?.[0];
+          if (assigned && assigned !== 'all') {
+              gymId = assigned;
+          } else {
+              gymId = 'none';
+          }
+      }
       if (!date) return res.status(400).json({ error: 'date required (YYYY-MM-DD)' });
 
       const gymIds = gymId === 'all' ? ['marjane', 'dokarat', 'casa1', 'casa2'] : [gymId];
@@ -163,7 +173,15 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
   // ── GET /api/register/calendar ────────────────────────────────────────────
   router.get('/calendar', verifyAzureToken, async (req, res) => {
     try {
-      const { year = new Date().getFullYear(), gymId = 'dokarat' } = req.query;
+      let { year = new Date().getFullYear(), gymId = 'dokarat' } = req.query;
+      
+      // 🔒 SECURITY: Restrict non-admins to their assigned gym
+      if (!req.isAdmin) {
+          const assigned = req.assignedGyms[0];
+          if (assigned && assigned !== 'all') {
+              gymId = assigned;
+          }
+      }
       const cacheKey = `${gymId}_${year}`;
 
       const result = await getCachedOrFetch(apiCache.calendar, cacheKey, 10 * 60 * 1000, async () => {
@@ -225,7 +243,15 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
   //   - summary: auto-generated French insight text
   router.get('/auralix-analysis', verifyAzureToken, async (req, res) => {
     try {
-      const { gymId = 'dokarat', month } = req.query;
+      let { gymId = 'dokarat', month } = req.query;
+      
+      // 🔒 SECURITY: Restrict non-admins to their assigned gym
+      if (!req.isAdmin) {
+          const assigned = req.assignedGyms[0];
+          if (assigned && assigned !== 'all') {
+              gymId = assigned;
+          }
+      }
       // month format: YYYY-MM (defaults to current month)
       const target = month || (() => {
         const d = new Date();
