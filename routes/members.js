@@ -131,7 +131,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         );
       }
 
-      // 4️⃣ Normalize SQLite snake_case → camelCase
+      // 4️⃣ Normalize SQLite snake_case → camelCase (applies to ALL gyms)
       finalMembers = finalMembers.map(m => ({
         ...m,
         fullName:         m.fullName         || m.full_name         || 'Inconnu',
@@ -144,8 +144,18 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         lastPaymentDate:  m.lastPaymentDate  || m.last_payment_date || null,
         isArchive:        m.isArchive        || !!m.is_archive      || false,
         isPendingWithPdf: m.isPendingWithPdf || false,
-        // ✅ Always expose subscriptionName (stored as plan when coming from inscription)
+        // ✅ Subscription name — use real form value, not generic plan code
         subscriptionName: m.subscriptionName || m.subscription_name || m.plan || '',
+        // ✅ These were missing for non-Dokkarat gyms — now normalized for ALL gyms
+        contractNumber:   m.contractNumber   || m.contract_number   || null,
+        inscriptionId:    m.inscriptionId    || m.inscription_id    || null,
+        periodFrom:       m.periodFrom       || m.period_from       || null,
+        periodTo:         m.periodTo         || m.period_to         || m.expiresOn || m.expires_on || null,
+        cin:              m.cin              || null,
+        email:            m.email            || null,
+        adresse:          m.adresse          || null,
+        ville:            m.ville            || null,
+        commercial:       m.commercial       || null,
       }));
 
       // 5️⃣ Restrict fields for non-admin users
@@ -153,11 +163,16 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         finalMembers = finalMembers.map(m => ({
           id: m.id, fullName: m.fullName, phone: m.phone || '',
           birthday: m.birthday || '', expiresOn: m.expiresOn, plan: m.plan,
-          subscriptionName: m.subscriptionName || m.subscription_name || m.plan || '',
+          subscriptionName: m.subscriptionName || '',
+          contractNumber: m.contractNumber || null,
+          inscriptionId:  m.inscriptionId  || null,
+          periodFrom:     m.periodFrom     || null,
+          cin:            m.cin            || null,
+          commercial:     m.commercial     || null,
           qrToken: m.qrToken || '', image: m.photo || null,
           pdfUrl: m.pdfUrl || null, isRestricted: true,
           createdAt: m.createdAt || null, isPendingWithPdf: m.isPendingWithPdf || false,
-          isArchive: m.isArchive || false, contractNumber: m.contractNumber || null,
+          isArchive: m.isArchive || false,
         }));
       }
 
@@ -247,23 +262,31 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         // Normalize disk field names to camelCase
         member = {
           id: member.id || memberId,
-          fullName:       member.fullName       || member.full_name       || 'Inconnu',
-          phone:          member.phone          || '',
-          plan:           member.plan           || 'Monthly',
-          status:         member.status         || '',
-          birthday:       member.birthday       || null,
-          expiresOn:      member.expiresOn      || member.expires_on      || null,
-          photo:          member.photo          || null,
-          email:          member.email          || null,
-          location:       member.location       || member.gym_id          || 'dokarat',
-          qrToken:        member.qrToken        || member.qr_token        || '',
-          pdfUrl:         member.pdfUrl         || member.pdf_url         || null,
-          contractNumber: member.contractNumber || member.contrat         || null,
-          cin:            member.cin            || null,
-          balance:        member.balance        || 0,
-          isFrozen:       member.isFrozen       || !!member.is_frozen     || false,
-          inscriptionId:  member.inscriptionId  || member.inscription_id || null,
-          createdAtStr:   member.createdAt      || member.created_at      || null,
+          fullName:        member.fullName        || member.full_name        || 'Inconnu',
+          phone:           member.phone           || '',
+          plan:            member.plan            || 'Monthly',
+          status:          member.status          || '',
+          birthday:        member.birthday        || null,
+          expiresOn:       member.expiresOn       || member.expires_on       || null,
+          photo:           member.photo           || null,
+          email:           member.email           || null,
+          location:        member.location        || member.gym_id           || 'dokarat',
+          qrToken:         member.qrToken         || member.qr_token         || '',
+          pdfUrl:          member.pdfUrl          || member.pdf_url          || null,
+          contractNumber:  member.contractNumber  || member.contract_number  || null,
+          cin:             member.cin             || null,
+          balance:         member.balance         || 0,
+          isFrozen:        member.isFrozen        || !!member.is_frozen      || false,
+          inscriptionId:   member.inscriptionId   || member.inscription_id   || null,
+          subscriptionName:member.subscriptionName|| member.subscription_name|| member.plan || null,
+          periodFrom:      member.periodFrom      || member.period_from      || null,
+          periodTo:        member.periodTo        || member.period_to        || member.expiresOn || member.expires_on || null,
+          adresse:         member.adresse         || null,
+          ville:           member.ville           || null,
+          commercial:      member.commercial      || null,
+          totalPaid:       member.totalPaid       || member.total_paid       || 0,
+          payments:        member.payments        || null,
+          createdAtStr:    member.createdAt       || member.created_at       || null,
           source: 'disk',
         };
       } else {
