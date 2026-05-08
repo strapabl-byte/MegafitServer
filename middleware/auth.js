@@ -20,7 +20,7 @@ const MANAGER_MAPPING = {
   'megafitsaiss@outlook.com':    'marjane',
   'megafitdokkarat@outlook.com': 'dokarat',
   'megafitanfa@outlook.com':     'casa1',   // ✅ Casa Anfa — added 2026-05-07
-  // 'email_casa2': 'casa2',
+  'megafitlady@outlook.com':     'casa2',
 };
 
 function getKey(header, cb) {
