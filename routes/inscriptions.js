@@ -616,7 +616,176 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
     }
   });
 
-  // ── DELETE /api/inscriptions/:id ──────────────────────────────────────────
+  // ── POST /api/inscriptions/recover-members ───────────────────────────────
+  // Finds inscriptions that have a PDF (form was fully submitted) but whose
+  // member is missing from the members collection or the SQLite cache.
+  // Safe to run multiple times — dedup logic prevents duplicate members.
+  // 🔒 Super Admin only.
+  router.post('/recover-members', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const { gymId } = req.body; // optional: restrict to one gym
+
+      // 1. Get ALL pending_members that have a pdfUrl (inscription complete)
+      //    regardless of status — catches pending, awaiting_payment, even converted
+      let query = db.collection('pending_members').where('source', '==', 'web');
+      if (gymId) query = query.where('gymId', '==', gymId);
+      const snap = await query.get();
+
+      const created  = [];
+      const updated  = [];
+      const skipped  = [];
+      const errors   = [];
+
+      for (const doc of snap.docs) {
+        const ins       = doc.data();
+        const insId     = doc.id;
+        const insGymId  = ins.gymId || 'dokarat';
+        const fullName  = `${ins.prenom || ''} ${ins.nom || ''}`.trim();
+
+        // Only recover inscriptions that had a PDF generated (= form was completed)
+        if (!ins.pdfUrl) {
+          skipped.push({ id: insId, name: fullName, reason: 'No PDF — form incomplete' });
+          continue;
+        }
+
+        try {
+          // ── Check if the linked memberId still exists ──────────────────────
+          let memberExists = false;
+          if (ins.memberId) {
+            const mDoc = await db.collection('members').doc(ins.memberId).get();
+            if (mDoc.exists && !mDoc.data().deleted && !mDoc.data().isDeleted) {
+              memberExists = true;
+              // Member exists in Firestore — make sure SQLite cache has it
+              try {
+                lc.upsertMembers(insGymId, [{ id: ins.memberId, ...mDoc.data() }]);
+                updated.push({ id: insId, name: fullName, memberId: ins.memberId, action: 'cache_refreshed' });
+              } catch (_) {
+                updated.push({ id: insId, name: fullName, memberId: ins.memberId, action: 'cache_refresh_failed' });
+              }
+              continue;
+            }
+          }
+
+          // ── Member missing — try dedup before creating ─────────────────────
+          let existingMember = null;
+
+          // a) CIN match
+          if (!existingMember && ins.cin && ins.cin.trim().length > 3) {
+            const cinSnap = await db.collection('members')
+              .where('cin', '==', ins.cin.trim().toUpperCase()).limit(1).get();
+            if (!cinSnap.empty) existingMember = cinSnap.docs[0];
+          }
+          // b) Phone match
+          if (!existingMember && ins.telephone) {
+            const phone = ins.telephone.replace(/\s/g, '');
+            if (phone.length >= 9) {
+              const pSnap = await db.collection('members').where('phone', '==', phone).limit(1).get();
+              if (!pSnap.empty) existingMember = pSnap.docs[0];
+            }
+          }
+          // c) Full-name match
+          if (!existingMember && fullName.length > 5) {
+            const nSnap = await db.collection('members').where('fullName', '==', fullName).limit(1).get();
+            if (!nSnap.empty) existingMember = nSnap.docs[0];
+          }
+
+          // ── Derive plan & expiry (same logic as confirm endpoint) ──────────
+          const sName = (ins.subscriptionName || '').toLowerCase();
+          const monthMatch  = sName.match(/(\d+)\s*mois/);
+          const yearMatch   = sName.match(/(\d+)\s*an/);
+          const totalMonths = monthMatch ? parseInt(monthMatch[1]) : (yearMatch ? parseInt(yearMatch[1]) * 12 : 1);
+          let plan = 'Monthly';
+          if      (totalMonths >= 12) plan = 'Annual';
+          else if (totalMonths >= 6 ) plan = 'Semi-Annual';
+          else if (totalMonths >= 3 ) plan = 'Quarterly';
+
+          let expiresOn = ins.periodTo || null;
+          if (!expiresOn) {
+            const start = ins.periodFrom ? new Date(ins.periodFrom) : new Date();
+            if (ins.durationYears)       start.setFullYear(start.getFullYear() + Number(ins.durationYears));
+            else if (ins.durationMonths) start.setMonth(start.getMonth() + Number(ins.durationMonths));
+            else                         start.setFullYear(start.getFullYear() + 1);
+            expiresOn = start.toISOString().split('T')[0];
+          }
+
+          const memberData = {
+            fullName,
+            phone: ins.telephone || null, plan,
+            subscriptionName: ins.subscriptionName || null,
+            birthday: ins.dateNaissance || null,
+            expiresOn,
+            periodFrom: ins.periodFrom || null,
+            periodTo:   expiresOn,
+            photo: (ins.profilePicture && !ins.profilePicture.startsWith('data:image')) ? ins.profilePicture : null,
+            email: ins.email || null,
+            cin: ins.cin || null,
+            adresse: ins.adresse || null, ville: ins.ville || null,
+            location: insGymId,
+            contractNumber: ins.contractNumber || null,
+            commercial: ins.commercial || null,
+            pdfUrl: ins.pdfUrl || null,
+            balance: ins.totals?.balance || 0,
+            inscriptionId: insId,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            recoveredBy: 'recover-members',
+            recoveredAt: admin.firestore.FieldValue.serverTimestamp(),
+          };
+
+          let memberId, memberRef;
+          if (existingMember) {
+            // UPDATE existing — safe merge
+            memberId  = existingMember.id;
+            memberRef = existingMember.ref;
+            await memberRef.update(memberData);
+          } else {
+            // CREATE new member
+            const qrToken = crypto.randomBytes(16).toString('hex');
+            memberRef = await db.collection('members').add({
+              ...memberData, qrToken,
+              createdAt: admin.firestore.FieldValue.serverTimestamp(),
+              confirmedBy: 'recover-members',
+            });
+            memberId = memberRef.id;
+          }
+
+          // Link inscription → memberId
+          await doc.ref.update({
+            memberId,
+            status: ins.status === 'pending' ? 'awaiting_payment' : ins.status,
+            memberCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            memberCreatedBy: 'recover-members',
+          });
+
+          // Refresh SQLite cache
+          const memberSnap = await memberRef.get();
+          try { lc.upsertMembers(insGymId, [{ id: memberId, ...memberSnap.data() }]); } catch (_) {}
+
+          // Link orphan payments
+          const orphanPay = await db.collection('payments').where('inscriptionId', '==', insId).get();
+          for (const p of orphanPay.docs) await p.ref.update({ memberId });
+
+          console.log(`✅ [RECOVER-MEMBERS] ${fullName} | ${insGymId} | ${existingMember ? 'UPDATED' : 'CREATED'} → ${memberId}`);
+          created.push({ id: insId, name: fullName, memberId, gymId: insGymId, action: existingMember ? 'updated' : 'created' });
+
+        } catch (e) {
+          console.error(`❌ [RECOVER-MEMBERS] ${fullName}:`, e.message);
+          errors.push({ id: insId, name: fullName, error: e.message });
+        }
+      }
+
+      invalidateCache(apiCache.inscriptions);
+      res.json({
+        ok: true,
+        summary: `${created.length} members recovered, ${updated.length} caches refreshed, ${skipped.length} skipped, ${errors.length} errors`,
+        created, updated, skipped, errors,
+      });
+    } catch (err) {
+      console.error('Recover Members Error:', err);
+      res.status(500).json({ error: 'Recovery failed', detail: err.message });
+    }
+  });
+
+
   router.delete('/api/inscriptions/:id', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
       await db.collection('pending_members').doc(req.params.id).delete();
