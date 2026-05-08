@@ -326,9 +326,10 @@ async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => fals
         const gyms = {};
         membersSnap.docs.forEach(d => {
           const m = { id: d.id, ...d.data() };
-          const gid = (m.location || 'dokarat').toLowerCase().includes('marjane') ? 'marjane' : 
-                      (m.location || 'dokarat').toLowerCase().includes('casa1') ? 'casa1' :
-                      (m.location || 'dokarat').toLowerCase().includes('casa2') ? 'casa2' : 'dokarat';
+          const locStr = (m.location || m.gymId || 'dokarat').toLowerCase();
+          const gid = locStr.includes('marjane') ? 'marjane' : 
+                      locStr.includes('casa1') ? 'casa1' :
+                      locStr.includes('casa2') ? 'casa2' : 'dokarat';
           if (!gyms[gid]) gyms[gid] = [];
           gyms[gid].push(m);
         });
