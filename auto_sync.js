@@ -424,5 +424,3 @@ function scheduleNightlySync(db, apiCache, checkQuota = () => false) {
 }
 
 module.exports = { syncGymCounts, scheduleNightlySync };
-
-module.exports = { syncGymCounts, scheduleNightlySync };
