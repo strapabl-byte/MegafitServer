@@ -90,9 +90,27 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
   router.post('/public/inscriptions', async (req, res) => {
     try {
       const data = req.body;
-      const rawGymId = data.gymId || req.query.gymId || req.query.gym || 'dokarat';
-      const gymMap = { dokkarat: 'dokarat', marjane: 'marjane', casa1: 'casa1', casa2: 'casa2' };
-      const normalizedGymId = gymMap[rawGymId.toLowerCase().trim()] || rawGymId.toLowerCase().trim();
+      const rawGymId = (data.gymId || req.query.gymId || req.query.gym || '').toLowerCase().trim();
+
+      // 🏦 STRICT GYM VALIDATION — reject unknown gyms at the gate, never let bad data in.
+      // All 4 canonical variants + common aliases accepted.
+      const GYM_ALIAS_MAP = {
+        'dokarat':    'dokarat', 'dokkarat': 'dokarat', 'doukkarate': 'dokarat', 'fes dokkarat': 'dokarat',
+        'marjane':    'marjane', 'saiss': 'marjane', 'fes saiss': 'marjane',
+        'casa1':      'casa1',   'anfa': 'casa1', 'casa anfa': 'casa1',
+        'casa2':      'casa2',   'lady': 'casa2', 'casa lady': 'casa2', 'casa lady anfa': 'casa2',
+      };
+      const normalizedGymId = GYM_ALIAS_MAP[rawGymId] || null;
+
+      if (!normalizedGymId) {
+        console.error(`❌ [INSCRIPTION REJECTED] Unknown gymId: "${rawGymId}" from body.gymId="${data.gymId}"`);
+        return res.status(400).json({
+          error: 'Identifiant de salle invalide. Veuillez vous reconnecter et réessayer.',
+          received: rawGymId,
+          allowed: ['dokarat', 'marjane', 'casa1', 'casa2'],
+        });
+      }
+
       let finalContractNumber = '000000';
 
       const result = await db.runTransaction(async (t) => {

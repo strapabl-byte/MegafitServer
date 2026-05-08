@@ -8,6 +8,30 @@ function getLC() {
   return lc;
 }
 
+// ── CANONICAL GYM IDs ─────────────────────────────────────────────────────────
+const CANONICAL_GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
+
+/**
+ * 🏦 STRICT GYM RESOLVER — used everywhere member/inscription data is classified.
+ * Priority: canonical gymId field → location string map → null (NO silent fallback).
+ * Returns null if unknown, never silently assigns to a wrong gym.
+ */
+function resolveGymId(m) {
+  // Priority 1: direct canonical gymId on the document
+  const direct = (m.gymId || '').toLowerCase().trim();
+  if (CANONICAL_GYMS.includes(direct)) return direct;
+
+  // Priority 2: canonical location string map (all known variants)
+  const loc = (m.location || m.gymId || '').toLowerCase().trim();
+  if (['dokkarat fes', 'dokkarat', 'doukkarate', 'fes dokkarat', 'dokarat', 'dukkarate'].some(s => loc.includes(s))) return 'dokarat';
+  if (['fes saiss', 'marjane', 'fes marjane', 'saiss', 'fès saiss', 'fes-saiss'].some(s => loc.includes(s))) return 'marjane';
+  if (['casa 1', 'casa1', 'anfa', 'casa anfa', 'casaanfa'].some(s => loc.includes(s)) && !loc.includes('lady')) return 'casa1';
+  if (['casa 2', 'casa2', 'casa lady', 'lady anfa', 'casalady'].some(s => loc.includes(s))) return 'casa2';
+
+  // ⚠️ Unknown — log and return null. NEVER silently fall back to a default gym.
+  if (loc) console.warn(`[SYNC] ⚠️ Unknown gym location for member ${m.id}: gymId="${m.gymId}", location="${m.location}". Skipped — no silent fallback.`);
+  return null;
+}
 
 const GYM_SYNC_MAP = [
   { 
@@ -324,31 +348,41 @@ async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => fals
       const membersSnap = await db.collection('members').where('updatedAt', '>=', twoDaysAgo).get();
       if (!membersSnap.empty) {
         const gyms = {};
+        let skipped = 0;
         membersSnap.docs.forEach(d => {
           const m = { id: d.id, ...d.data() };
-          const locStr = (m.location || m.gymId || 'dokarat').toLowerCase();
-          const gid = locStr.includes('marjane') ? 'marjane' : 
-                      locStr.includes('casa1') ? 'casa1' :
-                      locStr.includes('casa2') ? 'casa2' : 'dokarat';
+          // 🏦 STRICT: Use canonical resolver — no silent fallback to dokarat
+          const gid = resolveGymId(m);
+          if (!gid) { skipped++; return; } // unknown gym — skip, do NOT contaminate
           if (!gyms[gid]) gyms[gid] = [];
           gyms[gid].push(m);
         });
         for (const [gid, list] of Object.entries(gyms)) {
           getLC().upsertMembers(gid, list);
         }
-        console.log(`  ✅ Synced ${membersSnap.size} recently updated members.`);
+        console.log(`  ✅ Synced ${membersSnap.size - skipped} recently updated members (${skipped} skipped — unknown gym).`);
       }
 
       // Pull latest pending inscriptions (last 48h)
+      // 🏦 STRICT: pending_members always have a canonical gymId from the web form POST.
+      // We trust it directly — no remapping needed.
       const twoDaysAgoPending = new Date(Date.now() - 48 * 60 * 60 * 1000);
       const pendingSnap = await db.collection('pending_members')
         .where('createdAt', '>=', twoDaysAgoPending)
         .get();
       if (!pendingSnap.empty) {
+        let pendingSkipped = 0;
         pendingSnap.docs.forEach(d => {
-          getLC().setPending({ id: d.id, ...d.data() });
+          const data = { id: d.id, ...d.data() };
+          // Guard: skip pending inscriptions with invalid gymId
+          if (!CANONICAL_GYMS.includes(data.gymId)) {
+            console.warn(`[SYNC] ⚠️ Pending inscription ${d.id} has invalid gymId "${data.gymId}" — skipped.`);
+            pendingSkipped++;
+            return;
+          }
+          getLC().setPending(data);
         });
-        console.log(`  ✅ Synced ${pendingSnap.size} recent pending inscriptions with PDFs.`);
+        console.log(`  ✅ Synced ${pendingSnap.size - pendingSkipped} recent pending inscriptions (${pendingSkipped} skipped — invalid gymId).`);
       }
     } catch (err) {
       console.warn("  ⚠️ Optimized Member Sync failed:", err.message);
