@@ -52,26 +52,17 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       if (pdfMembers && pdfMembers.length > 0) {
         const normalizeName = (name) => (name || '').toLowerCase().replace(/\s+/g, '');
         
-        // Override member plans with their official inscription subscriptionName
-        // If a member lacks an inscription_id, try to auto-link them by name!
+        // Override member plans with their official inscription subscriptionName.
+        // ONLY link by explicit inscription_id — name matching is too fragile and
+        // causes ghost photos / wrong payment history when names collide.
         finalMembers = finalMembers.map(m => {
           let linkedPdf = null;
           if (m.inscription_id) {
             linkedPdf = pdfMembers.find(p => p.id === m.inscription_id);
-          } else {
-            // Fallback: match by full name (checking both First Last and Last First)
-            const mName = normalizeName(m.full_name || m.fullName);
-            if (mName) {
-              linkedPdf = pdfMembers.find(p => {
-                const pName1 = normalizeName(`${p.prenom || ''}${p.nom || ''}`);
-                const pName2 = normalizeName(`${p.nom || ''}${p.prenom || ''}`);
-                return pName1 === mName || pName2 === mName;
-              });
-              if (linkedPdf) {
-                m.inscription_id = linkedPdf.id; // Auto-link in memory to prevent duplication below
-              }
-            }
           }
+          // ⚠️ NOTE: Fallback name-based auto-link REMOVED.
+          // It was causing cross-member data contamination when two members share
+          // a name or when test data matched a real member's name.
           
           if (linkedPdf) {
             if (linkedPdf.subscriptionName) m.plan = linkedPdf.subscriptionName;

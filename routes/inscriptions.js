@@ -376,7 +376,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         }
       }
 
-      // 2. CIN match — most reliable unique identifier
+      // 2. CIN match — only reliable unique identifier (national ID card)
       if (!existingMember && ins.cin && ins.cin.trim().length > 3) {
         const cinSnap = await db.collection('members')
           .where('cin', '==', ins.cin.trim().toUpperCase())
@@ -387,23 +387,13 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         }
       }
 
-      // 3. Phone match
-      if (!existingMember && ins.telephone) {
-        const phone = ins.telephone.replace(/\s/g, '');
-        if (phone.length >= 9) {
-          const phoneSnap = await db.collection('members')
-            .where('phone', '==', phone).limit(1).get();
-          if (!phoneSnap.empty) {
-            existingMember = phoneSnap.docs[0];
-            console.log(`📱 Dedup by phone (${phone}) → ${existingMember.id}`);
-          }
-        }
-      }
+      // ⚠️ NOTE: Phone dedup REMOVED — phone numbers can be shared by family members,
+      // causing false-matches that link a new member to an existing one's history & photo.
 
-      // 4. Full-name match (last resort)
+      // 3. Full-name match — last resort, requires long enough name to reduce false positives
       if (!existingMember) {
         const fullNameCheck = `${ins.prenom || ''} ${ins.nom || ''}`.trim();
-        if (fullNameCheck.length > 5) {
+        if (fullNameCheck.length > 9) { // raised from 5 → 9 to prevent short-name false matches
           const nameSnap = await db.collection('members')
             .where('fullName', '==', fullNameCheck).limit(1).get();
           if (!nameSnap.empty) {
