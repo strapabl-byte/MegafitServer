@@ -285,8 +285,26 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
         });
       }
 
+      // ── Resolve register date: use inscription createdAt if this is a registration payment ──
+      // This ensures the register entry lands on the day the inscription was submitted,
+      // not the day the admin confirms it (which may be days later).
+      let registerDate = date || null;
+      if (!registerDate && inscriptionId && type === 'registration') {
+        try {
+          const diskIns = lc.getPendingById ? lc.getPendingById(inscriptionId) : null;
+          if (diskIns?.createdAt) {
+            registerDate = new Date(diskIns.createdAt).toISOString().slice(0, 10);
+          } else {
+            const insDoc = await db.collection('pending_members').doc(inscriptionId).get();
+            if (insDoc.exists && insDoc.data().createdAt?._seconds) {
+              registerDate = new Date(insDoc.data().createdAt._seconds * 1000).toISOString().slice(0, 10);
+            }
+          }
+        } catch (_) {}
+      }
+
       await autoRegisterCA({
-        gymId: loc, nom, tel, cin, plan, subscriptionName: subscriptionName || '', amount, method: method || 'Cash',
+        gymId: loc, date: registerDate, nom, tel, cin, plan, subscriptionName: subscriptionName || '', amount, method: method || 'Cash',
         commercial: commercial || req.user?.preferred_username || 'Admin',
         contrat: contrat || '', payments: splitPayments,
         reste: reste || 0, note: note || '',
@@ -389,8 +407,15 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
         recordedBy: req.user?.preferred_username || 'Admin',
       });
 
+      // ── Resolve register date: use inscription's original createdAt ──────────
+      let registerDate2 = null;
+      if (insDoc.exists && insData.createdAt?._seconds) {
+        registerDate2 = new Date(insData.createdAt._seconds * 1000).toISOString().slice(0, 10);
+      }
+
       await autoRegisterCA({
         gymId: insData.gymId || 'dokarat',
+        date: registerDate2, // use inscription creation date, not today
         nom: `${insData.prenom || ''} ${insData.nom || ''}`.trim() || fullName || '',
         tel: phone || insData.telephone || '',
         plan: plan || 'Monthly', amount, method: method || 'Espèces',
