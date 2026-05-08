@@ -285,18 +285,19 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         return res.status(403).json({ error: 'Access Denied: This member belongs to another gym' });
       }
 
-      // 4️⃣ Resolve inscription (disk-first via getPendingById if available)
+      // 4️⃣ Resolve inscription data for the profile panel
+      // Tier 1: direct inscriptionId link (stored on member)
+      // Tier 2: reverse lookup by memberId in pending_members
+      // Tier 3: build from member's own stored fields (always works)
       let inscription = null;
-      if (member.inscriptionId) {
-        let diskIns = lc.getPendingById ? lc.getPendingById(member.inscriptionId) : null;
-        
-        // If the local cache exists but is missing critical financial data, force a fallback
-        if (diskIns && !diskIns.payments && !diskIns.totals) {
-          diskIns = null; 
-        }
+
+      const resolveInscription = async (insId) => {
+        // Try SQLite disk first
+        let diskIns = lc.getPendingById ? lc.getPendingById(insId) : null;
+        if (diskIns && !diskIns.payments && !diskIns.totals) diskIns = null; // force Firebase if financial data missing
 
         if (diskIns) {
-          inscription = {
+          return {
             cin: diskIns.cin, adresse: diskIns.adresse, ville: diskIns.ville, email: diskIns.email,
             commercial: diskIns.commercial,
             subscriptionName: diskIns.subscriptionName || diskIns.subscription_name,
@@ -310,36 +311,85 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
             balance: diskIns.balance ?? member.balance ?? 0,
             source: 'disk',
           };
-        } else {
-          // Firebase fallback for inscription (member from Firebase path above)
-          try {
-            const insDoc = await db.collection('pending_members').doc(member.inscriptionId).get();
-            if (insDoc.exists) {
-              const ins = insDoc.data();
-              // Repair the local SQLite cache so next time it's instant
-              lc.setPending ? lc.setPending({ id: insDoc.id, ...ins }) : null;
-              
-              inscription = {
-                cin: ins.cin, adresse: ins.adresse, ville: ins.ville, email: ins.email,
-                commercial: ins.commercial, subscriptionName: ins.subscriptionName,
-                contractNumber: ins.contractNumber || member.contractNumber,
-                pdfUrl: ins.pdfUrl || member.pdfUrl,
-                gymId: ins.gymId || member.location,
-                periodFrom: ins.periodFrom, periodTo: ins.periodTo || member.expiresOn,
-                totals: ins.totals, payments: ins.payments,
-                balance: ins.totals?.balance ?? member.balance ?? 0,
-                source: 'firebase',
-              };
+        }
+        // Firebase fallback
+        try {
+          const insDoc = await db.collection('pending_members').doc(insId).get();
+          if (insDoc.exists) {
+            const ins = insDoc.data();
+            // Repair cache
+            lc.setPending ? lc.setPending({ id: insDoc.id, ...ins }) : null;
+            // Also backfill inscriptionId on member document (so future calls skip this path)
+            if (!member.inscriptionId) {
+              await db.collection('members').doc(memberId).update({ inscriptionId: insId });
             }
-          } catch (insErr) {
-            console.warn('[PROFILE] inscription Firebase fallback failed:', insErr.message);
+            return {
+              cin: ins.cin, adresse: ins.adresse, ville: ins.ville, email: ins.email,
+              commercial: ins.commercial, subscriptionName: ins.subscriptionName,
+              contractNumber: ins.contractNumber || member.contractNumber,
+              pdfUrl: ins.pdfUrl || member.pdfUrl,
+              gymId: ins.gymId || member.location,
+              periodFrom: ins.periodFrom, periodTo: ins.periodTo || member.expiresOn,
+              totals: ins.totals, payments: ins.payments,
+              balance: ins.totals?.balance ?? member.balance ?? 0,
+              source: 'firebase',
+            };
           }
+        } catch (insErr) {
+          console.warn('[PROFILE] inscription Firebase fallback failed:', insErr.message);
+        }
+        return null;
+      };
+
+      // Tier 1: direct inscriptionId
+      if (member.inscriptionId) {
+        inscription = await resolveInscription(member.inscriptionId);
+      }
+
+      // Tier 2: reverse lookup by memberId (for old members without inscriptionId stored)
+      if (!inscription) {
+        try {
+          const reverseSnap = await db.collection('pending_members')
+            .where('memberId', '==', memberId).limit(1).get();
+          if (!reverseSnap.empty) {
+            const insId = reverseSnap.docs[0].id;
+            console.log(`🔍 [PROFILE] Reverse inscription found for member ${memberId} → ${insId}`);
+            inscription = await resolveInscription(insId);
+          }
+        } catch (revErr) {
+          console.warn('[PROFILE] Reverse lookup failed:', revErr.message);
+        }
+      }
+
+      // Tier 3: fallback — build from member's own stored fields
+      // This ensures the panel always shows full data even for legacy/manually-created members
+      if (!inscription) {
+        const hasMemberData = member.subscriptionName || member.contractNumber || member.commercial || member.periodFrom;
+        if (hasMemberData) {
+          inscription = {
+            subscriptionName: member.subscriptionName || member.plan || null,
+            contractNumber:   member.contractNumber || null,
+            commercial:       member.commercial || null,
+            periodFrom:       member.periodFrom || null,
+            periodTo:         member.periodTo || member.expiresOn || null,
+            cin:              member.cin || null,
+            adresse:          member.adresse || null,
+            ville:            member.ville || null,
+            email:            member.email || null,
+            pdfUrl:           member.pdfUrl || null,
+            gymId:            member.location || null,
+            totals:           member.payments ? { paid: member.totalPaid || 0, balance: member.balance || 0 } : null,
+            payments:         member.payments || null,
+            balance:          member.balance || 0,
+            source:           'member_fields',
+          };
         }
       }
 
       const payload = { ...member, inscription };
       apiCache.profiles[memberId] = { data: payload, ts: Date.now() };
       res.json(payload);
+
     } catch (err) {
       console.error('Profile fetch error:', err);
       res.status(500).json({ error: 'Failed to fetch member profile' });
