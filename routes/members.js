@@ -134,16 +134,18 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       // 4️⃣ Normalize SQLite snake_case → camelCase
       finalMembers = finalMembers.map(m => ({
         ...m,
-        fullName:        m.fullName        || m.full_name        || 'Inconnu',
-        expiresOn:       m.expiresOn       || m.expires_on       || null,
-        qrToken:         m.qrToken         || m.qr_token         || '',
-        photo:           m.photo           || null,
-        pdfUrl:          m.pdfUrl          || m.pdf_url          || null,
-        createdAt:       m.createdAt       || m.created_at       || null,
-        totalPaid:       m.totalPaid       || m.total_paid       || 0,
-        lastPaymentDate: m.lastPaymentDate || m.last_payment_date || null,
-        isArchive:       m.isArchive       || !!m.is_archive      || false,
+        fullName:         m.fullName         || m.full_name         || 'Inconnu',
+        expiresOn:        m.expiresOn        || m.expires_on        || null,
+        qrToken:          m.qrToken          || m.qr_token          || '',
+        photo:            m.photo            || null,
+        pdfUrl:           m.pdfUrl           || m.pdf_url           || null,
+        createdAt:        m.createdAt        || m.created_at        || null,
+        totalPaid:        m.totalPaid        || m.total_paid        || 0,
+        lastPaymentDate:  m.lastPaymentDate  || m.last_payment_date || null,
+        isArchive:        m.isArchive        || !!m.is_archive      || false,
         isPendingWithPdf: m.isPendingWithPdf || false,
+        // ✅ Always expose subscriptionName (stored as plan when coming from inscription)
+        subscriptionName: m.subscriptionName || m.subscription_name || m.plan || '',
       }));
 
       // 5️⃣ Restrict fields for non-admin users
@@ -151,6 +153,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         finalMembers = finalMembers.map(m => ({
           id: m.id, fullName: m.fullName, phone: m.phone || '',
           birthday: m.birthday || '', expiresOn: m.expiresOn, plan: m.plan,
+          subscriptionName: m.subscriptionName || m.subscription_name || m.plan || '',
           qrToken: m.qrToken || '', image: m.photo || null,
           pdfUrl: m.pdfUrl || null, isRestricted: true,
           createdAt: m.createdAt || null, isPendingWithPdf: m.isPendingWithPdf || false,
