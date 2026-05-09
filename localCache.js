@@ -462,6 +462,28 @@ const insertMember = db.prepare(`
 `);
 
 function upsertMembers(gymId, membersArr) {
+  // 🏦 CANONICAL GYMS — must match exactly what is stored in Firestore
+  const CANONICAL_GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
+
+  // Resolve the true gym_id for a member, giving priority to the member's own
+  // location/gymId fields. Falls back to the caller's gymId only if unknown.
+  function resolveMemberGym(m) {
+    const directGymId = (m.gymId || '').toLowerCase().trim();
+    if (CANONICAL_GYMS.includes(directGymId)) return directGymId;
+
+    const loc = (m.location || '').toLowerCase().trim();
+    if (!loc && CANONICAL_GYMS.includes(gymId)) return gymId;
+
+    // Map known location strings to canonical IDs
+    if (['dokkarat fes','dokkarat','doukkarate','fes dokkarat','dokarat','dukkarate'].some(s => loc.includes(s))) return 'dokarat';
+    if (['fes saiss','marjane','fes marjane','saiss','fès saiss','fes-saiss'].some(s => loc.includes(s))) return 'marjane';
+    if (['casa 1','casa1','anfa','casa anfa','casaanfa'].some(s => loc.includes(s)) && !loc.includes('lady')) return 'casa1';
+    if (['casa 2','casa2','casa lady','lady anfa','casalady'].some(s => loc.includes(s))) return 'casa2';
+
+    // Last resort: trust the caller's gymId
+    return gymId || 'unknown';
+  }
+
   const upsert = db.transaction((rows) => {
     // Only clear if we are doing a full sync (not a small update)
     if (rows.length > 50) {
@@ -472,7 +494,7 @@ function upsertMembers(gymId, membersArr) {
   const now = new Date().toISOString();
   upsert(membersArr.map(m => ({
     id:                m.id,
-    gym_id:            gymId || m.location || m.gymId || 'unknown',
+    gym_id:            resolveMemberGym(m),
     full_name:         m.fullName || `${m.name || ''} ${m.surname || ''}`.trim(),
     phone:             m.phone || '',
     plan:              m.plan || '',
@@ -487,7 +509,7 @@ function upsertMembers(gymId, membersArr) {
     pdf_url:           m.pdfUrl || null,
     synced_at:         now,
     balance:           Number(m.balance) || 0,
-    created_at:        typeof m.createdAt === 'string' ? m.createdAt : 
+    created_at:        typeof m.createdAt === 'string' ? m.createdAt :
                        (m.createdAt && typeof m.createdAt.toDate === 'function') ? m.createdAt.toDate().toISOString() :
                        (m.createdAt?._seconds ? new Date(m.createdAt._seconds * 1000).toISOString() :
                        (m.createdAt?.toISOString ? m.createdAt.toISOString() : null)),

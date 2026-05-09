@@ -153,10 +153,19 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
         };
       });
 
-      // 3. Populate SQLite cache from Firebase results for future calls
+      // 3. Populate SQLite cache from Firebase results for future calls.
+      // CRITICAL: group by member's own gymId, NOT the query gymId, to avoid cross-gym leakage.
       if (result.length > 0) {
-        lc.upsertMembers(gymId, result.map(m => ({ ...m, location: m.gymId })));
-        console.log(`[Debtors] Firebase fallback: cached ${result.length} debtors to SQLite`);
+        const byGym = {};
+        result.forEach(m => {
+          const g = m.gymId || gymId;
+          if (!byGym[g]) byGym[g] = [];
+          byGym[g].push(m);
+        });
+        for (const [gid, members] of Object.entries(byGym)) {
+          lc.upsertMembers(gid, members.map(m => ({ ...m, location: gid })));
+        }
+        console.log(`[Debtors] Firebase fallback: cached ${result.length} debtors to SQLite (by gymId)`);
       }
 
       res.json(result);

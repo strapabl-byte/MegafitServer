@@ -142,10 +142,21 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         };
       });
 
-      // 3. 💾 Cache Firebase results back into SQLite for future fast reads
+      // 3. 💾 Cache Firebase results back into SQLite for future fast reads.
+      // IMPORTANT: Use each member's own gymId (m.gymId), NOT the query gymId.
+      // Using the query gymId would store casa1 members as dokarat, causing cross-gym leakage!
       if (result.length > 0) {
-        lc.upsertMembers(gymId, result.map(m => ({ ...m, location: gymId })));
-        console.log(`[Debtors/Public] 💾 Cached ${result.length} debtors from Firebase → SQLite`);
+        // Group members by their actual gym to cache them correctly
+        const byGym = {};
+        result.forEach(m => {
+          const g = m.gymId || gymId;
+          if (!byGym[g]) byGym[g] = [];
+          byGym[g].push(m);
+        });
+        for (const [gid, members] of Object.entries(byGym)) {
+          lc.upsertMembers(gid, members.map(m => ({ ...m, location: gid })));
+        }
+        console.log(`[Debtors/Public] 💾 Cached ${result.length} debtors from Firebase → SQLite (by their own gymId)`);
       }
 
       res.json(result);
