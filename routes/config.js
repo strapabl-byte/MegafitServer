@@ -63,6 +63,7 @@ module.exports = function configRouter({ db, admin }) {
       const doc  = snap.docs[0];
       const data = doc.data();
       const dLeft = daysLeft(data.expiresOn);
+      const GYM_NAMES = { dokarat: 'MegaFit Dokkarat', marjane: 'MegaFit Saiss', casa1: 'MegaFit Anfa', casa2: 'MegaFit Lady Anfa' };
       // Return only what the mini-app needs — no sensitive internals
       res.json({
         id:             doc.id,
@@ -74,6 +75,8 @@ module.exports = function configRouter({ db, admin }) {
         balance:        data.balance   || 0,
         balanceDeadline: data.balanceDeadline || null,
         daysLeft:       dLeft,
+        gymId:          data.location || data.gymId || null,
+        gymName:        GYM_NAMES[data.location || data.gymId] || 'MEGA FIT',
       });
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
   });
