@@ -86,6 +86,171 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
   // causing contract numbers to be skipped on every refresh/preview.
   // Contract numbers are ONLY assigned atomically inside POST /public/inscriptions.
 
+  // ── GET /public/debtors ───────────────────────────────────────────────────
+  // 🌐 No auth required — secured by strict gymId validation only.
+  // Architecture: SQLite (Render) → Firebase (hard fallback) → cache back to SQLite
+  router.get('/public/debtors', async (req, res) => {
+    try {
+      const gymId = (req.query.gymId || '').toLowerCase().trim();
+      const VALID_GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
+      if (!VALID_GYMS.includes(gymId)) {
+        return res.status(400).json({ error: 'Invalid gymId' });
+      }
+
+      // 1. ⚡ SQLite first — fast, zero Firebase cost
+      const cached = lc.getDebtors(gymId);
+      if (cached.length > 0) {
+        console.log(`[Debtors/Public] ⚡ SQLite hit: ${cached.length} debtors for ${gymId}`);
+        return res.json(cached.map(m => ({
+          id: m.id,
+          fullName: m.full_name,
+          phone: m.phone,
+          balance: m.balance,
+          gymId: m.gym_id,
+          plan: m.plan,
+          subscriptionName: m.subscription_name,
+          photo: m.photo,
+          balanceDeadline: m.balance_deadline || null,
+          contractNumber: m.contract_number || null,
+          createdAt: m.created_at || null,
+        })));
+      }
+
+      // 2. 🔥 Firebase hard fallback — only when SQLite is empty (e.g. fresh cold start)
+      console.log(`[Debtors/Public] 🔥 SQLite empty for ${gymId} → Firebase fallback`);
+      const snap = await db.collection('members')
+        .where('location', '==', gymId)
+        .where('balance', '>', 0)
+        .orderBy('balance', 'desc')
+        .limit(100)
+        .get();
+
+      const result = snap.docs.map(d => {
+        const m = d.data();
+        return {
+          id: d.id,
+          fullName: m.fullName || '',
+          phone: m.phone || '',
+          balance: Number(m.balance) || 0,
+          gymId: m.location || gymId,
+          plan: m.plan || '',
+          subscriptionName: m.subscriptionName || '',
+          photo: m.photo || null,
+          balanceDeadline: m.balanceDeadline || null,
+          contractNumber: m.contractNumber || null,
+          createdAt: m.createdAt?._seconds ? new Date(m.createdAt._seconds * 1000).toISOString() : null,
+        };
+      });
+
+      // 3. 💾 Cache Firebase results back into SQLite for future fast reads
+      if (result.length > 0) {
+        lc.upsertMembers(gymId, result.map(m => ({ ...m, location: gymId })));
+        console.log(`[Debtors/Public] 💾 Cached ${result.length} debtors from Firebase → SQLite`);
+      }
+
+      res.json(result);
+    } catch (err) {
+      console.error('[Debtors/Public] Error:', err);
+      res.status(500).json({ error: 'Failed to fetch debtors' });
+    }
+  });
+
+  // ── POST /public/settle-balance ───────────────────────────────────────────
+  // 🌐 Allows inscription form tablets to settle member balances.
+  // Write-through: Firebase first (source of truth), then SQLite sync.
+  router.post('/public/settle-balance', async (req, res) => {
+    try {
+      const { memberId, gymId: rawGymId, amount, method, paymentsSplit, note,
+              chequePhoto, chequePhotoBack, signatureClient, signatureCommercial, commercialName } = req.body;
+
+      const gymId = (rawGymId || '').toLowerCase().trim();
+      const VALID_GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
+      if (!VALID_GYMS.includes(gymId)) return res.status(400).json({ error: 'Invalid gymId' });
+      if (!memberId || !amount) return res.status(400).json({ error: 'Missing memberId or amount' });
+
+      const memberRef = db.collection('members').doc(memberId);
+      const memberSnap = await memberRef.get();
+      if (!memberSnap.exists) return res.status(404).json({ error: 'Member not found' });
+
+      const member = memberSnap.data();
+      const memberGymId = member.location || member.gymId || '';
+      if (memberGymId !== gymId) return res.status(403).json({ error: 'Gym mismatch — access denied' });
+
+      const oldBalance = Number(member.balance || 0);
+      const payAmount = Number(amount);
+      if (payAmount <= 0 || payAmount > oldBalance) return res.status(400).json({ error: 'Invalid payment amount' });
+      const newBalance = Math.max(0, oldBalance - payAmount);
+
+      // Upload images to Storage
+      let chequeUrl = null, chequeUrlBack = null, sigClientUrl = null, sigCommUrl = null;
+      if (chequePhoto) chequeUrl = await uploadBase64ToStorage(chequePhoto, `payments/${memberId}/${Date.now()}_cheque_recto.jpg`);
+      if (chequePhotoBack) chequeUrlBack = await uploadBase64ToStorage(chequePhotoBack, `payments/${memberId}/${Date.now()}_cheque_verso.jpg`);
+      if (signatureClient) sigClientUrl = await uploadBase64ToStorage(signatureClient, `payments/${memberId}/${Date.now()}_sig_client.png`);
+      if (signatureCommercial) sigCommUrl = await uploadBase64ToStorage(signatureCommercial, `payments/${memberId}/${Date.now()}_sig_comm.png`);
+
+      const today = new Date().toISOString().slice(0, 10);
+
+      // 1. 🔥 Firebase: Create payment record
+      const payRef = await db.collection('payments').add({
+        memberId, gymId,
+        amount: payAmount,
+        method: method || 'Espèces',
+        paymentsSplit: paymentsSplit || null,
+        date: new Date().toISOString(),
+        type: 'balance_settlement',
+        note: note || `Règlement reste à payer (Ancien: ${oldBalance} DH, Payé: ${payAmount} DH)`,
+        chequePhoto: chequeUrl, chequePhotoBack: chequeUrlBack,
+        signatureClient: sigClientUrl, signatureCommercial: sigCommUrl,
+        commercialName: (commercialName || 'COMMERCIAL').toUpperCase(),
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        source: 'inscription_form',
+      });
+
+      // 2. 🔥 Firebase: Update member balance (write-through)
+      const updatePayload = {
+        balance: newBalance,
+        lastPaymentDate: today,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+      if (newBalance === 0) updatePayload.balanceDeadline = admin.firestore.FieldValue.delete();
+      await memberRef.update(updatePayload);
+
+      // 3. 💾 SQLite: Immediately sync the updated member (keeps cache fresh)
+      const updatedSnap = await memberRef.get();
+      lc.upsertMembers(gymId, [{ id: memberId, ...updatedSnap.data() }]);
+
+      // 4. 📒 Daily Register entry
+      try {
+        const docId = `${gymId}_${today}`;
+        const addedDoc = await db.collection('megafit_daily_register').doc(docId).collection('entries').add({
+          nom: member.fullName || '', tel: member.phone || '', contrat: member.contractNumber || '',
+          commercial: (commercialName || 'COMMERCIAL').toUpperCase(), cin: member.cin || '',
+          prix: payAmount, espece: 0, tpe: 0, virement: 0, cheque: 0,
+          abonnement: member.subscriptionName || member.plan || '',
+          reste: newBalance,
+          note_reste: newBalance > 0 ? `Reste: ${newBalance} DH` : '',
+          source: 'reste_settlement',
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        await db.collection('megafit_daily_register').doc(docId).set(
+          { gymId, date: today, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
+          { merge: true }
+        );
+        const newSnap = await addedDoc.get();
+        lc.upsertRegister(gymId, today, [{ id: addedDoc.id, ...newSnap.data() }]);
+      } catch (regErr) {
+        console.warn('[Settle/Public] Register update failed (non-blocking):', regErr.message);
+      }
+
+      console.log(`✅ [Settle/Public] ${member.fullName} | Paid: ${payAmount} DH | New balance: ${newBalance} DH`);
+      res.json({ ok: true, paymentId: payRef.id, newBalance });
+
+    } catch (err) {
+      console.error('[Settle/Public] Error:', err);
+      res.status(500).json({ error: 'Failed to settle balance' });
+    }
+  });
+
   // ── POST /public/inscriptions ─────────────────────────────────────────────
   router.post('/public/inscriptions', async (req, res) => {
     try {

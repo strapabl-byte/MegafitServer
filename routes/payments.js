@@ -4,7 +4,7 @@
 const { Router } = require('express');
 const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 
-module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCache }) {
+module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCache, uploadBase64ToStorage }) {
   const router = Router();
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -68,6 +68,202 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
       console.error('⚠️  AutoRegisterCA (non-blocking):', err.message);
     }
   }
+
+  // ── GET /api/payments/debtors ───────────────────────────────────────────
+  // 🔐 Dashboard route: requires Azure token, filters by assigned gym
+  router.get('/debtors', verifyAzureToken, async (req, res) => {
+    try {
+      const isFullAdmin = req.assignedGyms?.includes('all');
+      let gymIds = isFullAdmin ? (req.query.gymId || 'all') : req.assignedGyms;
+      
+      const debtors = lc.getDebtors(gymIds);
+      res.json(debtors.map(m => ({
+        id: m.id,
+        fullName: m.full_name,
+        phone: m.phone,
+        balance: m.balance,
+        gymId: m.gym_id,
+        plan: m.plan,
+        subscriptionName: m.subscription_name,
+        photo: m.photo,
+        balanceDeadline: m.balance_deadline || null,
+        contractNumber: m.contract_number || null,
+        createdAt: m.created_at || null,
+      })));
+    } catch (err) {
+      console.error('Debtors Fetch Error:', err);
+      res.status(500).json({ error: 'Failed to fetch debtors' });
+    }
+  });
+
+  // ── GET /public/payments/debtors ──────────────────────────────────────────
+  // 🌐 Public route: for inscription form tablets (no Azure auth).
+  // Secured by gymId — only returns debtors for the requested gym.
+  router.get('/public/debtors', async (req, res) => {
+    try {
+      const gymId = (req.query.gymId || '').toLowerCase().trim();
+      const VALID_GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
+      if (!VALID_GYMS.includes(gymId)) {
+        return res.status(400).json({ error: 'Invalid gymId' });
+      }
+
+      // 1. Try SQLite first (fast, no Firebase burn)
+      const debtors = lc.getDebtors(gymId);
+
+      if (debtors.length > 0) {
+        console.log(`[Debtors] SQLite hit: ${debtors.length} debtors for ${gymId}`);
+        return res.json(debtors.map(m => ({
+          id: m.id,
+          fullName: m.full_name,
+          phone: m.phone,
+          balance: m.balance,
+          gymId: m.gym_id,
+          plan: m.plan,
+          subscriptionName: m.subscription_name,
+          photo: m.photo,
+          balanceDeadline: m.balance_deadline || null,
+          contractNumber: m.contract_number || null,
+          createdAt: m.created_at || null,
+        })));
+      }
+
+      // 2. Firebase hard fallback — only hit if SQLite cache is empty
+      console.log(`[Debtors] SQLite empty for ${gymId} — falling back to Firebase`);
+      const snap = await db.collection('members')
+        .where('location', '==', gymId)
+        .where('balance', '>', 0)
+        .orderBy('balance', 'desc')
+        .limit(50)
+        .get();
+      
+      const result = snap.docs.map(d => {
+        const m = d.data();
+        return {
+          id: d.id,
+          fullName: m.fullName || '',
+          phone: m.phone || '',
+          balance: Number(m.balance) || 0,
+          gymId: m.location || gymId,
+          plan: m.plan || '',
+          subscriptionName: m.subscriptionName || '',
+          photo: m.photo || null,
+          balanceDeadline: m.balanceDeadline || null,
+          contractNumber: m.contractNumber || null,
+          createdAt: m.createdAt?._seconds ? new Date(m.createdAt._seconds * 1000).toISOString() : null,
+        };
+      });
+
+      // 3. Populate SQLite cache from Firebase results for future calls
+      if (result.length > 0) {
+        lc.upsertMembers(gymId, result.map(m => ({ ...m, location: m.gymId })));
+        console.log(`[Debtors] Firebase fallback: cached ${result.length} debtors to SQLite`);
+      }
+
+      res.json(result);
+    } catch (err) {
+      console.error('Public Debtors Fetch Error:', err);
+      res.status(500).json({ error: 'Failed to fetch debtors' });
+    }
+  });
+
+  // ── POST /api/payments/settle-member-balance ──────────────────────────────
+  router.post('/settle-member-balance', verifyAzureToken, async (req, res) => {
+    try {
+      const { memberId, amount, method, paymentsSplit, note, chequePhoto, chequePhotoBack, signatureClient, signatureCommercial, commercialName } = req.body;
+      if (!memberId || !amount) return res.status(400).json({ error: 'Missing memberId or amount' });
+
+      const memberRef = db.collection('members').doc(memberId);
+      const memberSnap = await memberRef.get();
+      if (!memberSnap.exists) return res.status(404).json({ error: 'Member not found' });
+      
+      const member = memberSnap.data();
+      const gymId = member.location || member.gymId || 'dokarat';
+
+      // 🔒 SECURITY: Restrict to assigned gyms
+      if (!req.hasAccessToGym(gymId)) {
+        return res.status(403).json({ error: 'Access Denied: You do not have access to this gym' });
+      }
+
+      const oldBalance = Number(member.balance || 0);
+      const payAmount = Number(amount);
+      const newBalance = Math.max(0, oldBalance - payAmount);
+
+      // Upload images
+      let chequeUrl = null, chequeUrlBack = null, sigClientUrl = null, sigCommUrl = null;
+      if (chequePhoto) {
+        chequeUrl = await uploadBase64ToStorage(chequePhoto, `payments/${memberId}/${Date.now()}_cheque_recto.jpg`);
+      }
+      if (chequePhotoBack) {
+        chequeUrlBack = await uploadBase64ToStorage(chequePhotoBack, `payments/${memberId}/${Date.now()}_cheque_verso.jpg`);
+      }
+      if (signatureClient) {
+        sigClientUrl = await uploadBase64ToStorage(signatureClient, `payments/${memberId}/${Date.now()}_sig_client.png`);
+      }
+      if (signatureCommercial) {
+        sigCommUrl = await uploadBase64ToStorage(signatureCommercial, `payments/${memberId}/${Date.now()}_sig_comm.png`);
+      }
+
+      const today = new Date().toISOString().slice(0, 10);
+      
+      // 1. Create Payment Record
+      const payRef = await db.collection('payments').add({
+        memberId,
+        gymId,
+        amount: payAmount,
+        method: method || 'Espèces',
+        paymentsSplit: paymentsSplit || null,
+        date: new Date().toISOString(),
+        type: 'balance_settlement',
+        note: note || `Règlement reste à payer (Ancien: ${oldBalance} DH, Payé: ${payAmount} DH)`,
+        chequePhoto: chequeUrl,
+        chequePhotoBack: chequeUrlBack,
+        signatureClient: sigClientUrl,
+        signatureCommercial: sigCommUrl,
+        commercialName: (commercialName || req.user?.name || 'Admin').toUpperCase(),
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        recordedBy: req.user?.preferred_username || 'Admin'
+      });
+
+      // 2. Update Member Balance in Firebase
+      const updatePayload = {
+        balance: newBalance,
+        lastPaymentDate: new Date().toISOString(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      };
+      // 🧹 Clear the deadline once fully paid
+      if (newBalance === 0) updatePayload.balanceDeadline = admin.firestore.FieldValue.delete();
+      
+      await memberRef.update(updatePayload);
+
+      // 3. Update Daily Register
+      await autoRegisterCA({
+        gymId,
+        date: today,
+        nom: member.fullName || '',
+        tel: member.phone || '',
+        cin: member.cin || '',
+        plan: member.plan || 'Monthly',
+        subscriptionName: member.subscriptionName || '',
+        amount: payAmount,
+        method: method || 'Espèces',
+        payments: paymentsSplit,
+        commercial: commercialName || req.user?.name || 'Admin',
+        contrat: member.contractNumber || '',
+        reste: newBalance,
+        note: `Règlement Reste [${member.fullName}]`
+      });
+
+      // 4. Update local cache
+      const updatedMemberSnap = await memberRef.get();
+      lc.upsertMembers(gymId, [{ id: memberId, ...updatedMemberSnap.data() }]);
+      // autoRegisterCA already handles SQLite register update
+
+      res.json({ ok: true, paymentId: payRef.id, newBalance });
+    } catch (err) {
+      console.error('Settle Member Balance Error:', err);
+      res.status(500).json({ error: 'Failed to settle balance' });
+    }
+  });
 
   // ── GET /api/payments/:memberId ───────────────────────────────────────────
   router.get('/:memberId', verifyAzureToken, async (req, res) => {

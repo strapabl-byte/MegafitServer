@@ -70,6 +70,7 @@ db.exec(`
     is_archive  INTEGER DEFAULT 0,
     bonus_3months INTEGER DEFAULT 0,
     inscription_id TEXT,
+    balance_deadline TEXT,
     PRIMARY KEY (id, gym_id)
   );
   CREATE INDEX IF NOT EXISTS idx_members_gym ON members_cache(gym_id);
@@ -329,6 +330,9 @@ try { db.exec('CREATE INDEX IF NOT EXISTS idx_members_zkteco_id ON members_cache
 // Safe migration: add bonus_3months to members_cache
 try { db.exec('ALTER TABLE members_cache ADD COLUMN bonus_3months INTEGER DEFAULT 0'); } catch(_) {}
 
+// Safe migration: add balance_deadline to members_cache
+try { db.exec('ALTER TABLE members_cache ADD COLUMN balance_deadline TEXT'); } catch(_) {}
+
 const insertEntry = db.prepare(`
   INSERT OR REPLACE INTO entries (id, gym_id, date, timestamp, name, method, status, is_face, user_id)
   VALUES (@id, @gym_id, @date, @timestamp, @name, @method, @status, @is_face, @user_id)
@@ -452,9 +456,9 @@ function getDailyStat(gymId, date) {
 
 const insertMember = db.prepare(`
   INSERT OR REPLACE INTO members_cache
-    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date, email, adresse, ville, is_archive, bonus_3months, inscription_id, contract_number)
+    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date, email, adresse, ville, is_archive, bonus_3months, inscription_id, contract_number, balance_deadline)
   VALUES
-    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date, @email, @adresse, @ville, @is_archive, @bonus_3months, @inscription_id, @contract_number)
+    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date, @email, @adresse, @ville, @is_archive, @bonus_3months, @inscription_id, @contract_number, @balance_deadline)
 `);
 
 function upsertMembers(gymId, membersArr) {
@@ -496,12 +500,27 @@ function upsertMembers(gymId, membersArr) {
     bonus_3months:     m.bonus3Months ? 1 : 0,
     inscription_id:    m.inscriptionId || m.inscription_id || null,
     contract_number:   m.contractNumber || m.contract_number || null,
+    balance_deadline:  m.balanceDeadline || m.balance_deadline || null,
   })));
 }
 
 function getMembers(gymId) {
   const g = buildInClause(getGymIds(gymId));
   const sql = `SELECT * FROM members_cache WHERE ${g.sql} ORDER BY created_at DESC, full_name ASC`;
+  return db.prepare(sql).all(...g.params);
+}
+
+function getDebtors(gymId) {
+  const g = buildInClause(getGymIds(gymId));
+  // Order: overdue first (deadline in past), then by deadline ASC, then by balance DESC
+  const sql = `
+    SELECT * FROM members_cache 
+    WHERE ${g.sql} AND balance > 0 AND is_archive = 0 
+    ORDER BY 
+      CASE WHEN balance_deadline IS NOT NULL AND balance_deadline < date('now') THEN 0 ELSE 1 END ASC,
+      balance_deadline ASC NULLS LAST,
+      balance DESC
+  `;
   return db.prepare(sql).all(...g.params);
 }
 
@@ -877,7 +896,7 @@ module.exports = {
   // daily stats
   upsertDailyStat, getDailyStats, getDailyStatsRange, getDailyStat,
   // members
-  upsertMembers, getMembers, getMemberById, pruneStaleMember,
+  upsertMembers, getMembers, getMemberById, pruneStaleMember, getDebtors,
   // register
   upsertRegister, getRegister, deleteRegisterEntry,
   // decaissements
