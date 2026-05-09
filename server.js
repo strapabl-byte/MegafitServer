@@ -401,29 +401,36 @@ app.post('/admin/fix-gym-isolation', (req, res) => {
   try {
     const CANONICAL_GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
 
-    function resolveGym(gymId, location) {
-      const d = (gymId || '').toLowerCase().trim();
-      if (CANONICAL_GYMS.includes(d)) return d;
-      const loc = (location || '').toLowerCase().trim();
-      if (['dokkarat','doukkarate','fes dokkarat','dokarat'].some(s => loc.includes(s))) return 'dokarat';
-      if (['fes saiss','marjane','saiss'].some(s => loc.includes(s))) return 'marjane';
-      if (['casa 1','casa1','anfa','casa anfa'].some(s => loc.includes(s)) && !loc.includes('lady')) return 'casa1';
-      if (['casa 2','casa2','casa lady','lady anfa'].some(s => loc.includes(s))) return 'casa2';
-      return null; // unknown
+    // Resolves canonical gym from available hints.
+    // IMPORTANT: gym_id may be corrupt! Check subscription_name FIRST as ground truth.
+    function resolveGym(m) {
+      // Check subscription_name first — it reflects what was filled in at registration time
+      const sub = (m.subscription_name || '').toLowerCase();
+      if (sub.includes('casa anfa') || sub.includes('casa-anfa') || (sub.includes('anfa') && !sub.includes('lady'))) return 'casa1';
+      if (sub.includes('casa lady') || sub.includes('lady')) return 'casa2';
+      if (sub.includes('marjane') || sub.includes('saiss')) return 'marjane';
+      if (sub.includes('dokkarat') || sub.includes('doukkarate') || sub.includes('dokarat')) return 'dokarat';
+
+      // subscription_name gives no hint — trust the stored gym_id if it's canonical
+      const gid = (m.gym_id || '').toLowerCase().trim();
+      if (CANONICAL_GYMS.includes(gid)) return gid;
+
+      return null; // cannot determine
     }
 
-    // Read all members from SQLite
-    const allMembers = lc.db.prepare('SELECT * FROM members_cache').all();
+    // Read all members that have a balance > 0 (those are the ones that could leak)
+    const allMembers = lc.db.prepare('SELECT id, gym_id, subscription_name, full_name, balance FROM members_cache WHERE balance > 0').all();
     let fixed = 0, unchanged = 0, unknowns = 0;
+    const fixedList = [];
 
-    const update = lc.db.prepare('UPDATE members_cache SET gym_id=? WHERE id=? AND gym_id!=?');
+    const update = lc.db.prepare('UPDATE members_cache SET gym_id=? WHERE id=? AND gym_id=?');
     const fixMany = lc.db.transaction((rows) => {
       for (const m of rows) {
-        // The gym_id currently stored might be wrong — re-derive from the location field
-        const correct = resolveGym(m.gym_id, m.location || '');
+        const correct = resolveGym(m);
         if (!correct) { unknowns++; continue; }
         if (correct !== m.gym_id) {
-          update.run(correct, m.id, correct); // only update if different
+          update.run(correct, m.id, m.gym_id);
+          fixedList.push({ name: m.full_name, from: m.gym_id, to: correct, balance: m.balance });
           fixed++;
         } else {
           unchanged++;
@@ -433,14 +440,15 @@ app.post('/admin/fix-gym-isolation', (req, res) => {
 
     fixMany(allMembers);
 
-    const msg = `Gym isolation fix: ${fixed} corrected, ${unchanged} already correct, ${unknowns} unknown gym (left as-is)`;
-    console.log(`✅ [fix-gym-isolation] ${msg}`);
-    res.json({ ok: true, fixed, unchanged, unknowns, total: allMembers.length });
+    console.log(`✅ [fix-gym-isolation] Fixed ${fixed} members, ${unchanged} ok, ${unknowns} unknown`);
+    if (fixedList.length > 0) console.log('Fixed members:', JSON.stringify(fixedList));
+    res.json({ ok: true, fixed, unchanged, unknowns, total: allMembers.length, fixedList });
   } catch (err) {
     console.error('[fix-gym-isolation] Error:', err);
     res.status(500).json({ error: err.message });
   }
 });
+
 
 
 // ─────────────────────────────────────────────────────────────────────────────
