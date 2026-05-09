@@ -55,6 +55,29 @@ module.exports = function configRouter({ db, admin }) {
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
   });
 
+  // ── GET /public/member-by-token/:token (READ-ONLY — does NOT burn the token) ──
+  router.get('/public/member-by-token/:token', async (req, res) => {
+    try {
+      const snap = await db.collection('members').where('qrToken', '==', req.params.token).limit(1).get();
+      if (snap.empty) return res.status(404).json({ error: 'QR code invalide ou expiré.' });
+      const doc  = snap.docs[0];
+      const data = doc.data();
+      const dLeft = daysLeft(data.expiresOn);
+      // Return only what the mini-app needs — no sensitive internals
+      res.json({
+        id:             doc.id,
+        fullName:       data.fullName || '',
+        photo:          data.photo    || null,
+        plan:           data.plan     || data.subscriptionName || '',
+        expiresOn:      data.expiresOn || null,
+        contractNumber: data.contractNumber || null,
+        balance:        data.balance   || 0,
+        balanceDeadline: data.balanceDeadline || null,
+        daysLeft:       dLeft,
+      });
+    } catch (err) { res.status(500).json({ error: 'Server error' }); }
+  });
+
   // ── GET /public/member-status/:memberId ───────────────────────────────────
   router.get('/public/member-status/:memberId', async (req, res) => {
     try {
