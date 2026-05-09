@@ -449,6 +449,29 @@ app.post('/admin/fix-gym-isolation', (req, res) => {
   }
 });
 
+// ── ADMIN: Clear pending_cache for a gym ───────────────────────────────────
+// POST /admin/clear-pending-cache  body: { gymId }
+// Useful when inscriptions are manually deleted from Firestore and we want
+// to force the SQLite cache to clear immediately.
+app.post('/admin/clear-pending-cache', (req, res) => {
+  const secret   = req.headers['x-inject-secret'];
+  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
+  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+
+  const { gymId } = req.body;
+  if (!gymId) return res.status(400).json({ error: 'gymId required' });
+
+  try {
+    const result = lc.db.prepare('DELETE FROM pending_cache WHERE gym_id = ?').run(gymId);
+    console.log(`🗑️ [clear-pending-cache] Deleted ${result.changes} pending inscriptions for ${gymId}`);
+    res.json({ ok: true, deleted: result.changes });
+  } catch (err) {
+    console.error('[clear-pending-cache] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 
 
 // ─────────────────────────────────────────────────────────────────────────────
