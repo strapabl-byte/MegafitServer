@@ -388,6 +388,62 @@ app.post('/admin/inject-stats', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ADMIN: Fix gym_id contamination in members_cache
+// POST /admin/fix-gym-isolation
+// Re-reads every member from SQLite and re-classifies gym_id using canonical resolver.
+// Run once after deploying the upsertMembers bug fix.
+// ─────────────────────────────────────────────────────────────────────────────
+app.post('/admin/fix-gym-isolation', (req, res) => {
+  const secret   = req.headers['x-inject-secret'];
+  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
+  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+
+  try {
+    const CANONICAL_GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
+
+    function resolveGym(gymId, location) {
+      const d = (gymId || '').toLowerCase().trim();
+      if (CANONICAL_GYMS.includes(d)) return d;
+      const loc = (location || '').toLowerCase().trim();
+      if (['dokkarat','doukkarate','fes dokkarat','dokarat'].some(s => loc.includes(s))) return 'dokarat';
+      if (['fes saiss','marjane','saiss'].some(s => loc.includes(s))) return 'marjane';
+      if (['casa 1','casa1','anfa','casa anfa'].some(s => loc.includes(s)) && !loc.includes('lady')) return 'casa1';
+      if (['casa 2','casa2','casa lady','lady anfa'].some(s => loc.includes(s))) return 'casa2';
+      return null; // unknown
+    }
+
+    // Read all members from SQLite
+    const allMembers = lc.db.prepare('SELECT * FROM members_cache').all();
+    let fixed = 0, unchanged = 0, unknowns = 0;
+
+    const update = lc.db.prepare('UPDATE members_cache SET gym_id=? WHERE id=? AND gym_id!=?');
+    const fixMany = lc.db.transaction((rows) => {
+      for (const m of rows) {
+        // The gym_id currently stored might be wrong — re-derive from the location field
+        const correct = resolveGym(m.gym_id, m.location || '');
+        if (!correct) { unknowns++; continue; }
+        if (correct !== m.gym_id) {
+          update.run(correct, m.id, correct); // only update if different
+          fixed++;
+        } else {
+          unchanged++;
+        }
+      }
+    });
+
+    fixMany(allMembers);
+
+    const msg = `Gym isolation fix: ${fixed} corrected, ${unchanged} already correct, ${unknowns} unknown gym (left as-is)`;
+    console.log(`✅ [fix-gym-isolation] ${msg}`);
+    res.json({ ok: true, fixed, unchanged, unknowns, total: allMembers.length });
+  } catch (err) {
+    console.error('[fix-gym-isolation] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Mount Routers
 // ─────────────────────────────────────────────────────────────────────────────
 app.use('/api/members',     require('./routes/members')(deps));
