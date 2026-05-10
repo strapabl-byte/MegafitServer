@@ -10,7 +10,7 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
   // ── GET /api/register ─────────────────────────────────────────────────────
   router.get('/', verifyAzureToken, async (req, res) => {
     try {
-      let { date, gymId = 'dokarat' } = req.query;
+      let { date, gymId = 'dokarat', forceRefresh } = req.query;
       
       // 🔒 SECURITY: Restrict non-admins to their assigned gym
       if (!req.isAdmin) {
@@ -20,6 +20,7 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
           } else {
               gymId = 'none';
           }
+          forceRefresh = false; // non-admins cannot bust cache
       }
       if (!date) return res.status(400).json({ error: 'date required (YYYY-MM-DD)' });
 
@@ -39,7 +40,12 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
         return hasData && noName;
       });
 
-      if (cached && cached.length > 0 && !isCorrupt) {
+      // 🔄 Admin forceRefresh: bypass SQLite so Firestore-seeded entries are visible immediately
+      const shouldRefresh = forceRefresh === 'true' || forceRefresh === '1';
+      if (shouldRefresh) console.log(`🔄 [FORCE-REFRESH] Admin-requested cache bust for ${gymId}/${date}`);
+
+      if (cached && cached.length > 0 && !isCorrupt && !shouldRefresh) {
+
         console.log(`⚡ [SQLITE HIT] ${cached.length} register entries for ${date}`);
         entries = cached.map(e => ({ ...e, createdAt: e.created_at }));
         decaissements = cachedDec.map(d => ({ ...d, createdAt: d.created_at }));
