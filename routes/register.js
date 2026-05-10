@@ -193,6 +193,14 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
         const startDate = new Date(`${yearStr}-01-01`);
         const endDate   = new Date(`${yearStr}-12-31`);
 
+        // ── Collect dates missing from SQLite (for recent Firestore fallback) ──
+        const today = new Date();
+        today.setHours(23, 59, 59, 999);
+        const cutoff = new Date(today);
+        cutoff.setDate(cutoff.getDate() - 60); // look back 60 days
+
+        const missingByGym = {}; // { gid: [dateStr, ...] }
+
         for (const gid of gymIds) {
           const cursor = new Date(startDate);
           while (cursor <= endDate) {
@@ -218,11 +226,51 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
 
               if (ca > 0) calendarData[dateStr] = (calendarData[dateStr] || 0) + ca;
               if (reste > 0) resteData[dateStr] = (resteData[dateStr] || 0) + reste;
+            } else {
+              // ⚡ Mark as missing — will batch-fetch from Firestore if recent
+              const dateObj = new Date(dateStr);
+              if (dateObj >= cutoff && dateObj <= today && !isQuotaExceeded()) {
+                if (!missingByGym[gid]) missingByGym[gid] = [];
+                missingByGym[gid].push(dateStr);
+              }
             }
-            // Note: Days with no SQLite data = gym was closed or data not yet synced.
-            // We don't fall back to Firestore per-day to avoid quota burn.
-            // The nightly register sync will populate SQLite for any missing days.
           }
+        }
+
+        // ── 🔥 Firestore fallback: fetch missing recent dates in parallel ─────
+        // Only runs for dates in the last 60 days that had no SQLite entry.
+        // Caches results back into SQLite so subsequent requests are free.
+        const missingGymEntries = Object.entries(missingByGym);
+        if (missingGymEntries.length > 0 && !isQuotaExceeded()) {
+          console.log(`📅 [CALENDAR FALLBACK] Checking Firestore for ${missingGymEntries.reduce((s,[,d])=>s+d.length,0)} missing recent date(s) across ${missingGymEntries.length} gym(s)...`);
+          await Promise.all(missingGymEntries.map(async ([gid, dates]) => {
+            for (const dateStr of dates) {
+              try {
+                const snap = await db.collection('megafit_daily_register')
+                  .doc(`${gid}_${dateStr}`)
+                  .collection('entries')
+                  .get();
+                if (!snap.empty) {
+                  const fetched = snap.docs.map(d => ({ id: d.id, gymId: gid, ...d.data() }));
+                  lc.upsertRegister(gid, dateStr, fetched); // ✅ cache for future
+
+                  let ca = 0, reste = 0;
+                  fetched.forEach(e => {
+                    const paid = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
+                    ca += paid;
+                    const sr = Number(e.reste) || 0;
+                    if (sr > 0) reste += sr;
+                    else { const prix = Number(e.prix)||0; if (prix > 0 && prix > paid) reste += prix - paid; }
+                  });
+                  if (ca > 0) calendarData[dateStr] = (calendarData[dateStr] || 0) + ca;
+                  if (reste > 0) resteData[dateStr] = (resteData[dateStr] || 0) + reste;
+                  console.log(`  ✅ [CALENDAR FALLBACK] ${gid}/${dateStr} → ${fetched.length} entries, CA=${ca} DH`);
+                }
+              } catch (fsErr) {
+                console.warn(`  ⚠️ [CALENDAR FALLBACK] ${gid}/${dateStr} → ${fsErr.message}`);
+              }
+            }
+          }));
         }
 
         return { calendarData, resteData };
