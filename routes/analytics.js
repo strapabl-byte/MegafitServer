@@ -771,7 +771,7 @@ Reply ONLY with valid JSON (no markdown):
       const today = getMoroccanDateStr();
       const cacheKey = `live_count_${gymId}`;
       const result = await getCachedOrFetch(apiCache.general, cacheKey, 30000, async () => {
-        const gymIds = gymId === 'all' ? ['marjane', 'dokarat'] : [gymId];
+        const gymIds = gymId === 'all' ? ['marjane', 'dokarat', 'casa1', 'casa2'] : [gymId];
         let totalCount = 0, totalRaw = 0;
         for (const gid of gymIds) {
           const cached = lc.getDailyStat(gid, today);
@@ -806,7 +806,7 @@ Reply ONLY with valid JSON (no markdown):
           }
       }
       const includeToday = req.query.includeToday === 'true';
-      const gymIds = gymId === 'all' ? ['marjane', 'dokarat'] : gymId.split(',');
+      const gymIds = gymId === 'all' ? ['marjane', 'dokarat', 'casa1', 'casa2'] : gymId.split(',');
       const today = getMoroccanDateStr();
 
       // Build date range
@@ -946,7 +946,7 @@ Reply ONLY with valid JSON (no markdown):
         return count;
       };
 
-      const gymIds = gymId === 'all' ? ['dokarat', 'marjane'] : gymId.split(',');
+      const gymIds = gymId === 'all' ? ['dokarat', 'marjane', 'casa1', 'casa2'] : gymId.split(',');
       const toLocalDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 
       // ?????? Revenue from SQLite register cache ??? sum ALL payment columns ??????
