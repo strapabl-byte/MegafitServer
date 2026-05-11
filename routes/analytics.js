@@ -815,7 +815,7 @@ Reply ONLY with valid JSON (no markdown):
       const groupBy = req.query.groupBy || 'day';
 
       let dateStrs = [];
-      let days = 30;
+      let days = parseInt(req.query.days) || 30;
 
       if (customStart && customEnd) {
          let current = new Date(customStart);
