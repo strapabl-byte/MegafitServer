@@ -1762,31 +1762,79 @@ ${fullContext}`
   // ── Auralix Comparison — Multi-gym performance benchmark ──
   router.get('/api/analytics/auralix-comparison', verifyAzureToken, async (req, res) => {
     try {
-      // Return a structured comparison of the 4 gyms
       const gyms = ['dokarat', 'marjane', 'casa1', 'casa2'];
+      const today = new Date().toISOString().slice(0, 10);
+
+      // ── Current month bounds ──────────────────────────────────────────────────
+      const now      = new Date();
+      const monthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+      const monthStart = `${monthStr}-01`;
+
+      // ── Build GYM_ID → SQL filter map (matches the KPI route logic) ──────────
+      const gymSqlFilter = {
+        dokarat: `gym_id = 'dokarat'`,
+        marjane: `gym_id = 'marjane'`,
+        casa1:   `gym_id = 'casa1'`,
+        casa2:   `gym_id = 'casa2'`,
+      };
+
+      // ── Per-gym: monthly revenue + registrations from register_cache ──────────
       const performance = gyms.map(gid => {
-        const today = new Date().toISOString().slice(0, 10);
-        const stat = lc.getDailyStat(gid, today) || { count: 0 };
+        const filter = gymSqlFilter[gid];
+        const dayStat = lc.getDailyStat(gid, today) || { count: 0 };
+
+        let revenue = 0;
+        let registrations = 0;
+        try {
+          const rev = lc.db.prepare(
+            `SELECT COALESCE(SUM(CAST(tpe AS NUMERIC) + CAST(espece AS NUMERIC) + CAST(virement AS NUMERIC) + CAST(cheque AS NUMERIC)), 0) AS total
+             FROM register_cache WHERE ${filter} AND date >= ? AND date <= ?`
+          ).get(monthStart, today);
+          revenue = Math.round(rev?.total || 0);
+
+          const regs = lc.db.prepare(
+            `SELECT COUNT(*) AS cnt FROM register_cache WHERE ${filter} AND date >= ? AND date <= ?`
+          ).get(monthStart, today);
+          registrations = regs?.cnt || 0;
+        } catch (e) {
+          console.warn(`[COMPARISON] ${gid} query error:`, e.message);
+        }
+
         return {
           gym: gid,
-          traffic: stat.count || 0,
-          revenue: Math.floor(Math.random() * 5000), // Simulated for now
-          registrations: Math.floor(Math.random() * 10)
+          traffic: dayStat.count || 0,
+          revenue,
+          registrations
         };
       });
+
+      // ── Per-gym: last 30-day daily traffic trend from daily_stats ─────────────
+      const trafficByGym = {};
+      const labels = [];
+
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(now);
+        d.setDate(d.getDate() - i);
+        const ds = d.toISOString().slice(0, 10);
+        if (i === 0) labels.push("Aujourd'hui");
+        else labels.push(`J-${i}`);
+
+        gyms.forEach(gid => {
+          if (!trafficByGym[gid]) trafficByGym[gid] = [];
+          const s = lc.getDailyStat(gid, ds) || { count: 0 };
+          trafficByGym[gid].push(s.count || 0);
+        });
+      }
 
       res.json({
         ok: true,
         performance,
-        traffic: {
-          dokarat: [10, 15, 20, 25, 30, 25, 20], // Simulated 7-day trend
-          marjane: [5, 10, 15, 10, 5, 8, 12],
-          casa1: [2, 5, 8, 10, 12, 15, 18],
-          casa2: [1, 3, 5, 4, 3, 5, 7]
-        },
-        labels: ['J-6', 'J-5', 'J-4', 'J-3', 'J-2', 'J-1', 'Aujourd\'hui']
+        traffic: trafficByGym,
+        labels,
+        month: monthStr
       });
     } catch (err) {
+      console.error('[COMPARISON] error:', err);
       res.status(500).json({ error: err.message });
     }
   });
