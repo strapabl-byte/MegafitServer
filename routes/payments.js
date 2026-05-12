@@ -20,6 +20,28 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
       const today = date || new Date().toISOString().slice(0, 10);
       const docId = `${gymId}_${today}`;
       const totalAmt = Number(amount) || 0;
+
+      // 🛡️ DEDUPLICATION CHECK: Prevent identical entries in the daily register
+      const entriesRef = db.collection('megafit_daily_register').doc(docId).collection('entries');
+      if (contrat) {
+        const dupContract = await entriesRef.where('contrat', '==', contrat).limit(1).get();
+        if (!dupContract.empty) {
+          console.warn(`[DEDUP] autoRegisterCA: Duplicate contract ${contrat} found for ${gymId}/${today}. Skipping.`);
+          return;
+        }
+      } else if (nom && totalAmt > 0) {
+        const fiveMinsAgo = new Date(Date.now() - 5 * 60 * 1000);
+        const dupName = await entriesRef
+          .where('nom', '==', nom)
+          .where('prix', '==', totalAmt)
+          .where('createdAt', '>=', fiveMinsAgo)
+          .limit(1).get();
+        if (!dupName.empty) {
+          console.warn(`[DEDUP] autoRegisterCA: Identical entry for ${nom} (${totalAmt} DH) found in last 5m. Skipping.`);
+          return;
+        }
+      }
+
       let tpe = 0, espece = 0, virement = 0, cheque = 0;
 
       if (split && typeof split === 'object') {
@@ -603,14 +625,26 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
       const insDoc = await inscriptionRef.get();
       const insData = insDoc.exists ? insDoc.data() : { telephone: phone };
 
-      await db.collection('payments').add({
-        inscriptionId, gymId: insData.gymId || 'dokarat',
-        amount: Number(amount), plan: plan || 'Monthly',
-        date: new Date().toISOString(), method: method || 'Espèces',
-        type: 'registration', note: note || '',
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        recordedBy: req.user?.preferred_username || 'Admin',
-      });
+      // 🛡️ ANTI-DUP: Check if payment already recorded for this inscription
+      const existingPay = await db.collection('payments').where('inscriptionId', '==', inscriptionId).limit(1).get();
+      if (existingPay.empty) {
+        await db.collection('payments').add({
+          inscriptionId, gymId: insData.gymId || 'dokarat',
+          amount: Number(amount), plan: plan || 'Monthly',
+          date: new Date().toISOString(), method: method || 'Espèces',
+          type: 'registration', note: note || '',
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          recordedBy: req.user?.preferred_username || 'Admin',
+        });
+      } else {
+        await existingPay.docs[0].ref.update({
+          amount: Number(amount), plan: plan || 'Monthly',
+          method: method || 'Espèces',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          recordedBy: req.user?.preferred_username || 'Admin',
+        });
+        console.log(`♻️ Updated existing payment record for inscription: ${inscriptionId}`);
+      }
 
       // ── Resolve register date: use inscription's original createdAt ──────────
       let registerDate2 = null;

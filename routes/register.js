@@ -104,6 +104,25 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
       const { date, gymId = 'dokarat', ...entry } = req.body;
       if (!date) return res.status(400).json({ error: 'date required' });
       const docId = `${gymId}_${date}`;
+
+      // 🛡️ DEDUPLICATION: Prevent double-click additions by the same manager
+      try {
+        const twoMinsAgo = new Date(Date.now() - 2 * 60 * 1000);
+        const entriesRef = db.collection('megafit_daily_register').doc(docId).collection('entries');
+        const dupSnap = await entriesRef
+          .where('nom', '==', entry.nom || '')
+          .where('prix', '==', Number(entry.prix) || 0)
+          .where('createdBy', '==', req.user?.preferred_username || 'system')
+          .where('createdAt', '>=', twoMinsAgo)
+          .limit(1).get();
+        if (!dupSnap.empty) {
+          console.warn(`[DEDUP] /api/register/entry: Blocked duplicate entry by ${req.user?.preferred_username}`);
+          return res.json({ ok: true, id: dupSnap.docs[0].id, alreadyExists: true });
+        }
+      } catch (dedupErr) {
+        console.warn('⚠️ [DEDUP] Register entry check failed (non-blocking):', dedupErr.message);
+      }
+
       const ref = await db.collection('megafit_daily_register').doc(docId).collection('entries').add({
         ...entry, location: gymId,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),

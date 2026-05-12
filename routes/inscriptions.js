@@ -19,6 +19,29 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
       const today = date || new Date().toISOString().slice(0, 10);
       const docId = `${gymId}_${today}`;
       const totalAmt = Number(amount) || 0;
+
+      // 🛡️ DEDUPLICATION CHECK: Prevent identical entries in the daily register
+      const entriesRef = db.collection('megafit_daily_register').doc(docId).collection('entries');
+      if (contrat) {
+        const dupContract = await entriesRef.where('contrat', '==', contrat).limit(1).get();
+        if (!dupContract.empty) {
+          console.warn(`[DEDUP] autoRegisterCA: Duplicate contract ${contrat} found for ${gymId}/${today}. Skipping.`);
+          return;
+        }
+      } else if (nom && totalAmt > 0) {
+        // Fallback check by name and amount if within last 5 minutes
+        const fiveMinsAgo = new Date(Date.now() - 5 * 60 * 1000);
+        const dupName = await entriesRef
+          .where('nom', '==', nom)
+          .where('prix', '==', totalAmt)
+          .where('createdAt', '>=', fiveMinsAgo)
+          .limit(1).get();
+        if (!dupName.empty) {
+          console.warn(`[DEDUP] autoRegisterCA: Identical entry for ${nom} (${totalAmt} DH) found in last 5m. Skipping.`);
+          return;
+        }
+      }
+
       let tpe = 0, espece = 0, virement = 0, cheque = 0;
 
       if (split && typeof split === 'object') {
@@ -285,6 +308,26 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
           received: rawGymId,
           allowed: ['dokarat', 'marjane', 'casa1', 'casa2'],
         });
+      }
+
+      // 🛡️ DEDUPLICATION CHECK (2 mins window)
+      // Prevents accidental double-submissions from the public form.
+      try {
+        const twoMinsAgo = new Date(Date.now() - 2 * 60 * 1000);
+        const recentInscriptions = await db.collection('pending_members')
+          .where('gymId', '==', normalizedGymId)
+          .where('nom', '==', (data.nom || '').trim())
+          .where('prenom', '==', (data.prenom || '').trim())
+          .where('createdAt', '>=', twoMinsAgo)
+          .limit(1)
+          .get();
+        if (!recentInscriptions.empty) {
+          const old = recentInscriptions.docs[0];
+          console.warn(`[DEDUP] /public/inscriptions: Blocked duplicate submission for ${data.prenom} ${data.nom}`);
+          return res.json({ id: old.id, ok: true, contractNumber: old.data().contractNumber, alreadySubmitted: true });
+        }
+      } catch (dedupErr) {
+        console.warn('⚠️ [DEDUP] Inscription check failed (non-blocking):', dedupErr.message);
       }
 
       let finalContractNumber = '000000';
