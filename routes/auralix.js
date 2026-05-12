@@ -76,6 +76,7 @@ module.exports = function(deps) {
                 ROUND(COALESCE(CAST(tpe AS REAL),0)+COALESCE(CAST(espece AS REAL),0)+COALESCE(CAST(virement AS REAL),0)+COALESCE(CAST(cheque AS REAL),0)) AS montant,
                 COALESCE(CAST(tpe AS REAL),0) AS tpe, COALESCE(CAST(espece AS REAL),0) AS espece,
                 COALESCE(CAST(virement AS REAL),0) AS virement, COALESCE(CAST(cheque AS REAL),0) AS cheque,
+                COALESCE(CAST(reste AS REAL),0) AS reste,
                 created_at
          FROM register_cache
          WHERE created_at >= datetime('now', ?)
@@ -91,6 +92,7 @@ module.exports = function(deps) {
                   ROUND(COALESCE(CAST(tpe AS REAL),0)+COALESCE(CAST(espece AS REAL),0)+COALESCE(CAST(virement AS REAL),0)+COALESCE(CAST(cheque AS REAL),0)) AS montant,
                   COALESCE(CAST(tpe AS REAL),0) AS tpe, COALESCE(CAST(espece AS REAL),0) AS espece,
                   COALESCE(CAST(virement AS REAL),0) AS virement, COALESCE(CAST(cheque AS REAL),0) AS cheque,
+                  COALESCE(CAST(reste AS REAL),0) AS reste,
                   created_at
            FROM register_cache WHERE date IN (${ph}) ORDER BY created_at DESC, rowid DESC LIMIT 80`
         ).all(...dates);
