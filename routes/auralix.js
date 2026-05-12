@@ -6,18 +6,19 @@ module.exports = function(deps) {
   const { admin, lc } = deps;
   const fsDb = admin.firestore();
   const router = express.Router();
+  const { verifyAzureToken } = require('../middleware/auth');
 
-  // ── Auth middleware ───────────────────────────────────────────
-  async function auth(req, res, next) {
+  // Unified Auth Wrapper for Auralix
+  function auth(req, res, next) {
     const token = (req.headers.authorization || '').replace('Bearer ', '');
     const KEY = process.env.AURALIX_API_KEY || 'auralix-readonly-2026';
     if (token === KEY) { req.au = { email: 'demo' }; return next(); }
-    if (!token) return res.status(401).json({ error: 'No token' });
-    try {
-      const d = await admin.auth().verifyIdToken(token);
-      req.au = { email: d.email || d.uid };
+    
+    // Use the dashboard's enterprise auth
+    verifyAzureToken(req, res, () => {
+      req.au = { email: req.user?.preferred_username || req.user?.email || 'authenticated' };
       next();
-    } catch(e) { res.status(401).json({ error: 'Invalid token' }); }
+    });
   }
 
   const GYMS = ['marjane', 'dokarat', 'casa1', 'casa2'];
