@@ -491,6 +491,7 @@ app.use('/',                require('./routes/config')(deps));      // /public/p
 app.use('/',                require('./routes/activity')(deps));    // /api/activity/logs
 app.use('/',                require('./routes/recruitment')(deps)); // /api/recruitment/applications
 app.use('/',                require('./routes/scan')());          // /public/scan-cin (Groq Vision)
+app.use('/',                require('./routes/auralix')(deps));   // /api/auralix/* (Firebase token auth)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Healthcheck
