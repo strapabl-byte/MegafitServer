@@ -45,8 +45,8 @@ module.exports = function(deps) {
          WHERE gym_id=? AND date IN (${ph}) AND (status='approved' OR status IS NULL)`
       ).all(gymId, ...dates);
       const decaissement = Math.round(dec.reduce((s, r) => s + (r.m || 0), 0));
-      return { revenue, members: rows.length, decaissement, net: revenue - decaissement };
-    } catch(e) { return { revenue: 0, members: 0, decaissement: 0, net: 0 }; }
+      return { revenue, members: rows.length, entries: rows.length, decaissement, net: revenue - decaissement };
+    } catch(e) { return { revenue: 0, members: 0, entries: 0, decaissement: 0, net: 0 }; }
   }
 
   // GET /api/auralix/summary?period=24h|week|month
@@ -58,9 +58,10 @@ module.exports = function(deps) {
     const total = gyms.reduce((s, g) => ({
       revenue: s.revenue + g.revenue,
       members: s.members + g.members,
+      entries: s.entries + g.entries,
       decaissement: s.decaissement + g.decaissement,
       net: s.net + g.net,
-    }), { revenue: 0, members: 0, decaissement: 0, net: 0 });
+    }), { revenue: 0, members: 0, entries: 0, decaissement: 0, net: 0 });
     res.json({ gyms, total, period: p });
   });
 
