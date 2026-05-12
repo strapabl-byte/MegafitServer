@@ -113,11 +113,20 @@ module.exports = function(deps) {
     try {
       const where = status === 'all' ? '' : `WHERE status = 'pending' OR status IS NULL`;
       const rows = lc.db.prepare(
-        `SELECT id, gym_id, date, montant, raison, signature, requestedBy, status
+        `SELECT id, gym_id, date, montant, raison, commercial, signature, requested_by, status, created_at
          FROM decaissements_cache ${where} ORDER BY date DESC LIMIT 50`
       ).all();
-      res.json({ decaissements: rows.map(r => ({ ...r, gymName: NAMES[r.gym_id] || r.gym_id })) });
-    } catch(e) { res.status(500).json({ error: e.message }); }
+      res.json({
+        decaissements: rows.map(r => ({
+          ...r,
+          requestedBy: r.requested_by,
+          gymName: NAMES[r.gym_id] || r.gym_id
+        }))
+      });
+    } catch(e) {
+      console.error('[Auralix] decaissements error:', e.message);
+      res.status(500).json({ error: e.message });
+    }
   });
 
   // POST /api/auralix/decaissements/:id/approve  body: { gymId, date }
