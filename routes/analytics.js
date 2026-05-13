@@ -898,18 +898,8 @@ Reply ONLY with valid JSON (no markdown):
          resultList = Object.values(groupedMap).sort((a, b) => a.date.localeCompare(b.date));
       }
 
-      // ── Strip today if it has zero revenue (day not finished yet) ──────────
-      // Prevents the chart line from dropping to 0 mid-day.
-      // Today is only included once actual register entries exist.
-      if (resultList.length > 1 && groupBy === 'day') {
-        const last = resultList[resultList.length - 1];
-        const isToday = last.date === today;
-        const hasNoRevenue = last.revenue === 0 &&
-          Object.values(last.revPerGym || {}).every(v => v === 0);
-        if (isToday && hasNoRevenue) {
-          resultList = resultList.slice(0, -1);
-        }
-      }
+      // Today is always included to show live entry counts in the chart.
+
 
       res.json(resultList);
     } catch (err) {

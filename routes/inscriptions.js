@@ -294,10 +294,10 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
       // 🏦 STRICT GYM VALIDATION — reject unknown gyms at the gate, never let bad data in.
       // All 4 canonical variants + common aliases accepted.
       const GYM_ALIAS_MAP = {
-        'dokarat':    'dokarat', 'dokkarat': 'dokarat', 'doukkarate': 'dokarat', 'fes dokkarat': 'dokarat',
-        'marjane':    'marjane', 'saiss': 'marjane', 'fes saiss': 'marjane',
-        'casa1':      'casa1',   'anfa': 'casa1', 'casa anfa': 'casa1',
-        'casa2':      'casa2',   'lady': 'casa2', 'casa lady': 'casa2', 'casa lady anfa': 'casa2',
+        'dokarat':    'dokarat', 'dokkarat': 'dokarat', 'doukkarate': 'dokarat', 'fes dokkarat': 'dokarat', 'doukarat': 'dokarat',
+        'marjane':    'marjane', 'saiss': 'marjane', 'fes saiss': 'marjane', 'marjan': 'marjane',
+        'casa1':      'casa1',   'anfa': 'casa1', 'casa anfa': 'casa1', 'casablanca anfa': 'casa1',
+        'casa2':      'casa2',   'lady': 'casa2', 'casa lady': 'casa2', 'casa lady anfa': 'casa2', 'lady anfa': 'casa2',
       };
       const normalizedGymId = GYM_ALIAS_MAP[rawGymId] || null;
 
@@ -310,27 +310,21 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         });
       }
 
-      // 🛡️ DEDUPLICATION CHECK (2 mins window)
-      // Prevents accidental double-submissions from the public form.
-      try {
-        const twoMinsAgo = new Date(Date.now() - 2 * 60 * 1000);
-        const recentInscriptions = await db.collection('pending_members')
-          .where('gymId', '==', normalizedGymId)
-          .where('nom', '==', (data.nom || '').trim())
-          .where('prenom', '==', (data.prenom || '').trim())
-          .where('createdAt', '>=', twoMinsAgo)
-          .limit(1)
-          .get();
-        if (!recentInscriptions.empty) {
-          const old = recentInscriptions.docs[0];
-          console.warn(`[DEDUP] /public/inscriptions: Blocked duplicate submission for ${data.prenom} ${data.nom}`);
-          return res.json({ id: old.id, ok: true, contractNumber: old.data().contractNumber, alreadySubmitted: true });
-        }
-      } catch (dedupErr) {
-        console.warn('⚠️ [DEDUP] Inscription check failed (non-blocking):', dedupErr.message);
+      // 🛡️ DEDUPLICATION CHECK (OUTSIDE TRANSACTION to avoid Query-in-Transaction error)
+      const twoMinsAgo = new Date(Date.now() - 2 * 60 * 1000);
+      const recentSnap = await db.collection('pending_members')
+        .where('gymId', '==', normalizedGymId)
+        .where('nom', '==', (data.nom || '').trim())
+        .where('prenom', '==', (data.prenom || '').trim())
+        .where('createdAt', '>=', twoMinsAgo)
+        .limit(1)
+        .get();
+      
+      if (!recentSnap.empty) {
+        const old = recentSnap.docs[0];
+        console.warn(`[DEDUP] /public/inscriptions: Found duplicate for ${data.prenom} ${data.nom}`);
+        return res.json({ id: old.id, contractNumber: old.data().contractNumber, ok: true, alreadySubmitted: true });
       }
-
-      let finalContractNumber = '000000';
 
       const result = await db.runTransaction(async (t) => {
         const counterRef = db.collection('settings').doc('contractCounter');
@@ -338,17 +332,28 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         let nextNum = 15000;
         if (!cSnap.exists) { t.set(counterRef, { current: nextNum }); }
         else { nextNum = cSnap.data().current + 1; t.update(counterRef, { current: nextNum }); }
-        finalContractNumber = nextNum.toString().padStart(6, '0');
+        
+        const finalNum = nextNum.toString().padStart(6, '0');
         const newDocRef = db.collection('pending_members').doc();
-        t.set(newDocRef, { ...data, contractNumber: finalContractNumber, gymId: normalizedGymId, source: 'web', status: 'pending', createdAt: admin.firestore.FieldValue.serverTimestamp() });
-        return { id: newDocRef.id };
+        
+        t.set(newDocRef, { 
+          ...data, 
+          contractNumber: finalNum, 
+          gymId: normalizedGymId, 
+          source: 'web', 
+          status: 'pending', 
+          createdAt: admin.firestore.FieldValue.serverTimestamp() 
+        });
+        
+        return { id: newDocRef.id, contractNumber: finalNum };
       });
 
+      const { id, contractNumber: finalContractNumber } = result;
       console.log(`📝 Inscription N° ${finalContractNumber} — ${normalizedGymId}`);
       
-      // ✅ AURALIX FAST SYNC: Send lightweight copy to local 1GB SQLite disk 
+      // ✅ AURALIX FAST SYNC
       lc.setPending({
-        id: result.id, 
+        id, 
         gymId: normalizedGymId, 
         nom: data.nom, 
         prenom: data.prenom,
@@ -357,11 +362,12 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         createdAt: { _seconds: Math.floor(Date.now() / 1000) } 
       });
 
+
       invalidateCache(apiCache.inscriptions);
-      res.json({ id: result.id, ok: true, contractNumber: finalContractNumber });
+      res.json({ id, ok: true, contractNumber: finalContractNumber });
     } catch (err) {
       console.error('Public Inscription Error:', err);
-      res.status(500).json({ error: 'Failed to submit inscription' });
+      res.status(500).json({ error: 'Failed to submit inscription', detail: err.message });
     }
   });
 
@@ -550,166 +556,57 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
   // ── POST /api/inscriptions/:id/confirm ────────────────────────────────────
   router.post('/api/inscriptions/:id/confirm', verifyAzureToken, async (req, res) => {
     try {
-      const insRef = db.collection('pending_members').doc(req.params.id);
-      const insDoc = await insRef.get();
-      if (!insDoc.exists) return res.status(404).json({ error: 'Inscription not found' });
-      const ins = insDoc.data();
-      if (ins.status === 'converted') return res.status(409).json({ error: 'Inscription already confirmed' });
-      if (ins.memberId) return res.status(409).json({ error: 'Member already created for this inscription' });
+      const insId = req.params.id;
+      const result = await db.runTransaction(async (t) => {
+        const insRef = db.collection('pending_members').doc(insId);
+        const insDoc = await t.get(insRef);
 
-      const gymId = ins.gymId || 'dokarat';
+        if (!insDoc.exists) throw new Error('Inscription introuvable');
+        const ins = insDoc.data();
 
-      // ── Robust plan derivation — handles "24 MOIS", "2 ANS", "12 MOIS", etc. ──
-      const sName = (ins.subscriptionName || '').toLowerCase();
-      const monthMatch  = sName.match(/(\d+)\s*mois/);
-      const yearMatch   = sName.match(/(\d+)\s*an/);
-      const totalMonths = monthMatch ? parseInt(monthMatch[1]) : (yearMatch ? parseInt(yearMatch[1]) * 12 : 1);
-      let plan = 'Monthly';
-      if      (totalMonths >= 12) plan = 'Annual';
-      else if (totalMonths >= 6 ) plan = 'Semi-Annual';
-      else if (totalMonths >= 3 ) plan = 'Quarterly';
-      else                        plan = 'Monthly';
+        if (ins.status === 'converted') throw new Error('Cette inscription est déjà confirmée.');
+        if (ins.memberId) throw new Error('Un membre est déjà associé à cette inscription.');
 
-      // ── Expiry: trust the form's pre-calculated dates (most accurate) ───────
-      // Fall back to a month-based calculation only if periodTo is missing.
-      let expiresOn = ins.periodTo || null;
-      if (!expiresOn) {
-        const start = ins.periodFrom ? new Date(ins.periodFrom) : new Date();
-        if (ins.durationYears)         start.setFullYear(start.getFullYear() + Number(ins.durationYears));
-        else if (ins.durationMonths)   start.setMonth(start.getMonth() + Number(ins.durationMonths));
-        else if (ins.durationDays)     start.setDate(start.getDate() + Number(ins.durationDays));
-        else                           start.setFullYear(start.getFullYear() + 1); // absolute last resort
-        expiresOn = start.toISOString().split('T')[0];
-      }
+        const gymId = ins.gymId || 'dokarat';
+        
+        // ── Resolve plan ──
+        const sName = (ins.subscriptionName || '').toLowerCase();
+        const monthMatch  = sName.match(/(\d+)\s*mois/);
+        const yearMatch   = sName.match(/(\d+)\s*an/);
+        const totalMonths = monthMatch ? parseInt(monthMatch[1]) : (yearMatch ? parseInt(yearMatch[1]) * 12 : 1);
+        let plan = 'Monthly';
+        if (totalMonths >= 12) plan = 'Annual';
+        else if (totalMonths >= 6) plan = 'Semi-Annual';
+        else if (totalMonths >= 3) plan = 'Quarterly';
 
-      // ── Deduplication: find existing member before creating a duplicate ──────
-      // Priority: 1) explicit form link, 2) CIN, 3) phone, 4) full name
-      let existingMember = null;
+        const memberData = {
+          fullName: `${ins.prenom || ''} ${ins.nom || ''}`.trim(),
+          phone: ins.telephone || null,
+          plan,
+          subscriptionName: ins.subscriptionName || null,
+          expiresOn: ins.periodTo || null,
+          periodFrom: ins.periodFrom || null,
+          location: gymId,
+          contractNumber: ins.contractNumber || null,
+          source: 'inscription_form',
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          confirmedBy: req.user?.preferred_username || 'Admin'
+        };
 
-      // 1. Explicit autocomplete link from inscription form
-      if (ins.selectedMemberId) {
-        const doc = await db.collection('members').doc(ins.selectedMemberId).get();
-        if (doc.exists && !doc.data().deleted && !doc.data().isDeleted) {
-          existingMember = doc;
-          console.log(`🔗 Dedup: selectedMemberId → ${existingMember.id}`);
-        }
-      }
-
-      // 2. CIN match — only reliable unique identifier (national ID card)
-      if (!existingMember && ins.cin && ins.cin.trim().length > 3) {
-        const cinSnap = await db.collection('members')
-          .where('cin', '==', ins.cin.trim().toUpperCase())
+        // 🛡️ DEDUPLICATION CHECK (INSIDE TRANSACTION)
+        const dupQuery = await db.collection('members')
+          .where('location', '==', gymId)
+          .where('fullName', '==', memberData.fullName)
           .limit(1).get();
-        if (!cinSnap.empty) {
-          existingMember = cinSnap.docs[0];
-          console.log(`🔍 Dedup by CIN (${ins.cin}) → ${existingMember.id}`);
+        
+        if (!dupQuery.empty) {
+          const existing = dupQuery.docs[0];
+          t.update(insRef, { status: 'converted', memberId: existing.id });
+          return { member: { id: existing.id, ...existing.data() }, alreadyExisted: true };
         }
-      }
 
-      // ⚠️ NOTE: Phone dedup REMOVED — phone numbers can be shared by family members,
-      // causing false-matches that link a new member to an existing one's history & photo.
-
-      // 3. Full-name match — last resort, requires long enough name to reduce false positives
-      if (!existingMember) {
-        const fullNameCheck = `${ins.prenom || ''} ${ins.nom || ''}`.trim();
-        if (fullNameCheck.length > 9) { // raised from 5 → 9 to prevent short-name false matches
-          const nameSnap = await db.collection('members')
-            .where('fullName', '==', fullNameCheck).limit(1).get();
-          if (!nameSnap.empty) {
-            existingMember = nameSnap.docs[0];
-            console.log(`👤 Dedup by name (${fullNameCheck}) → ${existingMember.id}`);
-          }
-        }
-      }
-
-      const memberData = {
-        fullName: `${ins.prenom || ''} ${ins.nom || ''}`.trim(),
-        phone: ins.telephone || null, plan,
-        subscriptionName: ins.subscriptionName || null,
-        birthday: ins.dateNaissance || null,
-        expiresOn,
-        periodFrom: ins.periodFrom || null,
-        periodTo:   expiresOn,
-        photo: ins.profilePicture || null, email: ins.email || null,
-        cin: ins.cin || null,
-        adresse: ins.adresse || null, ville: ins.ville || null,
-        location: gymId,
-        contractNumber: ins.contractNumber || null, commercial: ins.commercial || null,
-        pdfUrl: ins.pdfUrl || null, balance: ins.totals?.balance || 0,
-        balanceDeadline: req.body.balanceDeadline || null,
-        payments: ins.payments || null, inscriptionId: req.params.id,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      };
-
-      let memberId, memberRef;
-      if (existingMember) {
-        // ✅ UPDATE existing — no duplicate
-        memberId = existingMember.id; memberRef = existingMember.ref;
-        const prev = existingMember.data();
-        // Preserve existing fields the inscription may not have
-        if (!memberData.phone)   memberData.phone   = prev.phone   || null;
-        if (!memberData.email)   memberData.email   = prev.email   || null;
-        if (!memberData.cin)     memberData.cin     = prev.cin     || null;
-        if (!memberData.adresse) memberData.adresse = prev.adresse || null;
-        if (!memberData.ville)   memberData.ville   = prev.ville   || null;
-        if (memberData.photo?.startsWith('data:image')) {
-          memberData.photo = await uploadBase64ToStorage(memberData.photo, `members/${memberId}/profile.jpg`);
-        } else if (!memberData.photo) {
-          memberData.photo = prev.photo || null; // keep existing photo
-        }
-        await memberRef.update(memberData);
-      } else {
-        // 🆕 CREATE — only when truly no match found
+        const newMemberRef = db.collection('members').doc();
         const qrToken = crypto.randomBytes(16).toString('hex');
-        memberRef = await db.collection('members').add({ ...memberData, qrToken, createdAt: admin.firestore.FieldValue.serverTimestamp(), confirmedBy: req.user?.preferred_username || 'Admin' });
-        memberId = memberRef.id;
-        if (memberData.photo?.startsWith('data:image')) {
-          const url = await uploadBase64ToStorage(memberData.photo, `members/${memberId}/profile.jpg`);
-          await memberRef.update({ photo: url });
-        }
-      }
-
-      // Link existing payments
-      const orphanPayments = await db.collection('payments').where('inscriptionId', '==', req.params.id).get();
-      for (const p of orphanPayments.docs) await p.ref.update({ memberId });
-
-      // Auto-record registration payment if not already there
-      if (!orphanPayments.docs.some(p => p.data().type === 'registration')) {
-        const espece   = Number(ins.payments?.espece   || 0);
-        const carte    = Number(ins.payments?.carte    || ins.payments?.tpe || 0);
-        const virement = Number(ins.payments?.virement || 0);
-        const cheque   = Number(ins.payments?.cheque   || 0);
-        const totalPaid = espece + carte + virement + cheque;
-        if (totalPaid > 0) {
-          const method = carte > 0 ? 'Carte Bancaire' : espece > 0 ? 'Espèces' : virement > 0 ? 'Virement' : 'Chèque';
-          const chequePhoto = ins.chequePhoto?.startsWith('data:image')
-            ? await uploadBase64ToStorage(ins.chequePhoto, `members/${memberId}/cheques/${Date.now()}_recto.jpg`)
-            : ins.chequePhoto || null;
-          const chequePhotoBack = ins.chequePhotoVerso?.startsWith('data:image')
-            ? await uploadBase64ToStorage(ins.chequePhotoVerso, `members/${memberId}/cheques/${Date.now()}_verso.jpg`)
-            : ins.chequePhotoVerso || null;
-            await db.collection('payments').add({
-              memberId, inscriptionId: req.params.id, gymId,
-              amount: totalPaid, plan, date: new Date().toISOString(), method,
-              paymentsSplit: { espece, carte, virement, cheque },
-              chequePhoto, chequePhotoBack,
-              note: 'Paiement inscription initiale — À confirmer sur la page Paiements',
-              createdAt: admin.firestore.FieldValue.serverTimestamp(),
-              recordedBy: req.user?.preferred_username || 'Admin', type: 'registration',
-            });
-          // ✅ NOTE: autoRegisterCA is intentionally NOT called here.
-          // The register entry is created ONLY when the admin explicitly
-          // confirms the payment on the Payments page (complete-inscription endpoint).
-          // Calling it here caused duplicate entries in the daily register.
-        }
-      }
-
-      await insRef.update({ status: 'awaiting_payment', memberId: memberRef.id, memberCreatedAt: admin.firestore.FieldValue.serverTimestamp(), memberCreatedBy: req.user?.preferred_username || 'Admin' });
-      
-      // ✅ AURALIX FAST SYNC: Flag as accepted in local SQLite
-      lc.updatePendingStatus(req.params.id, 'accepted');
-
-      invalidateCache(apiCache.inscriptions);
       const memberSnap = await memberRef.get();
 
       // ✅ INSTANT MEMBER CACHE: Push new/updated member into SQLite immediately
