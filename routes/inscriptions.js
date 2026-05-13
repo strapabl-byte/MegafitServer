@@ -355,10 +355,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         return { id: newDocRef.id, contractNumber: finalNum };
       });
 
-      const { id, contractNumber: finalContractNumber } = result;
-      console.log(`📝 Inscription N° ${finalContractNumber} — ${normalizedGymId}`);
-      
-      // ✅ AURALIX FAST SYNC
+      console.log(`[Inscription] Syncing to SQLite for ${id}...`);
       lc.setPending({
         id, 
         gymId: normalizedGymId, 
@@ -369,12 +366,16 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         createdAt: { _seconds: Math.floor(Date.now() / 1000) } 
       });
 
-
       invalidateCache(apiCache.inscriptions);
+      console.log(`[Inscription] ✅ Success for ${data.prenom} ${data.nom}`);
       res.json({ id, ok: true, contractNumber: finalContractNumber });
     } catch (err) {
-      console.error('Public Inscription Error:', err);
-      res.status(500).json({ error: 'Failed to submit inscription', detail: err.message });
+      console.error('❌ [PUBLIC INSCRIPTION ERROR]:', err);
+      res.status(500).json({ 
+        error: 'Failed to submit inscription', 
+        detail: err.message,
+        stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+      });
     }
   });
 
