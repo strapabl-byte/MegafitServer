@@ -310,20 +310,27 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         });
       }
 
-      // 🛡️ DEDUPLICATION CHECK (OUTSIDE TRANSACTION to avoid Query-in-Transaction error)
-      const twoMinsAgo = new Date(Date.now() - 2 * 60 * 1000);
+      // 🛡️ DEDUPLICATION CHECK (Index-free approach)
+      // We fetch entries with same name/gym (Equality filters only = no index needed)
       const recentSnap = await db.collection('pending_members')
         .where('gymId', '==', normalizedGymId)
         .where('nom', '==', (data.nom || '').trim())
         .where('prenom', '==', (data.prenom || '').trim())
-        .where('createdAt', '>=', twoMinsAgo)
-        .limit(1)
         .get();
       
       if (!recentSnap.empty) {
-        const old = recentSnap.docs[0];
-        console.warn(`[DEDUP] /public/inscriptions: Found duplicate for ${data.prenom} ${data.nom}`);
-        return res.json({ id: old.id, contractNumber: old.data().contractNumber, ok: true, alreadySubmitted: true });
+        // Sort and check date in memory to avoid "Missing Index" errors
+        const docs = recentSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        docs.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+        
+        const latest = docs[0];
+        const lastCreated = latest.createdAt?.toDate ? latest.createdAt.toDate() : new Date(0);
+        const diffMs = Date.now() - lastCreated.getTime();
+        
+        if (diffMs < 2 * 60 * 1000) {
+          console.warn(`[DEDUP] /public/inscriptions: Found duplicate for ${data.prenom} ${data.nom}`);
+          return res.json({ id: latest.id, contractNumber: latest.contractNumber, ok: true, alreadySubmitted: true });
+        }
       }
 
       const result = await db.runTransaction(async (t) => {
