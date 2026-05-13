@@ -607,18 +607,38 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
 
         const newMemberRef = db.collection('members').doc();
         const qrToken = crypto.randomBytes(16).toString('hex');
-      const memberSnap = await memberRef.get();
+
+        t.set(newMemberRef, {
+          ...memberData,
+          qrToken,
+          status: 'Active',
+          photo: ins.photoUrl || null
+        });
+
+        t.update(insRef, {
+          status: 'converted',
+          memberId: newMemberRef.id
+        });
+
+        return { member: { id: newMemberRef.id, ...memberData, qrToken, status: 'Active' } };
+      });
+
+      const member = result.member;
+      const gymId = member.location || 'dokarat';
 
       // ✅ INSTANT MEMBER CACHE: Push new/updated member into SQLite immediately
-      // Without this, the member is invisible in the Members page until the next hourly sync.
       try {
-        lc.upsertMembers(gymId, [{ id: memberRef.id, ...memberSnap.data() }]);
-        console.log(`💾 SQLite member cache updated for: ${memberData.fullName}`);
-      } catch(cacheErr) {
-        console.warn('⚠️  SQLite member cache update failed (non-blocking):', cacheErr.message);
+        lc.upsertMembers(gymId, [member]);
+        console.log(`💾 SQLite member cache updated for: ${member.fullName}`);
+      } catch (cacheErr) {
+        console.warn('⚠️ SQLite member cache update failed (non-blocking):', cacheErr.message);
       }
 
-      res.json({ ok: true, member: { id: memberRef.id, ...memberSnap.data() }, nextStep: 'Go to Payments page to confirm and record the payment' });
+      res.json({
+        ok: true,
+        member,
+        nextStep: 'Go to Payments page to confirm and record the payment'
+      });
     } catch (err) {
       console.error('Confirm Inscription Error:', err);
       res.status(500).json({ error: 'Failed to confirm inscription' });
