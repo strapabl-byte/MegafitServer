@@ -636,11 +636,15 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         const newMemberRef = db.collection('members').doc();
         const qrToken = crypto.randomBytes(16).toString('hex');
 
+        // 🖼️ Photo: prefer Firebase Storage URL, fall back to base64 from tablet camera
+        const memberPhoto = ins.photoUrl ||
+          (ins.profilePicture && ins.profilePicture.length < 200000 ? ins.profilePicture : null) || null;
+
         t.set(newMemberRef, {
           ...memberData,
           qrToken,
           status: 'Active',
-          photo: ins.photoUrl || null
+          photo: memberPhoto
         });
 
         t.update(insRef, {
@@ -648,7 +652,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
           memberId: newMemberRef.id
         });
 
-        return { member: { id: newMemberRef.id, ...memberData, qrToken, status: 'Active' } };
+        return { member: { id: newMemberRef.id, ...memberData, qrToken, status: 'Active', photo: memberPhoto } };
       });
 
       const member = result.member;
@@ -662,10 +666,47 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         console.warn('⚠️ SQLite member cache update failed (non-blocking):', cacheErr.message);
       }
 
+      // ✅ AUTO-REGISTER: If the inscription had a paid amount, create register entry immediately
+      // This prevents the member from showing as NONPAYÉ / missing from register
+      if (!result.alreadyExisted) {
+        try {
+          const ins = await db.collection('pending_members').doc(insId).get().then(d => d.data());
+          const espece   = Number(ins?.payments?.espece   || 0);
+          const carte    = Number(ins?.payments?.carte    || ins?.payments?.tpe || 0);
+          const virement = Number(ins?.payments?.virement || 0);
+          const cheque   = Number(ins?.payments?.cheque   || 0);
+          const totalPaid = espece + carte + virement + cheque || Number(ins?.totals?.paid || 0);
+
+          if (totalPaid > 0) {
+            const dateStr = new Date().toISOString().slice(0, 10);
+            const method = carte > 0 ? 'Carte Bancaire' : espece > 0 ? 'Espèces' : virement > 0 ? 'Virement' : 'Chèque';
+            await autoRegisterCA({
+              gymId,
+              date: dateStr,
+              nom: member.fullName,
+              tel: ins?.telephone || '',
+              cin: ins?.cin || '',
+              plan: member.plan || 'Monthly',
+              subscriptionName: ins?.subscriptionName || '',
+              amount: totalPaid,
+              method,
+              commercial: ins?.commercial || ins?.submittedBy || 'FORM',
+              contrat: ins?.contractNumber || '',
+              payments: { espece, carte, virement, cheque },
+              reste: Math.max(0, Number(ins?.totals?.total || 0) - totalPaid),
+              note: `Inscription N°${ins?.contractNumber || ''} — ${ins?.subscriptionName || ''}`,
+            });
+            console.log(`💸 Register entry auto-created for ${member.fullName} — ${totalPaid} DH`);
+          }
+        } catch (regErr) {
+          console.warn('⚠️ Auto-register on confirm failed (non-blocking):', regErr.message);
+        }
+      }
+
       res.json({
         ok: true,
         member,
-        nextStep: 'Go to Payments page to confirm and record the payment'
+        nextStep: 'Payment recorded and register updated automatically'
       });
     } catch (err) {
       console.error('Confirm Inscription Error:', err);
