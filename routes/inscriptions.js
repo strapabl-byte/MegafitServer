@@ -358,6 +358,9 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         return { id: newDocRef.id, contractNumber: finalNum };
       });
 
+      const id = result.id;
+      const finalContractNumber = result.contractNumber;
+
       console.log(`[Inscription] Syncing to SQLite for ${id}...`);
       lc.setPending({
         id, 
