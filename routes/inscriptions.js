@@ -116,13 +116,12 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
     try {
       const gymId = (req.query.gymId || '').toLowerCase().trim();
       const VALID_GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
-      if (!VALID_GYMS.includes(gymId)) {
-        return res.status(400).json({ error: 'Invalid gymId' });
-      }
+      if (!VALID_GYMS.includes(gymId)) return res.status(400).json({ error: 'Invalid gymId' });
 
-      // 1. ⚡ SQLite first — fast, zero Firebase cost
+      // 1. ⚡ SQLite first — fast, zero Firebase cost (unless refresh requested)
+      const refresh = req.query.refresh === 'true';
       const cached = lc.getDebtors(gymId);
-      if (cached.length > 0) {
+      if (cached.length > 0 && !refresh) {
         console.log(`[Debtors/Public] ⚡ SQLite hit: ${cached.length} debtors for ${gymId}`);
         return res.json(cached.map(m => ({
           id: m.id,
@@ -139,13 +138,13 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         })));
       }
 
-      // 2. 🔥 Firebase hard fallback — only when SQLite is empty (e.g. fresh cold start)
-      console.log(`[Debtors/Public] 🔥 SQLite empty for ${gymId} → Firebase fallback`);
+      // 2. 🔥 Firebase hard fallback — when SQLite is empty or refresh is requested
+      console.log(`[Debtors/Public] ${refresh ? 'FORCED REFRESH' : 'SQLite empty'} for ${gymId} → Firebase fallback`);
       const snap = await db.collection('members')
         .where('location', '==', gymId)
         .where('balance', '>', 0)
         .orderBy('balance', 'desc')
-        .limit(100)
+        .limit(1000)
         .get();
 
       const result = snap.docs.map(d => {

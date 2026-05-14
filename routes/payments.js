@@ -118,23 +118,19 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
     }
   });
 
-  // ── GET /public/payments/debtors ──────────────────────────────────────────
-  // 🌐 Public route: for inscription form tablets (no Azure auth).
-  // Secured by gymId — only returns debtors for the requested gym.
   router.get('/public/debtors', async (req, res) => {
     try {
       const gymId = (req.query.gymId || '').toLowerCase().trim();
       const VALID_GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
-      if (!VALID_GYMS.includes(gymId)) {
-        return res.status(400).json({ error: 'Invalid gymId' });
-      }
+      if (!VALID_GYMS.includes(gymId)) return res.status(400).json({ error: 'Invalid gymId' });
 
-      // 1. Try SQLite first (fast, no Firebase burn)
-      const debtors = lc.getDebtors(gymId);
+      // 1. Try SQLite first (unless refresh is requested)
+      const refresh = req.query.refresh === 'true';
+      const cached = lc.getDebtors(gymId);
 
-      if (debtors.length > 0) {
-        console.log(`[Debtors] SQLite hit: ${debtors.length} debtors for ${gymId}`);
-        return res.json(debtors.map(m => ({
+      if (cached.length > 0 && !refresh) {
+        console.log(`[Debtors] SQLite hit: ${cached.length} debtors for ${gymId}`);
+        return res.json(cached.map(m => ({
           id: m.id,
           fullName: m.full_name,
           phone: m.phone,
@@ -149,13 +145,13 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
         })));
       }
 
-      // 2. Firebase hard fallback — only hit if SQLite cache is empty
-      console.log(`[Debtors] SQLite empty for ${gymId} — falling back to Firebase`);
+      // 2. Firebase fallback/refresh
+      console.log(`[Debtors] ${refresh ? 'FORCED REFRESH' : 'SQLite empty'} for ${gymId} — fetching from Firebase`);
       const snap = await db.collection('members')
         .where('location', '==', gymId)
         .where('balance', '>', 0)
         .orderBy('balance', 'desc')
-        .limit(50)
+        .limit(1000)
         .get();
       
       const result = snap.docs.map(d => {
