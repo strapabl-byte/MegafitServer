@@ -129,6 +129,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         expiresOn:        m.expiresOn        || m.expires_on        || null,
         qrToken:          m.qrToken          || m.qr_token          || '',
         photo:            m.photo            || null,
+        image:            m.photo            || null, // ✅ Alias for frontend consistency
         pdfUrl:           m.pdfUrl           || m.pdf_url           || null,
         createdAt:        m.createdAt        || m.created_at        || null,
         totalPaid:        m.totalPaid        || m.total_paid        || 0,

@@ -362,6 +362,18 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         prenom: data.prenom,
         subscriptionName: data.subscriptionName,
         totals: data.totals,
+        payments: data.payments,
+        cin: data.cin || null,
+        adresse: data.adresse || null,
+        ville: data.ville || null,
+        email: data.email || null,
+        commercial: data.commercial || null,
+        contract_number: finalContractNumber,
+        period_from: data.periodFrom || null,
+        period_to: data.periodTo || null,
+        telephone: data.telephone || null,
+        date_naissance: data.dateNaissance || null,
+        profile_picture: data.photoUrl || null,
         createdAt: { _seconds: Math.floor(Date.now() / 1000) } 
       });
 
@@ -595,6 +607,8 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
           periodFrom: ins.periodFrom || null,
           location: gymId,
           contractNumber: ins.contractNumber || null,
+          inscriptionId: insId, // ✅ CRITICAL: link member to original inscription
+          balance: ins.totals?.balance || 0, // ✅ CRITICAL: transfer balance
           source: 'inscription_form',
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
           confirmedBy: req.user?.preferred_username || 'Admin'
