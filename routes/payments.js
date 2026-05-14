@@ -556,8 +556,8 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
       const oldBalance = Number(member.balance || 0);
       const payAmount  = Number(amount);
       const newBalance = Math.max(0, oldBalance - payAmount);
-      const gymId      = member.gymId || 'dokarat';
-      const contractNum= member.contractNum || '';
+      const gymId      = member.location || member.gymId || 'dokarat'; // ✅ Fixed: was member.gymId (always undefined)
+      const contractNum= member.contractNumber || member.contractNum || ''; // ✅ Fixed: was member.contractNum
 
       await db.collection('payments').add({
         memberId, gymId, amount: payAmount, plan: member.plan || 'Monthly',
