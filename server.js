@@ -472,75 +472,121 @@ app.post('/admin/clear-pending-cache', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ADMIN: Fix missing member balances from inscription data
+// ADMIN: Fix missing member balances (ONE-TIME ONLY)
 // POST /admin/fix-member-balances
-// Scans all pending_members with a balance > 0 and ensures the linked member
-// document in Firebase + SQLite has the correct balance.
-// Safe to run multiple times — only updates members with balance = 0 or missing.
+// ── Strategy (quota-safe):
+//   1. Check SQLite meta — if already ran, return immediately (zero Firebase reads)
+//   2. Read ONLY from local SQLite pending_cache to find inscriptions with balance > 0
+//   3. For each, fetch ONE Firebase inscription doc to get the memberId
+//   4. Check ONE Firebase member doc — skip if deleted, skip if balance already correct
+//   5. Fix balance in Firebase + SQLite for affected members only
+//   6. Write meta flag — endpoint becomes a no-op forever after
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/admin/fix-member-balances', async (req, res) => {
   const secret   = req.headers['x-inject-secret'];
   const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
   if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
 
+  // ── ONE-TIME GUARD: Check if already done ──────────────────────────────────
+  const alreadyDone = lc.getMeta('balance_fix_done');
+  if (alreadyDone && req.query.force !== 'true') {
+    return res.json({ ok: true, alreadyDone: true, ranAt: alreadyDone, message: 'Already ran. Pass ?force=true to re-run.' });
+  }
+
   try {
-    const snap = await db.collection('pending_members')
-      .where('status', 'in', ['awaiting_payment', 'converted'])
-      .get();
+    // ── STEP 1: Use SQLite to find ONLY inscriptions with outstanding balance ──
+    // Zero Firebase reads at this stage.
+    const pendingWithBalance = lc.db.prepare(`
+      SELECT id, gym_id, nom, prenom, balance, paid, status 
+      FROM pending_cache 
+      WHERE balance > 0 
+        AND status IN ('awaiting_payment', 'converted', 'pending')
+      ORDER BY balance DESC
+    `).all();
+
+    console.log(`[fix-balances] Found ${pendingWithBalance.length} inscriptions with balance > 0 in SQLite`);
 
     const fixed   = [];
     const skipped = [];
     const errors  = [];
 
-    for (const doc of snap.docs) {
-      const ins = doc.data();
-      const inscriptionBalance = ins.totals?.balance ?? 0;
+    // Pre-load deleted member IDs to avoid repeated Firebase reads
+    const deletedSnap = await db.collection('deleted_members').select().get();
+    const deletedIds  = new Set(deletedSnap.docs.map(d => d.id));
+    console.log(`[fix-balances] ${deletedIds.size} deleted members loaded`);
 
-      // Only process inscriptions that have a real outstanding balance
-      if (Number(inscriptionBalance) <= 0) { skipped.push({ id: doc.id, reason: 'no balance in inscription' }); continue; }
-
-      const memberId = ins.memberId;
-      if (!memberId) { skipped.push({ id: doc.id, reason: 'no memberId linked' }); continue; }
+    for (const row of pendingWithBalance) {
+      const inscriptionId = row.id;
+      const balanceToFix  = Number(row.balance);
 
       try {
+        // ── STEP 2: Fetch the inscription from Firebase to get memberId ────────
+        // Only 1 read per inscription that has a real balance in SQLite
+        const insDoc = await db.collection('pending_members').doc(inscriptionId).get();
+        if (!insDoc.exists) {
+          skipped.push({ id: inscriptionId, reason: 'inscription not in Firebase' });
+          continue;
+        }
+
+        const memberId = insDoc.data().memberId;
+        if (!memberId) {
+          skipped.push({ id: inscriptionId, name: `${row.prenom} ${row.nom}`, reason: 'no memberId linked yet' });
+          continue;
+        }
+
+        // ── STEP 3: Skip deleted members ──────────────────────────────────────
+        if (deletedIds.has(memberId)) {
+          skipped.push({ id: inscriptionId, memberId, name: `${row.prenom} ${row.nom}`, reason: 'member was deleted' });
+          continue;
+        }
+
+        // ── STEP 4: Fetch member from Firebase ────────────────────────────────
         const memberRef  = db.collection('members').doc(memberId);
         const memberSnap = await memberRef.get();
-        if (!memberSnap.exists) { skipped.push({ id: doc.id, memberId, reason: 'member not found in Firebase' }); continue; }
+        if (!memberSnap.exists) {
+          skipped.push({ id: inscriptionId, memberId, name: `${row.prenom} ${row.nom}`, reason: 'member not in Firebase (deleted?)' });
+          continue;
+        }
 
-        const memberData    = memberSnap.data();
+        const memberData     = memberSnap.data();
         const currentBalance = Number(memberData.balance || 0);
+        const gymId          = memberData.location || memberData.gymId || row.gym_id || 'dokarat';
 
-        // Only fix if current balance is 0 (bug) or not set
-        if (currentBalance > 0) { skipped.push({ id: doc.id, memberId, name: memberData.fullName, reason: `already has balance ${currentBalance}` }); continue; }
+        // Skip if already has a correct balance
+        if (currentBalance > 0) {
+          skipped.push({ memberId, name: memberData.fullName, gymId, reason: `balance already set: ${currentBalance} DH` });
+          continue;
+        }
 
-        // ✅ Fix Firebase
+        // ── STEP 5: Fix balance in Firebase ───────────────────────────────────
         await memberRef.update({
-          balance: Number(inscriptionBalance),
+          balance: balanceToFix,
+          inscriptionId: inscriptionId, // ensure link is there
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
 
-        // ✅ Fix SQLite cache
-        const gymId = memberData.location || memberData.gymId || 'dokarat';
+        // ── STEP 6: Fix balance in SQLite cache ───────────────────────────────
         const updatedSnap = await memberRef.get();
         lc.upsertMembers(gymId, [{ id: memberId, ...updatedSnap.data() }]);
 
-        fixed.push({
-          memberId,
-          name: memberData.fullName,
-          gymId,
-          balanceFixed: Number(inscriptionBalance),
-          inscriptionId: doc.id,
-        });
-        console.log(`✅ [fix-balances] ${memberData.fullName} → balance set to ${inscriptionBalance} DH`);
-      } catch (memberErr) {
-        errors.push({ inscriptionId: doc.id, error: memberErr.message });
+        fixed.push({ memberId, name: memberData.fullName, gymId, balanceFixed: balanceToFix, inscriptionId });
+        console.log(`✅ [fix-balances] ${memberData.fullName} (${gymId}) → balance set to ${balanceToFix} DH`);
+
+      } catch (rowErr) {
+        errors.push({ inscriptionId, error: rowErr.message });
+        console.error(`❌ [fix-balances] Error for inscription ${inscriptionId}:`, rowErr.message);
       }
     }
 
-    console.log(`[fix-member-balances] Fixed: ${fixed.length}, Skipped: ${skipped.length}, Errors: ${errors.length}`);
-    res.json({ ok: true, fixed, skipped, errors });
+    // ── STEP 7: Mark as done — endpoint becomes no-op from now on ─────────────
+    lc.setMeta('balance_fix_done', new Date().toISOString());
+
+    const summary = { ok: true, fixed: fixed.length, skipped: skipped.length, errors: errors.length, fixedList: fixed };
+    console.log(`✅ [fix-member-balances] DONE. Fixed: ${fixed.length} | Skipped: ${skipped.length} | Errors: ${errors.length}`);
+    res.json(summary);
+
   } catch (err) {
-    console.error('[fix-member-balances] Error:', err);
+    console.error('[fix-member-balances] Fatal Error:', err);
     res.status(500).json({ error: err.message });
   }
 });
