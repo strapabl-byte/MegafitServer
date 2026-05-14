@@ -345,13 +345,20 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         
         const finalNum = nextNum.toString().padStart(6, '0');
         const newDocRef = db.collection('pending_members').doc();
+
+        // 🛑 CRITICAL: Strip large base64 blobs before saving to Firestore.
+        // Firestore max doc size = 1MB. Base64 photos alone can be 200KB+.
+        // Storing them in Firestore corrupts the document silently.
+        // These are stored safely in SQLite instead (no size limit).
+        const { profilePicture, memberSignature, chequePhoto, chequePhotoVerso, ...safeData } = data;
         
         t.set(newDocRef, { 
-          ...data, 
+          ...safeData,
           contractNumber: finalNum, 
           gymId: normalizedGymId, 
           source: 'web', 
-          status: 'pending', 
+          status: 'pending',
+          hasPhoto: !!(profilePicture || data.photoUrl),
           createdAt: admin.firestore.FieldValue.serverTimestamp() 
         });
         
@@ -380,7 +387,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         period_to: data.periodTo || null,
         telephone: data.telephone || null,
         date_naissance: data.dateNaissance || null,
-        profile_picture: data.photoUrl || null,
+        profile_picture: data.profilePicture || data.photoUrl || null,
         createdAt: { _seconds: Math.floor(Date.now() / 1000) } 
       });
 
@@ -539,8 +546,20 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
       }
 
       const data = allDocs.sort((a, b) => (b.createdAt?._seconds || 0) - (a.createdAt?._seconds || 0));
-      apiCache.inscriptions[cacheKey] = { data, ts: Date.now() };
-      res.json(data);
+
+      // 🖼️ Enrich with profilePicture from SQLite — base64 photos are NOT stored in Firestore
+      // (Firestore 1MB doc limit), but ARE in SQLite's pending_cache.profile_picture column.
+      const enriched = data.map(ins => {
+        const sqliteEntry = lc.getPendingById(ins.id);
+        return {
+          ...ins,
+          profilePicture: ins.profilePicture || sqliteEntry?.profile_picture || null,
+          pdfUrl: ins.pdfUrl || sqliteEntry?.pdf_url || null,
+        };
+      });
+
+      apiCache.inscriptions[cacheKey] = { data: enriched, ts: Date.now() };
+      res.json(enriched);
     } catch (err) {
       console.error('Inscriptions Fetch Error:', err);
       res.status(500).json({ error: 'Failed to fetch pending inscriptions' });
