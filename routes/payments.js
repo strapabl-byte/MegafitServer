@@ -665,7 +665,11 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
       });
 
       if (insDoc.exists) {
-        const updateData = { payment_validated: true, updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+        const updateData = { 
+          status: 'converted', 
+          payment_validated: true, 
+          updatedAt: admin.firestore.FieldValue.serverTimestamp() 
+        };
         if (insData.memberId) {
           const latestPay = await db.collection('payments').where('inscriptionId', '==', inscriptionId).orderBy('createdAt', 'desc').limit(1).get();
           if (!latestPay.empty) await latestPay.docs[0].ref.update({ memberId: insData.memberId });

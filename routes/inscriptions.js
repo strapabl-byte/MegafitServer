@@ -609,7 +609,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         
         if (!dupQuery.empty) {
           const existing = dupQuery.docs[0];
-          t.update(insRef, { status: 'converted', memberId: existing.id });
+          t.update(insRef, { status: 'awaiting_payment', memberId: existing.id });
           return { member: { id: existing.id, ...existing.data() }, alreadyExisted: true };
         }
 
@@ -624,7 +624,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         });
 
         t.update(insRef, {
-          status: 'converted',
+          status: 'awaiting_payment',
           memberId: newMemberRef.id
         });
 
