@@ -1041,48 +1041,81 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
 
 
   // ── POST /api/inscriptions/fix-pdf-urls ──────────────────────────────────
-  // One-time repair: finds confirmed inscriptions (awaiting_payment) that have
-  // a pdfUrl but whose linked member doc does NOT have pdfUrl.
-  // Propagates pdfUrl → member doc + members_cache.
-  // Safe to run multiple times — skips members that already have pdfUrl.
+  // Repair tool: scans ALL confirmed inscriptions (awaiting_payment + converted)
+  // and propagates BOTH pdfUrl AND photo to the linked member doc + SQLite cache.
+  // Safe to run multiple times — only writes fields that are missing.
   router.post('/api/inscriptions/fix-pdf-urls', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
-      const snap = await db.collection('pending_members')
-        .where('status', '==', 'awaiting_payment')
-        .get();
+      // Fetch all confirmed inscriptions across both statuses
+      const [snap1, snap2] = await Promise.all([
+        db.collection('pending_members').where('status', '==', 'awaiting_payment').get(),
+        db.collection('pending_members').where('status', '==', 'converted').get(),
+      ]);
+      const allDocs = [...snap1.docs, ...snap2.docs];
 
       const fixed = [], skipped = [], errors = [];
 
-      for (const doc of snap.docs) {
+      for (const doc of allDocs) {
         const ins = doc.data();
-        if (!ins.pdfUrl || !ins.memberId) {
-          skipped.push({ id: doc.id, reason: !ins.pdfUrl ? 'no pdfUrl' : 'no memberId' });
+        if (!ins.memberId) {
+          skipped.push({ id: doc.id, reason: 'no memberId' });
           continue;
         }
+
         try {
           const memberRef = db.collection('members').doc(ins.memberId);
           const memberDoc = await memberRef.get();
           if (!memberDoc.exists) {
-            skipped.push({ id: doc.id, memberId: ins.memberId, reason: 'member not found' });
+            skipped.push({ id: doc.id, memberId: ins.memberId, reason: 'member not found in Firebase' });
             continue;
           }
-          if (memberDoc.data().pdfUrl) {
-            skipped.push({ id: doc.id, memberId: ins.memberId, reason: 'already has pdfUrl' });
-            continue;
-          }
-          // Propagate to Firebase member doc
-          await memberRef.update({ pdfUrl: ins.pdfUrl });
-          // Propagate to SQLite members_cache
-          try {
-            lc.db.prepare(`UPDATE members_cache SET pdf_url=? WHERE id=?`).run(ins.pdfUrl, ins.memberId);
-          } catch (_) {}
+
+          const memberData = memberDoc.data();
           const name = `${ins.prenom || ''} ${ins.nom || ''}`.trim();
-          console.log(`[fix-pdf-urls] ✅ ${name} → ${ins.memberId}`);
-          fixed.push({ inscriptionId: doc.id, memberId: ins.memberId, name, pdfUrl: ins.pdfUrl });
+          const updates = {};
+          const sqliteUpdates = [];
+
+          // ── PDF ──────────────────────────────────────────────────────────
+          if (ins.pdfUrl && !memberData.pdfUrl) {
+            updates.pdfUrl = ins.pdfUrl;
+            sqliteUpdates.push(() =>
+              lc.db.prepare(`UPDATE members_cache SET pdf_url=? WHERE id=?`).run(ins.pdfUrl, ins.memberId)
+            );
+          }
+
+          // ── PHOTO ────────────────────────────────────────────────────────
+          // Prefer Firebase Storage URL (photoUrl), fall back to base64 (profilePicture)
+          const photoSource = ins.photoUrl ||
+            (ins.profilePicture && ins.profilePicture.length < 200000 ? ins.profilePicture : null);
+
+          if (photoSource && !memberData.photo) {
+            updates.photo = photoSource;
+            sqliteUpdates.push(() =>
+              lc.db.prepare(`UPDATE members_cache SET photo=? WHERE id=?`).run(photoSource, ins.memberId)
+            );
+          }
+
+          if (Object.keys(updates).length === 0) {
+            skipped.push({ id: doc.id, memberId: ins.memberId, name, reason: 'already complete' });
+            continue;
+          }
+
+          // Write to Firebase member doc
+          await memberRef.update(updates);
+          // Write to SQLite members_cache
+          for (const fn of sqliteUpdates) { try { fn(); } catch (_) {} }
+
+          const whatFixed = Object.keys(updates).join('+');
+          console.log(`[fix-pdf-urls] ✅ ${name} — fixed: ${whatFixed}`);
+          fixed.push({ inscriptionId: doc.id, memberId: ins.memberId, name, fixed: whatFixed });
+
         } catch (e) {
           errors.push({ id: doc.id, error: e.message });
         }
       }
+
+      // Invalidate member cache so dashboard gets fresh data
+      if (apiCache?.members) invalidateCache(apiCache.members);
 
       res.json({
         ok: true,
