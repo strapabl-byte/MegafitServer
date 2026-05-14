@@ -589,7 +589,28 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
     try {
       const { pdfUrl } = req.body;
       if (!pdfUrl) return res.status(400).json({ error: 'pdfUrl required' });
-      await db.collection('pending_members').doc(req.params.id).update({ pdfUrl, pdfUploadedAt: admin.firestore.FieldValue.serverTimestamp() });
+
+      const insRef = db.collection('pending_members').doc(req.params.id);
+      await insRef.update({ pdfUrl, pdfUploadedAt: admin.firestore.FieldValue.serverTimestamp() });
+
+      // ✅ Write-through to SQLite pending_cache
+      try {
+        lc.db.prepare(`UPDATE pending_cache SET pdf_url=? WHERE id=?`).run(pdfUrl, req.params.id);
+      } catch (_) {}
+
+      // ✅ Propagate pdfUrl → member doc + members_cache (if inscription already confirmed)
+      try {
+        const insDoc = await insRef.get();
+        const insData = insDoc.data();
+        if (insData?.memberId) {
+          await db.collection('members').doc(insData.memberId).update({ pdfUrl });
+          lc.db.prepare(`UPDATE members_cache SET pdf_url=? WHERE id=?`).run(pdfUrl, insData.memberId);
+          console.log(`[set-pdf] ✅ pdfUrl propagated to member ${insData.memberId}`);
+        }
+      } catch (propErr) {
+        console.warn('[set-pdf] pdfUrl propagation to member failed (non-blocking):', propErr.message);
+      }
+
       invalidateCache(apiCache.inscriptions);
       res.json({ ok: true });
     } catch (err) {
@@ -633,8 +654,9 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
           periodFrom: ins.periodFrom || null,
           location: gymId,
           contractNumber: ins.contractNumber || null,
-          inscriptionId: insId, // ✅ CRITICAL: link member to original inscription
-          balance: ins.totals?.balance || 0, // ✅ CRITICAL: transfer balance
+          inscriptionId: insId,
+          balance: ins.totals?.balance || 0,
+          pdfUrl: ins.pdfUrl || null,        // ✅ carry pdfUrl from inscription to member
           source: 'inscription_form',
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
           confirmedBy: req.user?.preferred_username || 'Admin'
@@ -1017,6 +1039,60 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
     }
   });
 
+
+  // ── POST /api/inscriptions/fix-pdf-urls ──────────────────────────────────
+  // One-time repair: finds confirmed inscriptions (awaiting_payment) that have
+  // a pdfUrl but whose linked member doc does NOT have pdfUrl.
+  // Propagates pdfUrl → member doc + members_cache.
+  // Safe to run multiple times — skips members that already have pdfUrl.
+  router.post('/api/inscriptions/fix-pdf-urls', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const snap = await db.collection('pending_members')
+        .where('status', '==', 'awaiting_payment')
+        .get();
+
+      const fixed = [], skipped = [], errors = [];
+
+      for (const doc of snap.docs) {
+        const ins = doc.data();
+        if (!ins.pdfUrl || !ins.memberId) {
+          skipped.push({ id: doc.id, reason: !ins.pdfUrl ? 'no pdfUrl' : 'no memberId' });
+          continue;
+        }
+        try {
+          const memberRef = db.collection('members').doc(ins.memberId);
+          const memberDoc = await memberRef.get();
+          if (!memberDoc.exists) {
+            skipped.push({ id: doc.id, memberId: ins.memberId, reason: 'member not found' });
+            continue;
+          }
+          if (memberDoc.data().pdfUrl) {
+            skipped.push({ id: doc.id, memberId: ins.memberId, reason: 'already has pdfUrl' });
+            continue;
+          }
+          // Propagate to Firebase member doc
+          await memberRef.update({ pdfUrl: ins.pdfUrl });
+          // Propagate to SQLite members_cache
+          try {
+            lc.db.prepare(`UPDATE members_cache SET pdf_url=? WHERE id=?`).run(ins.pdfUrl, ins.memberId);
+          } catch (_) {}
+          const name = `${ins.prenom || ''} ${ins.nom || ''}`.trim();
+          console.log(`[fix-pdf-urls] ✅ ${name} → ${ins.memberId}`);
+          fixed.push({ inscriptionId: doc.id, memberId: ins.memberId, name, pdfUrl: ins.pdfUrl });
+        } catch (e) {
+          errors.push({ id: doc.id, error: e.message });
+        }
+      }
+
+      res.json({
+        ok: true,
+        summary: `${fixed.length} fixed, ${skipped.length} skipped, ${errors.length} errors`,
+        fixed, skipped, errors,
+      });
+    } catch (err) {
+      res.status(500).json({ error: 'fix-pdf-urls failed', detail: err.message });
+    }
+  });
 
   router.delete('/api/inscriptions/:id', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
