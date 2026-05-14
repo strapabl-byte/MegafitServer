@@ -43,8 +43,33 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       }
       const searchQuery = req.query.search || '';
 
-      // 1️⃣ Load from disk
+      // 1️⃣ Load from SQLite disk cache
       let finalMembers = lc.getMembers(gymId);
+
+      // 1b️⃣ Firebase fallback when SQLite is empty (e.g. after Render restart)
+      // This re-hydrates the cache so subsequent requests are fast.
+      const REAL_GYM_IDS = ['dokarat', 'marjane', 'casa1', 'casa2'];
+      const gymsToCheck = gymId === 'all' || gymId === 'none' ? [] : [gymId].filter(g => REAL_GYM_IDS.includes(g));
+      if (finalMembers.length === 0 && gymsToCheck.length > 0) {
+        console.log(`[Members] SQLite empty for ${gymId} — Firebase fallback (re-hydrating cache)...`);
+        try {
+          const fbSnap = await db.collection('members')
+            .where('location', '==', gymId)
+            .where('status', '!=', 'deleted')
+            .orderBy('status')
+            .orderBy('createdAt', 'desc')
+            .limit(2000)
+            .get();
+          if (!fbSnap.empty) {
+            const fbMembers = fbSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+            lc.upsertMembers(gymId, fbMembers);
+            finalMembers = lc.getMembers(gymId);
+            console.log(`[Members] ✅ Firebase fallback: re-cached ${fbMembers.length} members for ${gymId}`);
+          }
+        } catch (fbErr) {
+          console.error('[Members] Firebase fallback failed:', fbErr.message);
+        }
+      }
 
       // 2️⃣ Merge pending members who have a signed PDF contract
       const pdfMembers = lc.getPendingWithPdf(gymId);
@@ -115,14 +140,14 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       // 3️⃣ Local search (zero Firebase reads)
       if (searchQuery) {
         const q = searchQuery.toLowerCase();
-        finalMembers = finalMembers.filter(m =>
-          (m.fullName || m.full_name || '').toLowerCase().includes(q) ||
+        finalMembers = finalMembers.filter(m => 
+          (m.full_name || m.fullName || '').toLowerCase().includes(q) ||
           (m.phone || '').includes(q) ||
-          (m.cin || '').toLowerCase().includes(q)
+          (m.contract_number || m.contractNumber || '').toString().includes(q)
         );
       }
-
-      // 4️⃣ Normalize SQLite snake_case → camelCase (applies to ALL gyms)
+      
+      // 4️️⃣ Normalize SQLite snake_case → camelCase (applies to ALL gyms)
       finalMembers = finalMembers.map(m => ({
         ...m,
         fullName:         m.fullName         || m.full_name         || 'Inconnu',
