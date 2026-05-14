@@ -471,6 +471,80 @@ app.post('/admin/clear-pending-cache', (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ADMIN: Fix missing member balances from inscription data
+// POST /admin/fix-member-balances
+// Scans all pending_members with a balance > 0 and ensures the linked member
+// document in Firebase + SQLite has the correct balance.
+// Safe to run multiple times — only updates members with balance = 0 or missing.
+// ─────────────────────────────────────────────────────────────────────────────
+app.post('/admin/fix-member-balances', async (req, res) => {
+  const secret   = req.headers['x-inject-secret'];
+  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
+  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+
+  try {
+    const snap = await db.collection('pending_members')
+      .where('status', 'in', ['awaiting_payment', 'converted'])
+      .get();
+
+    const fixed   = [];
+    const skipped = [];
+    const errors  = [];
+
+    for (const doc of snap.docs) {
+      const ins = doc.data();
+      const inscriptionBalance = ins.totals?.balance ?? 0;
+
+      // Only process inscriptions that have a real outstanding balance
+      if (Number(inscriptionBalance) <= 0) { skipped.push({ id: doc.id, reason: 'no balance in inscription' }); continue; }
+
+      const memberId = ins.memberId;
+      if (!memberId) { skipped.push({ id: doc.id, reason: 'no memberId linked' }); continue; }
+
+      try {
+        const memberRef  = db.collection('members').doc(memberId);
+        const memberSnap = await memberRef.get();
+        if (!memberSnap.exists) { skipped.push({ id: doc.id, memberId, reason: 'member not found in Firebase' }); continue; }
+
+        const memberData    = memberSnap.data();
+        const currentBalance = Number(memberData.balance || 0);
+
+        // Only fix if current balance is 0 (bug) or not set
+        if (currentBalance > 0) { skipped.push({ id: doc.id, memberId, name: memberData.fullName, reason: `already has balance ${currentBalance}` }); continue; }
+
+        // ✅ Fix Firebase
+        await memberRef.update({
+          balance: Number(inscriptionBalance),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        // ✅ Fix SQLite cache
+        const gymId = memberData.location || memberData.gymId || 'dokarat';
+        const updatedSnap = await memberRef.get();
+        lc.upsertMembers(gymId, [{ id: memberId, ...updatedSnap.data() }]);
+
+        fixed.push({
+          memberId,
+          name: memberData.fullName,
+          gymId,
+          balanceFixed: Number(inscriptionBalance),
+          inscriptionId: doc.id,
+        });
+        console.log(`✅ [fix-balances] ${memberData.fullName} → balance set to ${inscriptionBalance} DH`);
+      } catch (memberErr) {
+        errors.push({ inscriptionId: doc.id, error: memberErr.message });
+      }
+    }
+
+    console.log(`[fix-member-balances] Fixed: ${fixed.length}, Skipped: ${skipped.length}, Errors: ${errors.length}`);
+    res.json({ ok: true, fixed, skipped, errors });
+  } catch (err) {
+    console.error('[fix-member-balances] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 
 
