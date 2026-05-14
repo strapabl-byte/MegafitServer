@@ -53,15 +53,16 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       if (finalMembers.length === 0 && gymsToCheck.length > 0) {
         console.log(`[Members] SQLite empty for ${gymId} — Firebase fallback (re-hydrating cache)...`);
         try {
+          // Simple query — just filter by location (existing index, no composite needed)
+          // Filter deleted members in JS to avoid missing-index errors
           const fbSnap = await db.collection('members')
             .where('location', '==', gymId)
-            .where('status', '!=', 'deleted')
-            .orderBy('status')
-            .orderBy('createdAt', 'desc')
             .limit(2000)
             .get();
           if (!fbSnap.empty) {
-            const fbMembers = fbSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+            const fbMembers = fbSnap.docs
+              .map(d => ({ id: d.id, ...d.data() }))
+              .filter(m => m.status !== 'deleted' && !m.deleted && !m.isDeleted);
             lc.upsertMembers(gymId, fbMembers);
             finalMembers = lc.getMembers(gymId);
             console.log(`[Members] ✅ Firebase fallback: re-cached ${fbMembers.length} members for ${gymId}`);
