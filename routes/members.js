@@ -46,29 +46,41 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       // 1️⃣ Load from SQLite disk cache
       let finalMembers = lc.getMembers(gymId);
 
-      // 1b️⃣ Firebase fallback when SQLite is empty (e.g. after Render restart)
-      // This re-hydrates the cache so subsequent requests are fast.
+      // 1b️⃣ Firebase fallback — re-hydrate any gym whose SQLite cache is empty.
+      // Covers ALL 4 gyms individually, including when gymId='all' (super admin).
+      // Runs in parallel — fast, and only fires when a gym cache is actually empty.
       const REAL_GYM_IDS = ['dokarat', 'marjane', 'casa1', 'casa2'];
-      const gymsToCheck = gymId === 'all' || gymId === 'none' ? [] : [gymId].filter(g => REAL_GYM_IDS.includes(g));
-      if (finalMembers.length === 0 && gymsToCheck.length > 0) {
-        console.log(`[Members] SQLite empty for ${gymId} — Firebase fallback (re-hydrating cache)...`);
+      // Determine which gyms to check based on the request
+      const gymsToRehydrate = gymId === 'all'
+        ? REAL_GYM_IDS.filter(g => lc.getMembers(g).length === 0)
+        : REAL_GYM_IDS.includes(gymId) && finalMembers.length === 0 ? [gymId] : [];
+
+      if (gymsToRehydrate.length > 0) {
+        console.log(`[Members] SQLite empty for: [${gymsToRehydrate.join(', ')}] — Firebase fallback...`);
         try {
-          // Simple query — just filter by location (existing index, no composite needed)
-          // Filter deleted members in JS to avoid missing-index errors
-          const fbSnap = await db.collection('members')
-            .where('location', '==', gymId)
-            .limit(2000)
-            .get();
-          if (!fbSnap.empty) {
-            const fbMembers = fbSnap.docs
-              .map(d => ({ id: d.id, ...d.data() }))
-              .filter(m => m.status !== 'deleted' && !m.deleted && !m.isDeleted);
-            lc.upsertMembers(gymId, fbMembers);
-            finalMembers = lc.getMembers(gymId);
-            console.log(`[Members] ✅ Firebase fallback: re-cached ${fbMembers.length} members for ${gymId}`);
-          }
+          await Promise.all(gymsToRehydrate.map(async (gid) => {
+            try {
+              const fbSnap = await db.collection('members')
+                .where('location', '==', gid)
+                .limit(2000)
+                .get();
+              if (!fbSnap.empty) {
+                const fbMembers = fbSnap.docs
+                  .map(d => ({ id: d.id, ...d.data() }))
+                  .filter(m => m.status !== 'deleted' && !m.deleted && !m.isDeleted);
+                lc.upsertMembers(gid, fbMembers);
+                console.log(`[Members] ✅ Re-cached ${fbMembers.length} members for ${gid}`);
+              } else {
+                console.log(`[Members] ℹ️  No members found in Firebase for ${gid}`);
+              }
+            } catch (e) {
+              console.error(`[Members] Firebase fallback failed for ${gid}:`, e.message);
+            }
+          }));
+          // Re-read from SQLite now that all gyms are populated
+          finalMembers = lc.getMembers(gymId);
         } catch (fbErr) {
-          console.error('[Members] Firebase fallback failed:', fbErr.message);
+          console.error('[Members] Firebase fallback error:', fbErr.message);
         }
       }
 
