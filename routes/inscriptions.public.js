@@ -206,6 +206,10 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
         });
       }
 
+      // 🛑 Strip large base64 blobs FIRST — needed before dedup AND before Firestore write
+      // ⚠️ MUST be here (outer scope) so profilePicture is accessible AFTER the transaction
+      const { profilePicture, memberSignature, chequePhoto, chequePhotoVerso, ...safeData } = data;
+
       // 🛡️ DEDUPLICATION CHECK
       const recentSnap = await db.collection('pending_members')
         .where('gymId', '==', normalizedGymId)
@@ -220,6 +224,23 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
         const lastCreated = latest.createdAt?.toDate ? latest.createdAt.toDate() : new Date(0);
         if (Date.now() - lastCreated.getTime() < 2 * 60 * 1000) {
           console.warn(`[DEDUP] /public/inscriptions: Found duplicate for ${data.prenom} ${data.nom}`);
+          // ✅ Still sync photo to SQLite on dedup — it was never stored on the first (failed) attempt
+          try {
+            lc.setPending({
+              id: latest.id,
+              gymId: normalizedGymId,
+              nom: data.nom, prenom: data.prenom,
+              subscriptionName: data.subscriptionName,
+              contractNumber: latest.contractNumber,
+              periodFrom: data.periodFrom || null, periodTo: data.periodTo || null,
+              totals: data.totals, payments: data.payments,
+              cin: data.cin || null, adresse: data.adresse || null, ville: data.ville || null,
+              email: data.email || null, commercial: data.commercial || null,
+              telephone: data.telephone || null, dateNaissance: data.dateNaissance || null,
+              profilePicture: profilePicture || data.photoUrl || null,
+              createdAt: { _seconds: Math.floor(Date.now() / 1000) }
+            });
+          } catch (_) {}
           return res.json({ id: latest.id, contractNumber: latest.contractNumber, ok: true, alreadySubmitted: true });
         }
       }
@@ -234,9 +255,7 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
         const finalNum = nextNum.toString().padStart(6, '0');
         const newDocRef = db.collection('pending_members').doc();
 
-        // 🛑 Strip large base64 blobs — Firestore 1MB doc limit
-        const { profilePicture, memberSignature, chequePhoto, chequePhotoVerso, ...safeData } = data;
-
+        // safeData already stripped at top of handler (profilePicture, memberSignature etc. removed)
         t.set(newDocRef, {
           ...safeData,
           contractNumber: finalNum,
