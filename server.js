@@ -605,8 +605,10 @@ app.use('/api/sales',       require('./routes/sales')(deps));
 
 const analyticsRouter = require('./routes/analytics')(deps);
 app.use('/', analyticsRouter); // mounts /api/live-entries, /api/live-count, /api/analytics/*
-app.use('/',                require('./routes/courses')(deps));     // /api/courses, /api/coaches, /public/courses, etc.
-app.use('/',                require('./routes/inscriptions')(deps));// /public/* & /api/inscriptions
+app.use('/',                require('./routes/courses')(deps));          // /api/courses, /api/coaches, /public/courses
+app.use('/',                require('./routes/inscriptions.public')(deps));    // /public/inscriptions, /public/members/search, /public/debtors, /public/settle-balance
+app.use('/',                require('./routes/inscriptions.dashboard')(deps)); // /api/inscriptions (GET/PATCH/confirm/delete/set-pdf)
+app.use('/',                require('./routes/inscriptions.admin')(deps));     // /recover-register, /recover-members, /api/inscriptions/fix-pdf-urls
 app.use('/',                require('./routes/config')(deps));      // /public/pass, /api/chat, config
 app.use('/',                require('./routes/activity')(deps));    // /api/activity/logs
 app.use('/',                require('./routes/recruitment')(deps)); // /api/recruitment/applications
