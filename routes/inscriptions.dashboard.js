@@ -222,6 +222,7 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
         if (ins.memberId) throw new Error('Un membre est déjà associé à cette inscription.');
 
         const gymId = ins.gymId || 'dokarat';
+        const sqliteEntry = lc.getPendingById(insId);
 
         // Resolve plan
         const sName = (ins.subscriptionName || '').toLowerCase();
@@ -235,16 +236,22 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
 
         const memberData = {
           fullName: `${ins.prenom || ''} ${ins.nom || ''}`.trim(),
-          phone: ins.telephone || null,
+          phone: ins.telephone || sqliteEntry?.telephone || null,
           plan,
-          subscriptionName: ins.subscriptionName || null,
-          expiresOn: ins.periodTo || null,
-          periodFrom: ins.periodFrom || null,
+          subscriptionName: ins.subscriptionName || sqliteEntry?.subscriptionName || null,
+          birthday: ins.dateNaissance || sqliteEntry?.date_naissance || null,
+          email: ins.email || sqliteEntry?.email || null,
+          cin: ins.cin || sqliteEntry?.cin || null,
+          adresse: ins.adresse || sqliteEntry?.adresse || null,
+          ville: ins.ville || sqliteEntry?.ville || null,
+          expiresOn: ins.periodTo || sqliteEntry?.period_to || null,
+          periodFrom: ins.periodFrom || sqliteEntry?.period_from || null,
           location: gymId,
-          contractNumber: ins.contractNumber || null,
+          contractNumber: ins.contractNumber || sqliteEntry?.contract_number || null,
           inscriptionId: insId,
-          balance: ins.totals?.balance || 0,
-          pdfUrl: ins.pdfUrl || null,
+          balance: ins.totals?.balance || sqliteEntry?.balance || 0,
+          pdfUrl: ins.pdfUrl || sqliteEntry?.pdf_url || null,
+          commercial: ins.commercial || sqliteEntry?.commercial || null,
           source: 'inscription_form',
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
           confirmedBy: req.user?.preferred_username || 'Admin'
@@ -265,9 +272,11 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
         const newMemberRef = db.collection('members').doc();
         const qrToken = crypto.randomBytes(16).toString('hex');
 
-        // 🖼️ Photo: prefer Storage URL, fall back to base64 from tablet
+        // 🖼️ Photo: prefer Storage URL, fall back to base64 from SQLite cache, then Firestore
         const memberPhoto = ins.photoUrl ||
-          (ins.profilePicture && ins.profilePicture.length < 200000 ? ins.profilePicture : null) || null;
+          sqliteEntry?.profile_picture ||
+          (ins.profilePicture && ins.profilePicture.length < 200000 ? ins.profilePicture : null) || 
+          null;
 
         t.set(newMemberRef, { ...memberData, qrToken, status: 'Active', photo: memberPhoto });
         t.update(insRef, { status: 'awaiting_payment', memberId: newMemberRef.id });

@@ -247,17 +247,18 @@ module.exports = function inscriptionsAdminRouter({ db, admin, lc, apiCache, inv
             expiresOn = start.toISOString().split('T')[0];
           }
 
+          const sqliteEntry = lc.getPendingById(insId);
           const memberData = {
-            fullName, phone: ins.telephone || null, plan,
-            subscriptionName: ins.subscriptionName || null,
-            birthday: ins.dateNaissance || null,
-            expiresOn, periodFrom: ins.periodFrom || null, periodTo: expiresOn,
-            photo: (ins.profilePicture && !ins.profilePicture.startsWith('data:image')) ? ins.profilePicture : null,
-            email: ins.email || null, cin: ins.cin || null,
-            adresse: ins.adresse || null, ville: ins.ville || null,
-            location: insGymId, contractNumber: ins.contractNumber || null,
-            commercial: ins.commercial || null, pdfUrl: ins.pdfUrl || null,
-            balance: ins.totals?.balance || 0, inscriptionId: insId,
+            fullName, phone: ins.telephone || sqliteEntry?.telephone || null, plan,
+            subscriptionName: ins.subscriptionName || sqliteEntry?.subscriptionName || null,
+            birthday: ins.dateNaissance || sqliteEntry?.date_naissance || null,
+            expiresOn, periodFrom: ins.periodFrom || sqliteEntry?.period_from || null, periodTo: expiresOn,
+            photo: ins.photoUrl || sqliteEntry?.profile_picture || (ins.profilePicture && !ins.profilePicture.startsWith('data:image') ? ins.profilePicture : null) || null,
+            email: ins.email || sqliteEntry?.email || null, cin: ins.cin || sqliteEntry?.cin || null,
+            adresse: ins.adresse || sqliteEntry?.adresse || null, ville: ins.ville || sqliteEntry?.ville || null,
+            location: insGymId, contractNumber: ins.contractNumber || sqliteEntry?.contract_number || null,
+            commercial: ins.commercial || sqliteEntry?.commercial || null, pdfUrl: ins.pdfUrl || sqliteEntry?.pdf_url || null,
+            balance: ins.totals?.balance || sqliteEntry?.balance || 0, inscriptionId: insId,
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
             recoveredBy: 'recover-members',
             recoveredAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -497,16 +498,19 @@ module.exports = function inscriptionsAdminRouter({ db, admin, lc, apiCache, inv
           else if (totalMonths >= 6 ) plan = 'Semi-Annual';
           else if (totalMonths >= 3 ) plan = 'Quarterly';
 
+          const sqliteEntry = lc.getPendingById(insId);
           const memberData = {
-            fullName, phone: ins.telephone || null, plan,
-            subscriptionName: ins.subscriptionName || null,
-            birthday: ins.dateNaissance || null,
-            expiresOn: ins.periodTo || null, periodFrom: ins.periodFrom || null, periodTo: ins.periodTo || null,
-            location: insGymId, contractNumber: ins.contractNumber || null,
-            balance: ins.totals?.balance || 0, pdfUrl: ins.pdfUrl || null,
-            photo: ins.photoUrl || (ins.profilePicture && ins.profilePicture.length < 200000 ? ins.profilePicture : null) || null,
-            email: ins.email || null, cin: ins.cin || null,
-            adresse: ins.adresse || null, ville: ins.ville || null, commercial: ins.commercial || null,
+            fullName, phone: ins.telephone || sqliteEntry?.telephone || null, plan,
+            subscriptionName: ins.subscriptionName || sqliteEntry?.subscriptionName || null,
+            birthday: ins.dateNaissance || sqliteEntry?.date_naissance || null,
+            expiresOn: ins.periodTo || sqliteEntry?.period_to || null, 
+            periodFrom: ins.periodFrom || sqliteEntry?.period_from || null, 
+            periodTo: ins.periodTo || sqliteEntry?.period_to || null,
+            location: insGymId, contractNumber: ins.contractNumber || sqliteEntry?.contract_number || null,
+            balance: ins.totals?.balance || sqliteEntry?.balance || 0, pdfUrl: ins.pdfUrl || sqliteEntry?.pdf_url || null,
+            photo: ins.photoUrl || sqliteEntry?.profile_picture || (ins.profilePicture && ins.profilePicture.length < 200000 ? ins.profilePicture : null) || null,
+            email: ins.email || sqliteEntry?.email || null, cin: ins.cin || sqliteEntry?.cin || null,
+            adresse: ins.adresse || sqliteEntry?.adresse || null, ville: ins.ville || sqliteEntry?.ville || null, commercial: ins.commercial || sqliteEntry?.commercial || null,
             inscriptionId: insId, source: 'inscription_form', confirmedBy: 'force-confirm-pending',
           };
 
