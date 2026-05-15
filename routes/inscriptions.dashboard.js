@@ -320,7 +320,11 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
         }
       }
 
-      res.json({ ok: true, member, nextStep: 'Payment recorded and register updated automatically' });
+      // ✅ Invalidate inscription cache — next refreshPendingInscriptions() gets fresh data
+      // Without this, the 30s cache returns stale status:'pending' and the card never disappears
+      invalidateCache(apiCache.inscriptions);
+
+      res.json({ ok: true, member, confirmedId: insId, nextStep: 'Payment recorded and register updated automatically' });
     } catch (err) {
       console.error('Confirm Inscription Error:', err);
       res.status(500).json({ error: 'Failed to confirm inscription' });

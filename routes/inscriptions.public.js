@@ -254,12 +254,16 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
       const finalContractNumber = result.contractNumber;
 
       // 📦 SQLite gets the base64 photo — no size limit
+      // NOTE: setPending() reads data.profilePicture (camelCase) — must use that key!
       lc.setPending({
         id,
         gymId: normalizedGymId,
         nom: data.nom,
         prenom: data.prenom,
         subscriptionName: data.subscriptionName,
+        contractNumber: finalContractNumber,
+        periodFrom: data.periodFrom || null,
+        periodTo: data.periodTo || null,
         totals: data.totals,
         payments: data.payments,
         cin: data.cin || null,
@@ -267,12 +271,9 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
         ville: data.ville || null,
         email: data.email || null,
         commercial: data.commercial || null,
-        contract_number: finalContractNumber,
-        period_from: data.periodFrom || null,
-        period_to: data.periodTo || null,
         telephone: data.telephone || null,
-        date_naissance: data.dateNaissance || null,
-        profile_picture: data.profilePicture || data.photoUrl || null,
+        dateNaissance: data.dateNaissance || null,
+        profilePicture: profilePicture || data.photoUrl || null,  // ✅ camelCase — setPending reads data.profilePicture
         createdAt: { _seconds: Math.floor(Date.now() / 1000) }
       });
 
