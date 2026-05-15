@@ -397,10 +397,10 @@ module.exports = function inscriptionsAdminRouter({ db, admin, lc, apiCache, inv
   });
 
   // ── POST /api/inscriptions/force-confirm-pending ──────────────────────────
-  // Find a pending inscription by phone or name, create the member, mark as awaiting_payment.
-  // Used to recover orphaned inscriptions where the register was updated manually
-  // but the dashboard "Confirmer" was never clicked.
-  // Accepts x-inject-secret for CLI/curl usage.
+  // Find an inscription by phone, name, or direct inscriptionId.
+  // Creates/links the member doc for inscriptions that have no memberId.
+  // Works across ALL statuses: pending, converted, awaiting_payment.
+  // Accepts x-inject-secret for curl/CLI usage.
   router.post('/api/inscriptions/force-confirm-pending', async (req, res) => {
     const secret = req.headers['x-inject-secret'] || req.body?.secret;
     if (secret !== (process.env.SEED_SECRET || 'megafit-seed-2026')) {
@@ -408,151 +408,140 @@ module.exports = function inscriptionsAdminRouter({ db, admin, lc, apiCache, inv
     }
 
     try {
-      const { phone, name, gymId } = req.body;
-      if (!phone && !name) return res.status(400).json({ error: 'phone or name required' });
+      const { phone, name, gymId, inscriptionId } = req.body;
+      if (!phone && !name && !inscriptionId) {
+        return res.status(400).json({ error: 'phone, name, or inscriptionId required' });
+      }
 
-      // Find matching pending inscription
-      let query = db.collection('pending_members')
-        .where('status', '==', 'pending')
-        .where('source', '==', 'web');
-      if (gymId) query = query.where('gymId', '==', gymId);
-      const snap = await query.get();
+      // ── 1. Collect candidate docs ─────────────────────────────────────────
+      let allDocs = [];
+
+      if (inscriptionId) {
+        const directDoc = await db.collection('pending_members').doc(inscriptionId).get();
+        if (!directDoc.exists) return res.status(404).json({ error: `Inscription ${inscriptionId} not found` });
+        allDocs = [directDoc];
+      } else {
+        const [s1, s2, s3] = await Promise.all([
+          db.collection('pending_members').where('status', '==', 'pending'        ).where('source', '==', 'web').get(),
+          db.collection('pending_members').where('status', '==', 'converted'      ).where('source', '==', 'web').get(),
+          db.collection('pending_members').where('status', '==', 'awaiting_payment').where('source', '==', 'web').get(),
+        ]);
+        allDocs = [...s1.docs, ...s2.docs, ...s3.docs];
+      }
 
       const cleanPhone = (phone || '').replace(/\s/g, '');
       const cleanName  = (name  || '').toLowerCase().trim();
 
-      // Find matching docs
-      const matches = snap.docs.filter(doc => {
+      // Matches: no memberId yet, optional gym filter, phone/name match
+      const matches = allDocs.filter(doc => {
         const d = doc.data();
+        if (d.memberId) return false;
+        if (gymId && d.gymId !== gymId) return false;
+        if (inscriptionId) return true;
         const docPhone = (d.telephone || '').replace(/\s/g, '');
         const docName  = `${d.prenom || ''} ${d.nom || ''}`.toLowerCase().trim();
-        if (cleanPhone && docPhone.includes(cleanPhone)) return true;
-        if (cleanName  && docName.includes(cleanName))   return true;
-        return false;
+        return (cleanPhone && docPhone.includes(cleanPhone)) || (cleanName && docName.includes(cleanName));
       });
 
       if (matches.length === 0) {
-        // Also check all statuses (in case already awaiting_payment)
-        const snapAll = await db.collection('pending_members').where('source', '==', 'web').get();
-        const allMatches = snapAll.docs.filter(doc => {
+        const allMatching = allDocs.filter(doc => {
           const d = doc.data();
           const docPhone = (d.telephone || '').replace(/\s/g, '');
           const docName  = `${d.prenom || ''} ${d.nom || ''}`.toLowerCase().trim();
-          if (cleanPhone && docPhone.includes(cleanPhone)) return true;
-          if (cleanName  && docName.includes(cleanName))   return true;
-          return false;
+          return (cleanPhone && docPhone.includes(cleanPhone)) || (cleanName && docName.includes(cleanName));
         });
         return res.json({
-          ok: false,
-          found: 0,
-          message: 'No pending inscription found. Check all statuses:',
-          allStatuses: allMatches.map(d => ({ id: d.id, status: d.data().status, name: `${d.data().prenom} ${d.data().nom}`, phone: d.data().telephone, memberId: d.data().memberId || null }))
+          ok: false, found: 0,
+          message: allMatching.length ? 'Found but already has a memberId.' : 'No inscription found.',
+          allStatuses: allMatching.map(d => ({
+            id: d.id, status: d.data().status,
+            name: `${d.data().prenom} ${d.data().nom}`,
+            phone: d.data().telephone, memberId: d.data().memberId || null,
+          })),
         });
       }
 
+      // ── 2. Process each match ─────────────────────────────────────────────
       const results = [];
 
       for (const docSnap of matches) {
-        const ins    = docSnap.data();
-        const insId  = docSnap.id;
-        const insGymId = ins.gymId || 'dokarat';
+        const ins      = docSnap.data();
+        const insId    = docSnap.id;
+        const insGymId = ins.gymId || gymId || 'dokarat';
         const fullName = `${ins.prenom || ''} ${ins.nom || ''}`.trim();
 
         try {
-          // Dedup check by phone then name
+          // Dedup: check existing member by phone, cin, name
           let existingMember = null;
           const insPhone = (ins.telephone || '').replace(/\s/g, '');
           if (insPhone.length >= 9) {
-            const pSnap = await db.collection('members').where('phone', '==', insPhone).limit(1).get();
-            if (!pSnap.empty) existingMember = pSnap.docs[0];
+            const ps = await db.collection('members').where('phone', '==', insPhone).limit(1).get();
+            if (!ps.empty) existingMember = ps.docs[0];
+          }
+          if (!existingMember && ins.cin && ins.cin.trim().length > 3) {
+            const cs = await db.collection('members').where('cin', '==', ins.cin.trim().toUpperCase()).limit(1).get();
+            if (!cs.empty) existingMember = cs.docs[0];
           }
           if (!existingMember && fullName.length > 4) {
-            const nSnap = await db.collection('members').where('fullName', '==', fullName).limit(1).get();
-            if (!nSnap.empty) existingMember = nSnap.docs[0];
+            const ns = await db.collection('members').where('fullName', '==', fullName).limit(1).get();
+            if (!ns.empty) existingMember = ns.docs[0];
           }
 
+          // Resolve plan
           const sName = (ins.subscriptionName || '').toLowerCase();
-          const monthMatch  = sName.match(/(\d+)\s*mois/);
-          const yearMatch   = sName.match(/(\d+)\s*an/);
-          const totalMonths = monthMatch ? parseInt(monthMatch[1]) : (yearMatch ? parseInt(yearMatch[1]) * 12 : 1);
+          const mm = sName.match(/(\d+)\s*mois/);
+          const ym = sName.match(/(\d+)\s*an/);
+          const totalMonths = mm ? parseInt(mm[1]) : (ym ? parseInt(ym[1]) * 12 : 1);
           let plan = 'Monthly';
           if      (totalMonths >= 12) plan = 'Annual';
-          else if (totalMonths >= 6)  plan = 'Semi-Annual';
-          else if (totalMonths >= 3)  plan = 'Quarterly';
+          else if (totalMonths >= 6 ) plan = 'Semi-Annual';
+          else if (totalMonths >= 3 ) plan = 'Quarterly';
 
           const memberData = {
-            fullName,
-            phone: ins.telephone || null,
-            plan,
+            fullName, phone: ins.telephone || null, plan,
             subscriptionName: ins.subscriptionName || null,
             birthday: ins.dateNaissance || null,
-            expiresOn: ins.periodTo || null,
-            periodFrom: ins.periodFrom || null,
-            periodTo: ins.periodTo || null,
-            location: insGymId,
-            contractNumber: ins.contractNumber || null,
-            balance: ins.totals?.balance || 0,
-            pdfUrl: ins.pdfUrl || null,
+            expiresOn: ins.periodTo || null, periodFrom: ins.periodFrom || null, periodTo: ins.periodTo || null,
+            location: insGymId, contractNumber: ins.contractNumber || null,
+            balance: ins.totals?.balance || 0, pdfUrl: ins.pdfUrl || null,
             photo: ins.photoUrl || (ins.profilePicture && ins.profilePicture.length < 200000 ? ins.profilePicture : null) || null,
-            email: ins.email || null,
-            cin: ins.cin || null,
-            adresse: ins.adresse || null,
-            ville: ins.ville || null,
-            commercial: ins.commercial || null,
-            inscriptionId: insId,
-            source: 'inscription_form',
-            confirmedBy: 'force-confirm-pending',
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            email: ins.email || null, cin: ins.cin || null,
+            adresse: ins.adresse || null, ville: ins.ville || null, commercial: ins.commercial || null,
+            inscriptionId: insId, source: 'inscription_form', confirmedBy: 'force-confirm-pending',
           };
 
           let memberId;
           if (existingMember) {
             memberId = existingMember.id;
             await existingMember.ref.update({ ...memberData, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-            console.log(`[force-confirm] ✅ Updated existing member ${memberId} for ${fullName}`);
           } else {
             const qrToken = crypto.randomBytes(16).toString('hex');
-            const newRef = await db.collection('members').add({ ...memberData, qrToken, status: 'Active' });
-            memberId = newRef.id;
-            console.log(`[force-confirm] ✅ Created new member ${memberId} for ${fullName}`);
+            const ref = await db.collection('members').add({ ...memberData, qrToken, status: 'Active', createdAt: admin.firestore.FieldValue.serverTimestamp() });
+            memberId = ref.id;
           }
 
-          // Update inscription status + memberId
           await docSnap.ref.update({
-            memberId,
-            status: 'awaiting_payment',
+            memberId, status: 'awaiting_payment',
             memberCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
             memberCreatedBy: 'force-confirm-pending',
           });
 
-          // Sync SQLite
-          const memberSnap = await db.collection('members').doc(memberId).get();
-          try { lc.upsertMembers(insGymId, [{ id: memberId, ...memberSnap.data() }]); } catch (_) {}
-
-          // Update pending_cache status in SQLite
+          const mSnap = await db.collection('members').doc(memberId).get();
+          try { lc.upsertMembers(insGymId, [{ id: memberId, ...mSnap.data() }]); } catch (_) {}
           try { lc.db.prepare(`UPDATE pending_cache SET status='awaiting_payment' WHERE id=?`).run(insId); } catch (_) {}
 
-          invalidateCache(apiCache.inscriptions);
+          console.log(`[force-confirm] ✅ ${existingMember ? 'Linked' : 'Created'} member ${memberId} → ${fullName}`);
+          results.push({ ok: true, inscriptionId: insId, memberId, name: fullName, gymId: insGymId, action: existingMember ? 'member_updated' : 'member_created' });
 
-          results.push({
-            ok: true,
-            inscriptionId: insId,
-            memberId,
-            name: fullName,
-            gymId: insGymId,
-            action: existingMember ? 'member_updated' : 'member_created',
-          });
         } catch (e) {
           console.error(`[force-confirm] ❌ ${fullName}:`, e.message);
           results.push({ ok: false, inscriptionId: insId, name: fullName, error: e.message });
         }
       }
 
-      res.json({
-        ok: true,
-        found: matches.length,
-        results,
-      });
+      invalidateCache(apiCache.inscriptions);
+      res.json({ ok: true, found: matches.length, results });
+
     } catch (err) {
       console.error('force-confirm-pending error:', err);
       res.status(500).json({ error: 'force-confirm-pending failed', detail: err.message });
