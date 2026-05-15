@@ -24,6 +24,39 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
     }
   });
 
+  // ── PATCH /api/members/:id/photo (Photo Repair Tool) ───────────────────────
+  router.patch('/:id/photo', verifyAzureToken, async (req, res) => {
+    try {
+      const { photo } = req.body;
+      if (!photo) return res.status(400).json({ error: 'Photo data required' });
+
+      const memberId = req.params.id;
+      const memberRef = db.collection('members').doc(memberId);
+      
+      // Update Firestore
+      await memberRef.update({ 
+        photo, 
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        photoUpdatedBy: req.user?.preferred_username || 'Admin'
+      });
+
+      // Update SQLite Cache
+      try {
+        const memberDoc = await memberRef.get();
+        if (memberDoc.exists) {
+          lc.upsertMembers(memberDoc.data().location || 'dokarat', [{ id: memberId, ...memberDoc.data() }]);
+        }
+      } catch (cacheErr) {
+        console.warn('[photo-repair] SQLite sync failed:', cacheErr.message);
+      }
+
+      res.json({ ok: true, message: 'Photo updated successfully' });
+    } catch (err) {
+      console.error('Photo Repair Error:', err);
+      res.status(500).json({ error: 'Failed to update photo' });
+    }
+  });
+
   // ── GET /api/members ──────────────────────────────────────────────────────
   // 🔒 DISK-ONLY: SQLite on Render disk is the SOLE source of truth.
   // Firebase is NEVER called here. Only add/edit/delete touches Firebase.
