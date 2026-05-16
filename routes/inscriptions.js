@@ -72,6 +72,8 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         reste:      Number(reste) || 0,
         note_reste: note || (reste > 0 ? `Reste: ${reste} DH` : ''),
         source: 'inscription_auto',
+        chequePhoto: chequePhoto || null,
+        chequePhotoBack: chequePhotoBack || null,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         createdBy: 'auto',
       });
@@ -388,6 +390,8 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         telephone: data.telephone || null,
         date_naissance: data.dateNaissance || null,
         profile_picture: data.profilePicture || data.photoUrl || null,
+        chequePhoto: data.chequePhoto || null,
+        chequePhotoVerso: data.chequePhotoVerso || null,
         createdAt: { _seconds: Math.floor(Date.now() / 1000) } 
       });
 
@@ -554,6 +558,8 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         return {
           ...ins,
           profilePicture: ins.profilePicture || sqliteEntry?.profile_picture || null,
+          chequePhoto: ins.chequePhoto || sqliteEntry?.cheque_photo || null,
+          chequePhotoVerso: ins.chequePhotoVerso || sqliteEntry?.cheque_photo_back || null,
           pdfUrl: ins.pdfUrl || sqliteEntry?.pdf_url || null,
         };
       });
@@ -719,6 +725,32 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
           const totalPaid = espece + carte + virement + cheque || Number(ins?.totals?.paid || 0);
 
           if (totalPaid > 0) {
+            // Retrieve cheque photos from SQLite if they were stripped from Firestore
+            const sqliteEntry = lc.getPendingById(insId);
+            const rawChequeRecto = ins?.chequePhoto || sqliteEntry?.cheque_photo;
+            const rawChequeVerso = ins?.chequePhotoVerso || sqliteEntry?.cheque_photo_back;
+
+            let chequeUrl = null, chequeUrlBack = null;
+            if (rawChequeRecto) chequeUrl = await uploadBase64ToStorage(rawChequeRecto, `payments/${member.id}/${Date.now()}_cheque_recto.jpg`);
+            if (rawChequeVerso) chequeUrlBack = await uploadBase64ToStorage(rawChequeVerso, `payments/${member.id}/${Date.now()}_cheque_verso.jpg`);
+
+            // 1. Create a real payment record in Firestore
+            await db.collection('payments').add({
+              memberId: member.id,
+              inscriptionId: insId,
+              gymId,
+              amount: totalPaid,
+              plan: member.plan || 'Monthly',
+              method: carte > 0 ? 'Carte Bancaire' : espece > 0 ? 'Espèces' : virement > 0 ? 'Virement' : 'Chèque',
+              paymentsSplit: { espece, carte, virement, cheque },
+              chequePhoto: chequeUrl,
+              chequePhotoBack: chequeUrlBack,
+              recordedBy: req.user?.preferred_username || 'Admin',
+              type: 'registration',
+              date: new Date().toISOString(),
+              createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+
             const dateStr = new Date().toISOString().slice(0, 10);
             const method = carte > 0 ? 'Carte Bancaire' : espece > 0 ? 'Espèces' : virement > 0 ? 'Virement' : 'Chèque';
             await autoRegisterCA({
@@ -736,8 +768,10 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
               payments: { espece, carte, virement, cheque },
               reste: Math.max(0, Number(ins?.totals?.total || 0) - totalPaid),
               note: `Inscription N°${ins?.contractNumber || ''} — ${ins?.subscriptionName || ''}`,
+              chequePhoto: chequeUrl,
+              chequePhotoBack: chequeUrlBack,
             });
-            console.log(`💸 Register entry auto-created for ${member.fullName} — ${totalPaid} DH`);
+            console.log(`💸 Payment record & Register entry auto-created for ${member.fullName} — ${totalPaid} DH`);
           }
         } catch (regErr) {
           console.warn('⚠️ Auto-register on confirm failed (non-blocking):', regErr.message);

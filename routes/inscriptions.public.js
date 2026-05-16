@@ -238,6 +238,8 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
               email: data.email || null, commercial: data.commercial || null,
               telephone: data.telephone || null, dateNaissance: data.dateNaissance || null,
               profilePicture: profilePicture || data.photoUrl || null,
+              chequePhoto: chequePhoto || null,
+              chequePhotoVerso: chequePhotoVerso || null,
               createdAt: { _seconds: Math.floor(Date.now() / 1000) }
             });
           } catch (_) {}
@@ -293,6 +295,8 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
         telephone: data.telephone || null,
         dateNaissance: data.dateNaissance || null,
         profilePicture: profilePicture || data.photoUrl || null,  // ✅ camelCase — setPending reads data.profilePicture
+        chequePhoto: chequePhoto || null,
+        chequePhotoVerso: chequePhotoVerso || null,
         createdAt: { _seconds: Math.floor(Date.now() / 1000) }
       });
 

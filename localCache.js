@@ -182,7 +182,9 @@ db.exec(`
     paid REAL,
     balance REAL,
     status TEXT DEFAULT 'pending',
-    pdf_url TEXT
+    pdf_url TEXT,
+    cheque_photo TEXT,
+    cheque_photo_back TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_pending_gym_date ON pending_cache(gym_id, date);
 
@@ -264,6 +266,8 @@ try { db.exec("ALTER TABLE pending_cache ADD COLUMN period_to TEXT;"); } catch (
 try { db.exec("ALTER TABLE pending_cache ADD COLUMN telephone TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE pending_cache ADD COLUMN date_naissance TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE pending_cache ADD COLUMN profile_picture TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE pending_cache ADD COLUMN cheque_photo TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE pending_cache ADD COLUMN cheque_photo_back TEXT;"); } catch (e) {}
 try { db.exec(`
   CREATE TABLE IF NOT EXISTS incidents_cache (
     id TEXT PRIMARY KEY, gym_id TEXT, gym_name TEXT, title TEXT, cause TEXT,
@@ -706,8 +710,8 @@ function setPending(data) {
   try {
     const stmt = db.prepare(`
       INSERT OR REPLACE INTO pending_cache 
-      (id, gym_id, date, nom, prenom, subscriptionName, total, paid, balance, status, pdf_url, totals, payments, cin, adresse, ville, email, commercial, contract_number, period_from, period_to, telephone, date_naissance, profile_picture)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, gym_id, date, nom, prenom, subscriptionName, total, paid, balance, status, pdf_url, totals, payments, cin, adresse, ville, email, commercial, contract_number, period_from, period_to, telephone, date_naissance, profile_picture, cheque_photo, cheque_photo_back)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const ts = data.createdAt
       ? (data.createdAt._seconds ? new Date(data.createdAt._seconds * 1000) : new Date(data.createdAt))
@@ -738,7 +742,9 @@ function setPending(data) {
       data.periodTo || null,
       data.telephone || null,
       data.dateNaissance || null,
-      data.profilePicture || null
+      data.profilePicture || data.profile_picture || null,
+      data.chequePhoto || data.cheque_photo || null,
+      data.chequePhotoVerso || data.cheque_photo_back || null
     );
   } catch (err) {
     console.error('SQLite setPending error:', err.message);
