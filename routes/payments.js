@@ -348,6 +348,8 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
                 pdfUrl: diskIns.pdfUrl || diskIns.pdf_url || diskMemberData.pdfUrl || null,
                 contractNumber: diskIns.contractNumber || diskIns.contract_number || diskMemberData.contractNumber || null,
                 subscriptionName: diskIns.subscriptionName || diskIns.subscription_name || diskMemberData.plan || null,
+                chequePhoto: diskIns.cheque_photo || diskIns.chequePhoto || null,
+                chequePhotoBack: diskIns.cheque_photo_back || diskIns.chequePhotoVerso || diskIns.chequePhotoBack || null,
               });
             }
           } else {
@@ -382,6 +384,8 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
                       pdfUrl: ins.pdfUrl || m.pdfUrl || null,
                       contractNumber: ins.contractNumber || m.contractNumber || null,
                       subscriptionName: ins.subscriptionName || m.plan || null,
+                      chequePhoto: ins.chequePhoto || ins.cheque_photo || null,
+                      chequePhotoBack: ins.chequePhotoVerso || ins.chequePhotoBack || ins.cheque_photo_back || null,
                     });
                   }
                 }
@@ -420,6 +424,8 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
                     pdfUrl: ins.pdfUrl || m.pdfUrl || null,
                     contractNumber: ins.contractNumber || m.contractNumber || null,
                     subscriptionName: ins.subscriptionName || m.plan || null,
+                    chequePhoto: ins.chequePhoto || ins.cheque_photo || null,
+                    chequePhotoBack: ins.chequePhotoVerso || ins.chequePhotoBack || ins.cheque_photo_back || null,
                   });
                 }
               }
@@ -861,6 +867,41 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
 
       if (!chequePhoto && !chequePhotoBack) {
         return res.status(400).json({ error: 'At least one photo (chequePhoto or chequePhotoBack) is required' });
+      }
+
+      if (paymentId.startsWith('reg-')) {
+        const inscriptionId = paymentId.replace('reg-', '');
+        const inscriptionRef = db.collection('pending_members').doc(inscriptionId);
+        const insSnap = await inscriptionRef.get();
+        if (!insSnap.exists) return res.status(404).json({ error: 'Payment not found (Virtual inscription not found)' });
+
+        const ts  = Date.now();
+        const mid = memberId || insSnap.data().memberId || 'unknown';
+        const update = {};
+
+        if (chequePhoto) {
+          const url = await uploadBase64ToStorage(chequePhoto, `payments/${mid}/${ts}_cheque_recto.jpg`);
+          update.chequePhoto = url;
+        }
+        if (chequePhotoBack) {
+          const url = await uploadBase64ToStorage(chequePhotoBack, `payments/${mid}/${ts}_cheque_verso.jpg`);
+          update.chequePhotoBack = url;
+        }
+
+        update.chequePhotoUpdatedAt = admin.firestore.FieldValue.serverTimestamp();
+        update.chequePhotoUpdatedBy = req.user?.preferred_username || req.user?.name || 'Admin';
+        await inscriptionRef.update(update);
+
+        // Also update local SQLite pending cache so it's instantly synchronized!
+        try {
+          if (lc.updatePendingChequePhotos) {
+            lc.updatePendingChequePhotos(inscriptionId, update.chequePhoto, update.chequePhotoBack);
+          }
+        } catch (sqliteErr) {
+          console.error('Failed to update SQLite pending cache:', sqliteErr);
+        }
+
+        return res.json({ ok: true, chequePhoto: update.chequePhoto || null, chequePhotoBack: update.chequePhotoBack || null });
       }
 
       const paymentRef = db.collection('payments').doc(paymentId);

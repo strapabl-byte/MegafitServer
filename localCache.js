@@ -760,6 +760,15 @@ function updatePendingStatus(id, newStatus) {
   }
 }
 
+function updatePendingChequePhotos(id, chequePhoto, chequePhotoBack) {
+  if (!id) return;
+  try {
+    db.prepare(`UPDATE pending_cache SET cheque_photo = ?, cheque_photo_back = ? WHERE id = ?`).run(chequePhoto, chequePhotoBack, id);
+  } catch(err) {
+    console.error('SQLite updatePendingChequePhotos error:', err.message);
+  }
+}
+
 function getPending(gymId, timeFilter = 'day') {
   try {
     let dateModifier = '-1 day'; // default to last 24h
@@ -934,7 +943,7 @@ module.exports = {
   // meta
   getMeta, setMeta, getLastSync, setLastSync,
   // pending (auralix)
-  setPending, updatePendingStatus, getPending, getPendingWithPdf, getPendingById,
+  setPending, updatePendingStatus, updatePendingChequePhotos, getPending, getPendingWithPdf, getPendingById,
   // incidents cache
   upsertIncidents, getIncidents, resolveIncidentCache,
   // kids courses
