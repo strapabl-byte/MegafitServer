@@ -299,8 +299,21 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
 
         if (!dupQuery.empty) {
           const existing = dupQuery.docs[0];
+          const existingData = existing.data();
+          const newBalance = Number(existingData.balance || 0) + Number(memberData.balance || 0);
+
+          t.update(existing.ref, {
+            plan: memberData.plan,
+            subscriptionName: memberData.subscriptionName || existingData.subscriptionName,
+            expiresOn: memberData.expiresOn || existingData.expiresOn,
+            periodFrom: memberData.periodFrom || existingData.periodFrom,
+            balance: newBalance,
+            contractNumber: memberData.contractNumber || existingData.contractNumber,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+
           t.update(insRef, { status: 'awaiting_payment', memberId: existing.id });
-          return { member: { id: existing.id, ...existing.data() }, alreadyExisted: true };
+          return { member: { id: existing.id, ...existingData, plan: memberData.plan, expiresOn: memberData.expiresOn, balance: newBalance }, alreadyExisted: true };
         }
 
         const newMemberRef = db.collection('members').doc();
@@ -321,6 +334,11 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
       const member = result.member;
       const gymId = member.location || 'dokarat';
 
+      // Fix FieldValue for SQLite caching
+      if (member.createdAt && typeof member.createdAt === 'object' && !member.createdAt.toDate) {
+        member.createdAt = new Date().toISOString();
+      }
+
       // ✅ Instant SQLite member cache update
       try {
         lc.upsertMembers(gymId, [member]);
@@ -330,7 +348,6 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
       }
 
       // ✅ Auto-register: if paid at inscription, write to daily register immediately
-      if (!result.alreadyExisted) {
         try {
           const ins = await db.collection('pending_members').doc(insId).get().then(d => d.data());
           const espece   = Number(ins?.payments?.espece   || 0);
@@ -389,11 +406,13 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
         } catch (regErr) {
           console.warn('⚠️ Auto-register on confirm failed (non-blocking):', regErr.message);
         }
-      }
 
       // ✅ Invalidate inscription cache — next refreshPendingInscriptions() gets fresh data
       // Without this, the 30s cache returns stale status:'pending' and the card never disappears
       invalidateCache(apiCache.inscriptions);
+      if (lc && typeof lc.updatePendingStatus === 'function') {
+        lc.updatePendingStatus(insId, 'awaiting_payment');
+      }
 
       res.json({ ok: true, member, confirmedId: insId, nextStep: 'Payment recorded and register updated automatically' });
     } catch (err) {

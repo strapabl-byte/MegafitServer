@@ -12,7 +12,7 @@ module.exports = function coursesRouter({ db, admin }) {
   async function getCoursesWithCounts(weekday, gymId) {
     let query = db.collection('courses');
     if (gymId && gymId !== 'all') query = query.where('gymId', '==', gymId);
-    
+
     const snap = await query.get();
     return Promise.all(snap.docs.map(async (doc) => {
       const data = doc.data();
@@ -25,20 +25,20 @@ module.exports = function coursesRouter({ db, admin }) {
   router.get('/api/courses', verifyAzureToken, async (req, res) => {
     try {
       const weekday = req.query.weekday !== undefined ? parseInt(req.query.weekday) : new Date().getDay();
-      
+
       const isAdmin = req.isAdmin;
       let gymId = req.query.gymId;
 
       // 🔒 SECURITY: Restrict non-admins to their assigned gym
       if (!isAdmin) {
-          const assigned = req.assignedGyms?.[0];
-          if (assigned && assigned !== 'all') {
-              gymId = assigned;
-          } else {
-              gymId = 'none';
-          }
+        const assigned = req.assignedGyms?.[0];
+        if (assigned && assigned !== 'all') {
+          gymId = assigned;
+        } else {
+          gymId = 'none';
+        }
       } else if (!gymId) {
-          gymId = 'all';
+        gymId = 'all';
       }
       res.json(await getCoursesWithCounts(weekday, gymId));
     } catch (err) { console.error('Failed to fetch courses:', err); res.status(500).json({ error: 'Failed to fetch courses' }); }
@@ -55,15 +55,15 @@ module.exports = function coursesRouter({ db, admin }) {
     try {
       const { title, coach, days, time, capacity, gymId } = req.body;
       if (!title || !coach || !days || !time || !gymId) return res.status(400).json({ error: 'Missing fields' });
-      
+
       // Security check
       if (!req.hasAccessToGym(gymId)) return res.status(403).json({ error: 'Unauthorized for this gym' });
 
-      const docRef = await db.collection('courses').add({ 
-        title, coach, days, time, capacity: Number(capacity) || 20, 
+      const docRef = await db.collection('courses').add({
+        title, coach, days, time, capacity: Number(capacity) || 20,
         gymId,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(), 
-        createdBy: req.user?.preferred_username || 'Admin' 
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdBy: req.user?.preferred_username || 'Admin'
       });
       const snap = await docRef.get();
       res.json({ id: docRef.id, ...snap.data(), reserved: 0 });
@@ -73,7 +73,7 @@ module.exports = function coursesRouter({ db, admin }) {
   router.put('/api/courses/:id', verifyAzureToken, async (req, res) => {
     try {
       const allowed = ['title', 'coach', 'days', 'time', 'capacity'];
-      const update  = Object.fromEntries(allowed.filter(k => req.body[k] !== undefined).map(k => [k, k === 'capacity' ? Number(req.body[k]) : req.body[k]]));
+      const update = Object.fromEntries(allowed.filter(k => req.body[k] !== undefined).map(k => [k, k === 'capacity' ? Number(req.body[k]) : req.body[k]]));
       update.updatedAt = admin.firestore.FieldValue.serverTimestamp();
       const ref = db.collection('courses').doc(req.params.id);
       await ref.update(update);
@@ -113,7 +113,7 @@ module.exports = function coursesRouter({ db, admin }) {
       const gymId = req.query.gymId || (req.assignedGyms.includes('all') ? null : req.assignedGyms[0]);
       let query = db.collection('coaches');
       if (gymId && gymId !== 'all') query = query.where('gymId', '==', gymId);
-      
+
       const snap = await query.orderBy('createdAt', 'desc').get();
       res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     } catch (err) { res.status(500).json({ error: 'Failed to fetch coaches' }); }
@@ -123,17 +123,17 @@ module.exports = function coursesRouter({ db, admin }) {
     try {
       const { name, surname, specialty, phone, email, hireDate, bio, photo, gymId } = req.body;
       if (!name || !surname || !specialty || !gymId) return res.status(400).json({ error: 'name, surname, specialty and gymId required' });
-      
+
       if (!req.hasAccessToGym(gymId)) return res.status(403).json({ error: 'Unauthorized for this gym' });
 
       const qrToken = crypto.randomBytes(16).toString('hex');
-      const docRef  = await db.collection('coaches').add({ 
-        name, surname, specialty, phone: phone || null, email: email || null, 
-        hireDate: hireDate || null, bio: bio || null, photo: photo || null, 
+      const docRef = await db.collection('coaches').add({
+        name, surname, specialty, phone: phone || null, email: email || null,
+        hireDate: hireDate || null, bio: bio || null, photo: photo || null,
         gymId,
-        qrToken, 
-        createdAt: admin.firestore.FieldValue.serverTimestamp(), 
-        createdBy: req.user?.preferred_username || 'Admin' 
+        qrToken,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdBy: req.user?.preferred_username || 'Admin'
       });
       const snap = await docRef.get();
       res.json({ id: docRef.id, ...snap.data() });
@@ -143,7 +143,7 @@ module.exports = function coursesRouter({ db, admin }) {
   router.put('/api/coaches/:id', verifyAzureToken, async (req, res) => {
     try {
       const allowed = ['name', 'surname', 'specialty', 'phone', 'email', 'hireDate', 'bio', 'photo'];
-      const update  = Object.fromEntries(allowed.filter(k => req.body[k] !== undefined).map(k => [k, req.body[k]]));
+      const update = Object.fromEntries(allowed.filter(k => req.body[k] !== undefined).map(k => [k, req.body[k]]));
       update.updatedAt = admin.firestore.FieldValue.serverTimestamp();
       const ref = db.collection('coaches').doc(req.params.id);
       await ref.update(update);
