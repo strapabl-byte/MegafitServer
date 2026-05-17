@@ -451,8 +451,6 @@ app.post('/admin/fix-gym-isolation', (req, res) => {
 
 // ── ADMIN: Clear pending_cache for a gym ───────────────────────────────────
 // POST /admin/clear-pending-cache  body: { gymId }
-// Useful when inscriptions are manually deleted from Firestore and we want
-// to force the SQLite cache to clear immediately.
 app.post('/admin/clear-pending-cache', (req, res) => {
   const secret   = req.headers['x-inject-secret'];
   const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
@@ -463,11 +461,48 @@ app.post('/admin/clear-pending-cache', (req, res) => {
 
   try {
     const result = lc.db.prepare('DELETE FROM pending_cache WHERE gym_id = ?').run(gymId);
-    console.log(`🗑️ [clear-pending-cache] Deleted ${result.changes} pending inscriptions for ${gymId}`);
     res.json({ ok: true, deleted: result.changes });
   } catch (err) {
-    console.error('[clear-pending-cache] Error:', err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── ADMIN: Inspect pending_cache for a member (diagnostic) ─────────────────
+// GET /admin/inspect-pending?nom=Maazouzi&secret=megafit-seed-2026
+app.get('/admin/inspect-pending', (req, res) => {
+  const secret   = req.query.secret;
+  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
+  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+
+  const nom = (req.query.nom || '').trim();
+  if (!nom) return res.status(400).json({ error: 'nom query param required' });
+
+  try {
+    // Check which columns exist in pending_cache
+    const cols = lc.db.prepare("PRAGMA table_info(pending_cache)").all().map(c => c.name);
+    const hasPhotoCols = cols.includes('cheque_photo');
+
+    const rows = lc.db.prepare(`SELECT * FROM pending_cache WHERE nom LIKE ?`).all(`%${nom}%`);
+
+    const result = rows.map(r => ({
+      id:               r.id,
+      gym_id:           r.gym_id,
+      nom:              r.nom,
+      prenom:           r.prenom,
+      date:             r.date,
+      status:           r.status,
+      payments:         r.payments,
+      has_cheque_photo_col: hasPhotoCols,
+      cheque_photo:     hasPhotoCols ? (r.cheque_photo ? `✅ YES (${Math.round((r.cheque_photo.length)/1024)}KB)` : '❌ null') : '⚠️ column missing',
+      cheque_photo_back:hasPhotoCols ? (r.cheque_photo_back ? `✅ YES (${Math.round((r.cheque_photo_back.length)/1024)}KB)` : '❌ null') : '⚠️ column missing',
+      profile_picture:  r.profile_picture ? `✅ YES (${Math.round((r.profile_picture.length)/1024)}KB)` : '❌ null',
+      pdf_url:          r.pdf_url || null,
+      all_columns:      cols,
+    }));
+
+    res.json({ found: result.length, rows: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message, stack: err.stack });
   }
 });
 
