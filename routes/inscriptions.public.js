@@ -78,6 +78,18 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
         };
       });
 
+      // ── 🧹 Prune ghost debtors from SQLite on forced refresh ─────────────
+      // Removes test members that were deleted in Firebase but are still
+      // cached locally with balance > 0, causing them to ghost in the list.
+      if (refresh && cached.length > 0) {
+        const freshIds = new Set(result.map(m => m.id));
+        const ghosts = cached.filter(m => !freshIds.has(m.id));
+        if (ghosts.length > 0) {
+          console.log(`[Debtors/Public] 🧹 Pruning ${ghosts.length} ghost(s) from SQLite [${gymId}]: ${ghosts.map(g => g.full_name).join(', ')}`);
+          for (const ghost of ghosts) lc.pruneStaleMember(ghost.id);
+        }
+      }
+
       if (result.length > 0) {
         const byGym = {};
         result.forEach(m => {
