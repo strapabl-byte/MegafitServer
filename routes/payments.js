@@ -635,6 +635,7 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
           amount: Number(amount), plan: plan || 'Monthly',
           date: new Date().toISOString(), method: method || 'Espèces',
           type: 'registration', note: note || '',
+          memberId: insData.memberId || null,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
           recordedBy: req.user?.preferred_username || 'Admin',
         });
@@ -642,6 +643,7 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
         await existingPay.docs[0].ref.update({
           amount: Number(amount), plan: plan || 'Monthly',
           method: method || 'Espèces',
+          memberId: insData.memberId || null,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           recordedBy: req.user?.preferred_username || 'Admin',
         });
@@ -672,10 +674,6 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
           payment_validated: true, 
           updatedAt: admin.firestore.FieldValue.serverTimestamp() 
         };
-        if (insData.memberId) {
-          const latestPay = await db.collection('payments').where('inscriptionId', '==', inscriptionId).orderBy('createdAt', 'desc').limit(1).get();
-          if (!latestPay.empty) await latestPay.docs[0].ref.update({ memberId: insData.memberId });
-        }
         await inscriptionRef.update(updateData);
       }
 
