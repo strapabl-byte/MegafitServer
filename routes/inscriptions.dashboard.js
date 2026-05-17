@@ -161,19 +161,49 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
   // ── PATCH /api/inscriptions/:id ───────────────────────────────────────────
   router.patch('/api/inscriptions/:id', verifyAzureToken, async (req, res) => {
     try {
-      const updateData = { ...req.body, updatedAt: admin.firestore.FieldValue.serverTimestamp() };
-      await db.collection('pending_members').doc(req.params.id).update(updateData);
-      if (req.body.memberId) {
-        const orphans = await db.collection('payments').where('inscriptionId', '==', req.params.id).get();
+      const insId = req.params.id;
+      const body = { ...req.body };
+
+      // 🖼️ If a new profile picture was sent as base64, upload it to Storage
+      // and replace the field with the real URL before saving to Firestore
+      if (body.profilePicture && body.profilePicture.startsWith('data:')) {
+        try {
+          const photoUrl = await uploadBase64ToStorage(
+            body.profilePicture,
+            `members/${insId}/profile_${Date.now()}.jpg`
+          );
+          body.profilePicture = photoUrl;  // swap base64 → Storage URL
+          body.photoUrl = photoUrl;         // also set photoUrl for confirm-time use
+          console.log(`[PATCH /inscriptions] ✅ Profile photo uploaded to Storage: ${photoUrl}`);
+
+          // Write-through to SQLite so confirm picks it up
+          try {
+            lc.db.prepare(`UPDATE pending_cache SET profile_picture = ? WHERE id = ?`).run(photoUrl, insId);
+          } catch (_) {}
+        } catch (photoErr) {
+          console.warn('[PATCH /inscriptions] ⚠️ Photo upload failed (non-blocking):', photoErr.message);
+          delete body.profilePicture; // don't save base64 blob to Firestore
+        }
+      }
+
+      const updateData = { ...body, updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+      await db.collection('pending_members').doc(insId).update(updateData);
+
+      if (body.memberId) {
+        const orphans = await db.collection('payments').where('inscriptionId', '==', insId).get();
         if (!orphans.empty) {
           const batch = db.batch();
-          orphans.forEach(p => batch.update(p.ref, { memberId: req.body.memberId }));
+          orphans.forEach(p => batch.update(p.ref, { memberId: body.memberId }));
           await batch.commit();
         }
       }
+
       invalidateCache(apiCache.inscriptions);
-      res.json({ ok: true });
-    } catch (err) { res.status(500).json({ error: 'Failed to update inscription' }); }
+      res.json({ ok: true, photoUrl: body.photoUrl || null });
+    } catch (err) {
+      console.error('PATCH /inscriptions error:', err);
+      res.status(500).json({ error: 'Failed to update inscription' });
+    }
   });
 
   // ── PATCH /api/inscriptions/:id/set-pdf ──────────────────────────────────
