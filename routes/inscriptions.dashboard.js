@@ -309,11 +309,12 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
             periodFrom: memberData.periodFrom || existingData.periodFrom,
             balance: newBalance,
             contractNumber: memberData.contractNumber || existingData.contractNumber,
+            inscriptionId: insId,
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
           });
 
           t.update(insRef, { status: 'awaiting_payment', memberId: existing.id });
-          return { member: { id: existing.id, ...existingData, plan: memberData.plan, expiresOn: memberData.expiresOn, balance: newBalance }, alreadyExisted: true };
+          return { member: { id: existing.id, ...existingData, plan: memberData.plan, expiresOn: memberData.expiresOn, balance: newBalance, inscriptionId: insId }, alreadyExisted: true };
         }
 
         const newMemberRef = db.collection('members').doc();
