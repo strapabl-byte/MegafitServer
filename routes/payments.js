@@ -850,5 +850,48 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
     }
   });
 
+  // ── PATCH /api/payments/:id/cheque-photos  ────────────────────────────────
+  // Super-admin: inject / replace cheque recto+verso photos on an existing payment.
+  // Uploads base64 images to Firebase Storage, updates Firestore payment doc,
+  // and stores the public URLs in pending_cache for SQLite reference.
+  router.patch('/:id/cheque-photos', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const paymentId = req.params.id;
+      const { chequePhoto, chequePhotoBack, memberId } = req.body;
+
+      if (!chequePhoto && !chequePhotoBack) {
+        return res.status(400).json({ error: 'At least one photo (chequePhoto or chequePhotoBack) is required' });
+      }
+
+      const paymentRef = db.collection('payments').doc(paymentId);
+      const paySnap    = await paymentRef.get();
+      if (!paySnap.exists) return res.status(404).json({ error: 'Payment not found' });
+
+      const ts  = Date.now();
+      const mid = memberId || paySnap.data().memberId || 'unknown';
+      const update = {};
+
+      if (chequePhoto) {
+        const url = await uploadBase64ToStorage(chequePhoto, `payments/${mid}/${ts}_cheque_recto.jpg`);
+        update.chequePhoto = url;
+        console.log(`📸 [cheque-photos] Recto uploaded for payment ${paymentId}: ${url}`);
+      }
+      if (chequePhotoBack) {
+        const url = await uploadBase64ToStorage(chequePhotoBack, `payments/${mid}/${ts}_cheque_verso.jpg`);
+        update.chequePhotoBack = url;
+        console.log(`📸 [cheque-photos] Verso uploaded for payment ${paymentId}: ${url}`);
+      }
+
+      update.chequePhotoUpdatedAt = admin.firestore.FieldValue.serverTimestamp();
+      update.chequePhotoUpdatedBy = req.user?.preferred_username || req.user?.name || 'Admin';
+      await paymentRef.update(update);
+
+      res.json({ ok: true, chequePhoto: update.chequePhoto || null, chequePhotoBack: update.chequePhotoBack || null });
+    } catch (err) {
+      console.error('Cheque photo upload error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   return router;
 };
