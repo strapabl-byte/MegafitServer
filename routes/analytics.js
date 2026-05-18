@@ -925,15 +925,27 @@ Reply ONLY with valid JSON (no markdown):
       const cached = apiCache.kpis[gymId];
       if (cached && Date.now() - cached.ts < 30 * 1000) return res.json(cached.data);
 
-      const now = new Date();
-      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      // Rolling windows — always show real data regardless of where we are in the calendar
-      const weekStart  = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);   // last 7 days
-      weekStart.setHours(0, 0, 0, 0);
-      const monthStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29);  // last 30 days
-      monthStart.setHours(0, 0, 0, 0);
-      const yearStart  = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 364); // last 365 days
-      yearStart.setHours(0, 0, 0, 0);
+      const parseLocalDate = (dateStr) => {
+        const [y, m, d] = dateStr.split('-').map(Number);
+        return new Date(y, m - 1, d);
+      };
+      
+      const todayStr = getMoroccanDateStr();
+      const todayStart = parseLocalDate(todayStr);
+      
+      const nowStr = new Date(new Date().getTime() + 60 * 60 * 1000).toISOString();
+      const now = new Date(
+        parseInt(nowStr.slice(0, 4)),
+        parseInt(nowStr.slice(5, 7)) - 1,
+        parseInt(nowStr.slice(8, 10)),
+        parseInt(nowStr.slice(11, 13)),
+        parseInt(nowStr.slice(14, 16)),
+        parseInt(nowStr.slice(17, 19))
+      );
+
+      const weekStart  = new Date(todayStart.getFullYear(), todayStart.getMonth(), todayStart.getDate() - 6);
+      const monthStart = new Date(todayStart.getFullYear(), todayStart.getMonth(), todayStart.getDate() - 29);
+      const yearStart  = new Date(todayStart.getFullYear(), todayStart.getMonth(), todayStart.getDate() - 364);
 
       // 🔒 DISK-ONLY: All KPI data comes from SQLite register_cache. No Firebase reads.
 
