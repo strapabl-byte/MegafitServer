@@ -943,11 +943,21 @@ Reply ONLY with valid JSON (no markdown):
         parseInt(nowStr.slice(17, 19))
       );
 
+      // 📅 Calendar-month start (Moroccan): always 1st of the current month
+      const monthStart = new Date(todayStart.getFullYear(), todayStart.getMonth(), 1);
+      // Rolling 7-day window for Week
       const weekStart  = new Date(todayStart.getFullYear(), todayStart.getMonth(), todayStart.getDate() - 6);
-      const monthStart = new Date(todayStart.getFullYear(), todayStart.getMonth(), todayStart.getDate() - 29);
+      // Rolling 12-month window for Year
       const yearStart  = new Date(todayStart.getFullYear(), todayStart.getMonth(), todayStart.getDate() - 364);
 
+      // Month label for frontend display (e.g. "MAI 2026")
+      const MONTH_NAMES_FR = ['JAN','FÉV','MAR','AVR','MAI','JUN','JUL','AOÛ','SEP','OCT','NOV','DÉC'];
+      const currentMonthLabel = `${MONTH_NAMES_FR[todayStart.getMonth()]} ${todayStart.getFullYear()}`;
+
       // 🔒 DISK-ONLY: All KPI data comes from SQLite register_cache. No Firebase reads.
+
+      const gymIds = gymId === 'all' ? ['dokarat', 'marjane', 'casa1', 'casa2'] : gymId.split(',');
+      const toLocalDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 
       // ?????? New members count from register (source of truth, same as Register page) ??????
       const countRegisterInRange = (fromDate) => {
@@ -960,9 +970,6 @@ Reply ONLY with valid JSON (no markdown):
         }
         return count;
       };
-
-      const gymIds = gymId === 'all' ? ['dokarat', 'marjane', 'casa1', 'casa2'] : gymId.split(',');
-      const toLocalDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 
       // ?????? Revenue from SQLite register cache ??? sum ALL payment columns ??????
       const getRevenueAndBreakdown = (fromDate) => {
@@ -1004,13 +1011,14 @@ Reply ONLY with valid JSON (no markdown):
         }
         return count;
       })();
-      console.log(`💾 [KPI] SQLite: ${monthCachedCount} entries for ${gymId} — reading from disk only`);
+      console.log(`💾 [KPI] SQLite: ${monthCachedCount} entries for ${gymId} (${currentMonthLabel}) — reading from disk only`);
       const incomeDay   = getRevenueAndBreakdown(todayStart);
       const incomeWeek  = getRevenueAndBreakdown(weekStart);
       const incomeMonth = getRevenueAndBreakdown(monthStart);
       const incomeYear  = getRevenueAndBreakdown(yearStart);
 
       const kpis = {
+        currentMonthLabel,   // e.g. "MAI 2026"
         newMembers: { day: countRegisterInRange(todayStart), week: countRegisterInRange(weekStart), month: countRegisterInRange(monthStart), year: countRegisterInRange(yearStart) },
         income:     { day: incomeDay.total, week: incomeWeek.total, month: incomeMonth.total, year: incomeYear.total },
         paymentMethods: { espece: incomeMonth.espece, tpe: incomeMonth.tpe, virement: incomeMonth.virement, cheque: incomeMonth.cheque },
@@ -1023,7 +1031,7 @@ Reply ONLY with valid JSON (no markdown):
       };
 
       apiCache.kpis[gymId] = { data: kpis, ts: Date.now() };
-      console.log(`???? [KPI] ${gymId}: income day=${incomeDay.total} | week=${incomeWeek.total} | month=${incomeMonth.total} | year=${incomeYear.total} DH`);
+      console.log(`✅ [KPI] ${gymId}: day=${incomeDay.total} | week=${incomeWeek.total} | ${currentMonthLabel}=${incomeMonth.total} | year=${incomeYear.total} DH`);
       res.json(kpis);
     } catch (err) {
       console.error('KPI Calculation Error:', err);
