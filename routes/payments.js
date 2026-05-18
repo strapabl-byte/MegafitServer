@@ -451,10 +451,10 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
           }
         }
       // Fallback: If any cheque payment or registration payment is missing its chequePhoto,
-      // load it from the member's profile record (SQLite diskMember or Firestore member)
-      const diskMember = lc.getMemberById ? lc.getMemberById(req.params.memberId) : null;
-      let profileChequePhoto = diskMember?.cheque_photo || diskMember?.chequePhoto || null;
-      let profileChequePhotoBack = diskMember?.cheque_photo_back || diskMember?.chequePhotoVerso || diskMember?.chequePhotoBack || null;
+      // load it from the member's profile record (SQLite fallbackDiskMember or Firestore member)
+      const fallbackDiskMember = lc.getMemberById ? lc.getMemberById(req.params.memberId) : null;
+      let profileChequePhoto = fallbackDiskMember?.cheque_photo || fallbackDiskMember?.chequePhoto || null;
+      let profileChequePhotoBack = fallbackDiskMember?.cheque_photo_back || fallbackDiskMember?.chequePhotoVerso || fallbackDiskMember?.chequePhotoBack || null;
 
       if (!profileChequePhoto) {
         try {
