@@ -685,6 +685,8 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
           date: new Date().toISOString(), method: method || 'Espèces',
           type: 'registration', note: note || '',
           memberId: insData.memberId || null,
+          chequePhoto: insData.chequePhoto || insData.cheque_photo || null,
+          chequePhotoBack: insData.chequePhotoVerso || insData.chequePhotoBack || insData.cheque_photo_back || null,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
           recordedBy: req.user?.preferred_username || 'Admin',
         });
@@ -693,6 +695,8 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
           amount: Number(amount), plan: plan || 'Monthly',
           method: method || 'Espèces',
           memberId: insData.memberId || null,
+          chequePhoto: existingPay.docs[0].data().chequePhoto || insData.chequePhoto || insData.cheque_photo || null,
+          chequePhotoBack: existingPay.docs[0].data().chequePhotoBack || insData.chequePhotoVerso || insData.chequePhotoBack || insData.cheque_photo_back || null,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           recordedBy: req.user?.preferred_username || 'Admin',
         });
@@ -952,14 +956,15 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
           return res.json({ ok: true, chequePhoto: update.chequePhoto || null, chequePhotoBack: update.chequePhotoBack || null });
         } else {
           // Fallback: check members collection (legacy Odoo member or direct signups)
-          const memberRef = db.collection('members').doc(docId);
+          const targetMemberId = memberId || docId;
+          const memberRef = db.collection('members').doc(targetMemberId);
           const memberSnap = await memberRef.get();
           if (!memberSnap.exists) {
             return res.status(404).json({ error: 'Payment / Member not found (Virtual inscription/member not found)' });
           }
 
           const ts  = Date.now();
-          const mid = docId;
+          const mid = targetMemberId;
           const update = {};
 
           if (chequePhoto) {
@@ -978,7 +983,7 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
           // Also update local SQLite members cache!
           try {
             if (lc.updateMemberChequePhotos) {
-              lc.updateMemberChequePhotos(docId, update.chequePhoto, update.chequePhotoBack);
+              lc.updateMemberChequePhotos(targetMemberId, update.chequePhoto, update.chequePhotoBack);
             }
           } catch (sqliteErr) {
             console.error('Failed to update SQLite members cache:', sqliteErr);
