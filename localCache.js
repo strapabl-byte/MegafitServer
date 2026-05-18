@@ -246,6 +246,8 @@ try { db.exec("ALTER TABLE members_cache ADD COLUMN total_paid REAL DEFAULT 0;")
 try { db.exec("ALTER TABLE members_cache ADD COLUMN last_payment_date TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE members_cache ADD COLUMN is_archive INTEGER DEFAULT 0;"); } catch (e) {}
 try { db.exec("ALTER TABLE members_cache ADD COLUMN contract_number TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE members_cache ADD COLUMN cheque_photo TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE members_cache ADD COLUMN cheque_photo_back TEXT;"); } catch (e) {}
 // register_cache extensions
 try { db.exec("ALTER TABLE register_cache ADD COLUMN cin TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE register_cache ADD COLUMN tel TEXT;"); } catch (e) {}
@@ -460,9 +462,9 @@ function getDailyStat(gymId, date) {
 
 const insertMember = db.prepare(`
   INSERT OR REPLACE INTO members_cache
-    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date, email, adresse, ville, is_archive, bonus_3months, inscription_id, contract_number, balance_deadline)
+    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date, email, adresse, ville, is_archive, bonus_3months, inscription_id, contract_number, balance_deadline, cheque_photo, cheque_photo_back)
   VALUES
-    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date, @email, @adresse, @ville, @is_archive, @bonus_3months, @inscription_id, @contract_number, @balance_deadline)
+    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date, @email, @adresse, @ville, @is_archive, @bonus_3months, @inscription_id, @contract_number, @balance_deadline, @cheque_photo, @cheque_photo_back)
 `);
 
 function upsertMembers(gymId, membersArr) {
@@ -527,12 +529,14 @@ function upsertMembers(gymId, membersArr) {
     inscription_id:    m.inscriptionId || m.inscription_id || null,
     contract_number:   m.contractNumber || m.contract_number || null,
     balance_deadline:  m.balanceDeadline || m.balance_deadline || null,
+    cheque_photo:      m.chequePhoto || m.cheque_photo || null,
+    cheque_photo_back: m.chequePhotoBack || m.cheque_photo_back || m.chequePhotoVerso || null,
   })));
 }
 
 function getMembers(gymId) {
   const g = buildInClause(getGymIds(gymId));
-  const sql = `SELECT * FROM members_cache WHERE ${g.sql} ORDER BY created_at DESC, full_name ASC`;
+  const sql = `SELECT * FROM members_cache WHERE ${g.sql} AND is_archive = 0 ORDER BY created_at DESC, full_name ASC`;
   return db.prepare(sql).all(...g.params);
 }
 
@@ -769,6 +773,15 @@ function updatePendingChequePhotos(id, chequePhoto, chequePhotoBack) {
   }
 }
 
+function updateMemberChequePhotos(id, chequePhoto, chequePhotoBack) {
+  if (!id) return;
+  try {
+    db.prepare(`UPDATE members_cache SET cheque_photo = ?, cheque_photo_back = ? WHERE id = ?`).run(chequePhoto, chequePhotoBack, id);
+  } catch(err) {
+    console.error('SQLite updateMemberChequePhotos error:', err.message);
+  }
+}
+
 function getPending(gymId, timeFilter = 'day') {
   try {
     let dateModifier = '-1 day'; // default to last 24h
@@ -933,7 +946,7 @@ module.exports = {
   // daily stats
   upsertDailyStat, getDailyStats, getDailyStatsRange, getDailyStat,
   // members
-  upsertMembers, getMembers, getMemberById, pruneStaleMember, getDebtors,
+  upsertMembers, getMembers, getMemberById, pruneStaleMember, getDebtors, updateMemberChequePhotos,
   // register
   upsertRegister, getRegister, deleteRegisterEntry,
   // decaissements
