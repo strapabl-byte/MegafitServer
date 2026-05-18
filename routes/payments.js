@@ -295,8 +295,32 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
   // ── GET /api/payments/:memberId ───────────────────────────────────────────
   router.get('/:memberId', verifyAzureToken, async (req, res) => {
     try {
+      // 1. Fetch payments directly linked to the memberId
       const snap = await db.collection('payments').where('memberId', '==', req.params.memberId).get();
       let payments = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+      // 2. Fetch payments linked to the member's true inscriptionId (for cases where memberId was not set on the payment)
+      const diskMember = lc.getMemberById ? lc.getMemberById(req.params.memberId) : null;
+      const diskMemberData = diskMember || null;
+      let trueInscriptionId = diskMemberData?.inscriptionId || diskMemberData?.inscription_id || null;
+
+      try {
+        const insQuery = await db.collection('pending_members').where('memberId', '==', req.params.memberId).limit(1).get();
+        if (!insQuery.empty) {
+          trueInscriptionId = insQuery.docs[0].id;
+        }
+      } catch (err) {
+        console.warn('[PAYMENTS GET] pending_members lookup by memberId failed:', err.message);
+      }
+
+      if (trueInscriptionId) {
+        const extraSnap = await db.collection('payments').where('inscriptionId', '==', trueInscriptionId).get();
+        extraSnap.forEach(d => {
+          if (!payments.some(p => p.id === d.id)) {
+            payments.push({ id: d.id, ...d.data() });
+          }
+        });
+      }
 
       // 🔒 SECURITY: Restrict non-admins to their assigned gym
       if (!req.isAdmin) {
@@ -307,7 +331,6 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
           } else {
               gymId = 'none';
           }
-          const diskMember = lc.getMemberById ? lc.getMemberById(req.params.memberId) : null;
           if (diskMember && diskMember.gym_id && !req.hasAccessToGym(diskMember.gym_id)) {
               return res.status(403).json({ error: 'Access Denied: This member belongs to another gym' });
           }
@@ -467,6 +490,25 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
           }
         } catch (fbErr) {
           console.warn('[PAYMENTS GET] profile fallback check failed:', fbErr.message);
+        }
+      }
+
+      // 3. Populate missing/empty cheque photos on registration payments from pending_members record (e.g. base64 data)
+      for (const p of payments) {
+        if (p.type === 'registration' && (!p.chequePhoto || !p.chequePhotoBack)) {
+          const targetInsId = p.inscriptionId || trueInscriptionId || p.id?.replace('reg-', '');
+          if (targetInsId && !targetInsId.startsWith('reg-')) {
+            try {
+              const insSnap = await db.collection('pending_members').doc(targetInsId).get();
+              if (insSnap.exists) {
+                const insData = insSnap.data();
+                if (!p.chequePhoto) p.chequePhoto = insData.chequePhoto || insData.cheque_photo || null;
+                if (!p.chequePhotoBack) p.chequePhotoBack = insData.chequePhotoVerso || insData.chequePhotoBack || insData.cheque_photo_back || null;
+              }
+            } catch (err) {
+              console.warn('[PAYMENTS GET] failed to load cheque photos from pending_members:', err.message);
+            }
+          }
         }
       }
 
