@@ -450,6 +450,38 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
             console.warn('[PAYMENTS GET] full Firebase fallback failed:', fbErr.message);
           }
         }
+      // Fallback: If any cheque payment or registration payment is missing its chequePhoto,
+      // load it from the member's profile record (SQLite diskMember or Firestore member)
+      const diskMember = lc.getMemberById ? lc.getMemberById(req.params.memberId) : null;
+      let profileChequePhoto = diskMember?.cheque_photo || diskMember?.chequePhoto || null;
+      let profileChequePhotoBack = diskMember?.cheque_photo_back || diskMember?.chequePhotoVerso || diskMember?.chequePhotoBack || null;
+
+      if (!profileChequePhoto) {
+        try {
+          const mSnap = await db.collection('members').doc(req.params.memberId).get();
+          if (mSnap.exists) {
+            const mData = mSnap.data();
+            profileChequePhoto = mData.chequePhoto || mData.cheque_photo || null;
+            profileChequePhotoBack = mData.chequePhotoBack || mData.chequePhotoVerso || mData.cheque_photo_back || null;
+          }
+        } catch (fbErr) {
+          console.warn('[PAYMENTS GET] profile fallback check failed:', fbErr.message);
+        }
+      }
+
+      if (profileChequePhoto || profileChequePhotoBack) {
+        payments = payments.map(p => {
+          const isCheque = p.method && (p.method.toLowerCase().includes('chq') || p.method.toLowerCase().includes('cheque') || p.method.toLowerCase().includes('chèque'));
+          const isReg = p.type === 'registration';
+          if (isCheque || isReg) {
+            return {
+              ...p,
+              chequePhoto: p.chequePhoto || profileChequePhoto,
+              chequePhotoBack: p.chequePhotoBack || profileChequePhotoBack,
+            };
+          }
+          return p;
+        });
       }
 
       res.json(payments);
