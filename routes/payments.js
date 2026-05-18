@@ -394,6 +394,22 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
               console.warn('[PAYMENTS GET] inscription Firebase fallback failed:', fbErr.message);
             }
           }
+        } else if (diskMemberData) {
+          // If no inscriptionId but diskMemberData exists (e.g. legacy Odoo member)
+          if (Number(diskMemberData.total_paid || diskMemberData.totalPaid || 0) > 0 || diskMemberData.cheque_photo || diskMemberData.cheque_photo_back) {
+            payments.push({
+              id: `reg-${req.params.memberId}`,
+              amount: Number(diskMemberData.total_paid || diskMemberData.totalPaid || 0),
+              plan: diskMemberData.plan || 'Monthly',
+              date: diskMemberData.last_payment_date || diskMemberData.lastPaymentDate || diskMemberData.created_at || new Date().toISOString(),
+              method: 'Chèque', // Default to Cheque so they can see/edit cheque photos
+              type: 'registration',
+              note: 'Importation Odoo (Paiement Initial)',
+              virtual: true,
+              chequePhoto: diskMemberData.cheque_photo || null,
+              chequePhotoBack: diskMemberData.cheque_photo_back || null,
+            });
+          }
         } else if (!diskMemberData) {
           // No disk record at all — full Firebase fallback
           try {
@@ -868,38 +884,75 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
       }
 
       if (paymentId.startsWith('reg-')) {
-        const inscriptionId = paymentId.replace('reg-', '');
-        const inscriptionRef = db.collection('pending_members').doc(inscriptionId);
+        const docId = paymentId.replace('reg-', '');
+        
+        // Try pending_members first
+        const inscriptionRef = db.collection('pending_members').doc(docId);
         const insSnap = await inscriptionRef.get();
-        if (!insSnap.exists) return res.status(404).json({ error: 'Payment not found (Virtual inscription not found)' });
+        if (insSnap.exists) {
+          const ts  = Date.now();
+          const mid = memberId || insSnap.data().memberId || 'unknown';
+          const update = {};
 
-        const ts  = Date.now();
-        const mid = memberId || insSnap.data().memberId || 'unknown';
-        const update = {};
-
-        if (chequePhoto) {
-          const url = await uploadBase64ToStorage(chequePhoto, `payments/${mid}/${ts}_cheque_recto.jpg`);
-          update.chequePhoto = url;
-        }
-        if (chequePhotoBack) {
-          const url = await uploadBase64ToStorage(chequePhotoBack, `payments/${mid}/${ts}_cheque_verso.jpg`);
-          update.chequePhotoBack = url;
-        }
-
-        update.chequePhotoUpdatedAt = admin.firestore.FieldValue.serverTimestamp();
-        update.chequePhotoUpdatedBy = req.user?.preferred_username || req.user?.name || 'Admin';
-        await inscriptionRef.update(update);
-
-        // Also update local SQLite pending cache so it's instantly synchronized!
-        try {
-          if (lc.updatePendingChequePhotos) {
-            lc.updatePendingChequePhotos(inscriptionId, update.chequePhoto, update.chequePhotoBack);
+          if (chequePhoto) {
+            const url = await uploadBase64ToStorage(chequePhoto, `payments/${mid}/${ts}_cheque_recto.jpg`);
+            update.chequePhoto = url;
           }
-        } catch (sqliteErr) {
-          console.error('Failed to update SQLite pending cache:', sqliteErr);
-        }
+          if (chequePhotoBack) {
+            const url = await uploadBase64ToStorage(chequePhotoBack, `payments/${mid}/${ts}_cheque_verso.jpg`);
+            update.chequePhotoBack = url;
+          }
 
-        return res.json({ ok: true, chequePhoto: update.chequePhoto || null, chequePhotoBack: update.chequePhotoBack || null });
+          update.chequePhotoUpdatedAt = admin.firestore.FieldValue.serverTimestamp();
+          update.chequePhotoUpdatedBy = req.user?.preferred_username || req.user?.name || 'Admin';
+          await inscriptionRef.update(update);
+
+          // Also update local SQLite pending cache so it's instantly synchronized!
+          try {
+            if (lc.updatePendingChequePhotos) {
+              lc.updatePendingChequePhotos(docId, update.chequePhoto, update.chequePhotoBack);
+            }
+          } catch (sqliteErr) {
+            console.error('Failed to update SQLite pending cache:', sqliteErr);
+          }
+
+          return res.json({ ok: true, chequePhoto: update.chequePhoto || null, chequePhotoBack: update.chequePhotoBack || null });
+        } else {
+          // Fallback: check members collection (legacy Odoo member or direct signups)
+          const memberRef = db.collection('members').doc(docId);
+          const memberSnap = await memberRef.get();
+          if (!memberSnap.exists) {
+            return res.status(404).json({ error: 'Payment / Member not found (Virtual inscription/member not found)' });
+          }
+
+          const ts  = Date.now();
+          const mid = docId;
+          const update = {};
+
+          if (chequePhoto) {
+            const url = await uploadBase64ToStorage(chequePhoto, `payments/${mid}/${ts}_cheque_recto.jpg`);
+            update.chequePhoto = url;
+          }
+          if (chequePhotoBack) {
+            const url = await uploadBase64ToStorage(chequePhotoBack, `payments/${mid}/${ts}_cheque_verso.jpg`);
+            update.chequePhotoBack = url;
+          }
+
+          update.chequePhotoUpdatedAt = admin.firestore.FieldValue.serverTimestamp();
+          update.chequePhotoUpdatedBy = req.user?.preferred_username || req.user?.name || 'Admin';
+          await memberRef.update(update);
+
+          // Also update local SQLite members cache!
+          try {
+            if (lc.updateMemberChequePhotos) {
+              lc.updateMemberChequePhotos(docId, update.chequePhoto, update.chequePhotoBack);
+            }
+          } catch (sqliteErr) {
+            console.error('Failed to update SQLite members cache:', sqliteErr);
+          }
+
+          return res.json({ ok: true, chequePhoto: update.chequePhoto || null, chequePhotoBack: update.chequePhotoBack || null });
+        }
       }
 
       const paymentRef = db.collection('payments').doc(paymentId);
