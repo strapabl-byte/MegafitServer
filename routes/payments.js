@@ -450,6 +450,7 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
             console.warn('[PAYMENTS GET] full Firebase fallback failed:', fbErr.message);
           }
         }
+      }
       // Fallback: If any cheque payment or registration payment is missing its chequePhoto,
       // load it from the member's profile record (SQLite fallbackDiskMember or Firestore member)
       const fallbackDiskMember = lc.getMemberById ? lc.getMemberById(req.params.memberId) : null;
