@@ -33,6 +33,27 @@ module.exports = function(deps) {
     return dates;
   }
 
+  // Returns only today's date string (Morocco time UTC+1)
+  function todayDate() {
+    const d = new Date(Date.now() + 3600000);
+    return d.toISOString().slice(0, 10);
+  }
+
+  // Returns all dates from 1st of current month to today
+  function thisMonthDates() {
+    const now = new Date(Date.now() + 3600000);
+    const today = now.toISOString().slice(0, 10);
+    const year = now.getUTCFullYear();
+    const month = now.getUTCMonth();
+    const daysInMonth = now.getUTCDate(); // days elapsed this month
+    const dates = [];
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dd = new Date(Date.UTC(year, month, d));
+      dates.push(dd.toISOString().slice(0, 10));
+    }
+    return dates;
+  }
+
   function gymRevenue(gymId, dates) {
     try {
       const ph = dates.map(() => '?').join(',');
@@ -50,11 +71,19 @@ module.exports = function(deps) {
     } catch(e) { return { revenue: 0, members: 0, entries: 0, decaissement: 0, net: 0 }; }
   }
 
-  // GET /api/auralix/summary?period=24h|week|month
+  // GET /api/auralix/summary?period=today|week|month
   router.get('/api/auralix/summary', auth, (req, res) => {
-    const p = req.query.period || '24h';
-    const days = p === '24h' ? 2 : p === 'week' ? 7 : 30; // 2 days covers last 24h
-    const dates = dateRange(days);
+    const p = req.query.period || 'today';
+    let dates;
+    if (p === 'today' || p === '24h') {
+      dates = [todayDate()]; // Only today
+    } else if (p === 'month') {
+      dates = thisMonthDates(); // From 1st of current month to today
+    } else if (p === 'week') {
+      dates = dateRange(7); // Last 7 days
+    } else {
+      dates = [todayDate()];
+    }
     const gyms = GYMS.map(id => ({ id, name: NAMES[id], ...gymRevenue(id, dates) }));
     const total = gyms.reduce((s, g) => ({
       revenue: s.revenue + g.revenue,
@@ -66,27 +95,37 @@ module.exports = function(deps) {
     res.json({ gyms, total, period: p });
   });
 
-  // GET /api/auralix/transactions?hours=24
+  // GET /api/auralix/transactions?period=today|week|month
   router.get('/api/auralix/transactions', auth, (req, res) => {
+    const period = req.query.period || req.query.hours ? null : 'today';
     const hours = Math.min(parseInt(req.query.hours) || 24, 168);
     try {
-      // Try created_at first, fall back to last 2 dates
-      let rows = lc.db.prepare(
-        `SELECT id, gym_id, date, nom, abonnement, commercial,
-                ROUND(COALESCE(CAST(tpe AS REAL),0)+COALESCE(CAST(espece AS REAL),0)+COALESCE(CAST(virement AS REAL),0)+COALESCE(CAST(cheque AS REAL),0)) AS montant,
-                COALESCE(CAST(tpe AS REAL),0) AS tpe, COALESCE(CAST(espece AS REAL),0) AS espece,
-                COALESCE(CAST(virement AS REAL),0) AS virement, COALESCE(CAST(cheque AS REAL),0) AS cheque,
-                COALESCE(CAST(reste AS REAL),0) AS reste,
-                created_at
-         FROM register_cache
-         WHERE created_at >= datetime('now', ?)
-         ORDER BY created_at DESC LIMIT 80`
-      ).all(`-${hours} hours`);
+      // Build date list based on period
+      let filterDates;
+      if (req.query.period === 'today' || (!req.query.period && !req.query.hours)) {
+        filterDates = [todayDate()];
+      } else if (req.query.period === 'month') {
+        filterDates = thisMonthDates();
+      } else if (req.query.period === 'week') {
+        filterDates = dateRange(7);
+      } else {
+        filterDates = null; // use hours
+      }
 
-      // If created_at is empty/missing, fall back to date-based
-      if (rows.length === 0) {
-        const dates = dateRange(Math.ceil(hours / 24) + 1);
-        const ph = dates.map(() => '?').join(',');
+      let rows;
+      if (filterDates) {
+        // Date-based filter (exact calendar days)
+        const ph = filterDates.map(() => '?').join(',');
+        rows = lc.db.prepare(
+          `SELECT id, gym_id, date, nom, abonnement, commercial,
+                  ROUND(COALESCE(CAST(tpe AS REAL),0)+COALESCE(CAST(espece AS REAL),0)+COALESCE(CAST(virement AS REAL),0)+COALESCE(CAST(cheque AS REAL),0)) AS montant,
+                  COALESCE(CAST(tpe AS REAL),0) AS tpe, COALESCE(CAST(espece AS REAL),0) AS espece,
+                  COALESCE(CAST(virement AS REAL),0) AS virement, COALESCE(CAST(cheque AS REAL),0) AS cheque,
+                  COALESCE(CAST(reste AS REAL),0) AS reste, created_at
+           FROM register_cache WHERE date IN (${ph}) ORDER BY created_at DESC, rowid DESC LIMIT 200`
+        ).all(...filterDates);
+      } else {
+        // Legacy hours-based filter
         rows = lc.db.prepare(
           `SELECT id, gym_id, date, nom, abonnement, commercial,
                   ROUND(COALESCE(CAST(tpe AS REAL),0)+COALESCE(CAST(espece AS REAL),0)+COALESCE(CAST(virement AS REAL),0)+COALESCE(CAST(cheque AS REAL),0)) AS montant,
@@ -94,8 +133,25 @@ module.exports = function(deps) {
                   COALESCE(CAST(virement AS REAL),0) AS virement, COALESCE(CAST(cheque AS REAL),0) AS cheque,
                   COALESCE(CAST(reste AS REAL),0) AS reste,
                   created_at
-           FROM register_cache WHERE date IN (${ph}) ORDER BY created_at DESC, rowid DESC LIMIT 80`
-        ).all(...dates);
+           FROM register_cache
+           WHERE created_at >= datetime('now', ?)
+           ORDER BY created_at DESC LIMIT 80`
+        ).all(`-${hours} hours`);
+
+        // If created_at is empty/missing, fall back to date-based
+        if (rows.length === 0) {
+          const dates = dateRange(Math.ceil(hours / 24) + 1);
+          const ph = dates.map(() => '?').join(',');
+          rows = lc.db.prepare(
+            `SELECT id, gym_id, date, nom, abonnement, commercial,
+                    ROUND(COALESCE(CAST(tpe AS REAL),0)+COALESCE(CAST(espece AS REAL),0)+COALESCE(CAST(virement AS REAL),0)+COALESCE(CAST(cheque AS REAL),0)) AS montant,
+                    COALESCE(CAST(tpe AS REAL),0) AS tpe, COALESCE(CAST(espece AS REAL),0) AS espece,
+                    COALESCE(CAST(virement AS REAL),0) AS virement, COALESCE(CAST(cheque AS REAL),0) AS cheque,
+                    COALESCE(CAST(reste AS REAL),0) AS reste,
+                    created_at
+             FROM register_cache WHERE date IN (${ph}) ORDER BY created_at DESC, rowid DESC LIMIT 80`
+          ).all(...dates);
+        }
       }
 
       // Add payment method label
