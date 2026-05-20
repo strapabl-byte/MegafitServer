@@ -56,7 +56,7 @@ function router(deps = {}) {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${OPENAI_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4o',
         messages: [{ role: 'user', content: [
           { type: 'text',      text: systemPrompt },
           { type: 'image_url', image_url: { url: image } },
