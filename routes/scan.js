@@ -243,6 +243,37 @@ Use null for any field you cannot read clearly. Convert all dates to YYYY-MM-DD.
     }
   });
 
+  // ── PATCH /api/contracts/:id ─────────────────────────────────────────────
+  // Admin-only: update contract fields and/or status (pending → validated)
+  r.patch('/api/contracts/:id', verifyAzureToken, requireAdmin, express.json({ limit: '1mb' }), async (req, res) => {
+    if (!db) return res.status(500).json({ error: 'Firebase non disponible' });
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ error: 'ID requis' });
+
+    try {
+      const allowed = ['contractNumber', 'nom', 'prenom', 'cin', 'dateNaissance', 'periodFrom', 'periodTo', 'subscriptionAmount', 'status', 'notes'];
+      const updates = {};
+      for (const key of allowed) {
+        if (req.body[key] !== undefined) updates[key] = req.body[key];
+      }
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: 'Aucun champ à mettre à jour' });
+      }
+      updates.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+      if (updates.status === 'validated' && !updates.validatedBy) {
+        updates.validatedBy = req.user?.preferred_username || req.user?.name || 'admin';
+        updates.validatedAt = admin.firestore.FieldValue.serverTimestamp();
+      }
+
+      await db.collection('contract_scans').doc(id).update(updates);
+      console.log(`[PATCH /api/contracts/${id}] Updated:`, Object.keys(updates));
+      return res.json({ ok: true, id, updated: Object.keys(updates) });
+    } catch (err) {
+      console.error(`[PATCH /api/contracts/${id}] Error:`, err.message);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   return r;
 }
 
