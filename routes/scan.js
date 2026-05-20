@@ -1,15 +1,23 @@
 // routes/scan.js
-// 📷 CIN + Contract Scanner — Groq Vision endpoints
-// POST /public/scan-cin       { image, side }
-// POST /public/scan-contract  { image }
+// 📷 CIN + Contract Scanner — Groq Vision + persistence endpoints
+// POST /public/scan-cin            { image, side }
+// POST /public/scan-contract       { image }
+// POST /public/save-contract-scan  { image, fields, gymId, commercial }
+// GET  /api/contracts              (admin only) — list all saved contract scans
 
+'use strict';
 const express = require('express');
+const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 
 const GROQ_VISION_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const MODEL           = 'meta-llama/llama-4-scout-17b-16e-instruct';
 
-function router() {
-  const r = express.Router();
+function router(deps = {}) {
+  const r  = express.Router();
+  const db     = deps.db     || null;
+  const bucket = deps.bucket || null;
+  const admin  = deps.admin  || null;
+
 
   // ── Helper: call Groq with fallback key on 429 ─────────────────────────────
   async function callGroqVision(image, systemPrompt) {
@@ -152,6 +160,85 @@ Use null for any field you cannot read clearly. Convert all dates to YYYY-MM-DD.
 
     } catch (err) {
       console.error('[scan-contract] Exception:', err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── POST /public/save-contract-scan ──────────────────────────────────────
+  // Saves image → Firebase Storage, metadata → Firestore contract_scans
+  r.post('/public/save-contract-scan', express.json({ limit: '20mb' }), async (req, res) => {
+    const { image, fields = {}, gymId, commercial } = req.body;
+    if (!image || !image.startsWith('data:image')) {
+      return res.status(400).json({ error: 'image base64 requis' });
+    }
+    if (!db || !bucket || !admin) {
+      return res.status(500).json({ error: 'Firebase non disponible côté serveur' });
+    }
+
+    try {
+      // 1. Upload image to Firebase Storage
+      const base64Data  = image.replace(/^data:image\/\w+;base64,/, '');
+      const imgBuffer   = Buffer.from(base64Data, 'base64');
+      const mimeMatch   = image.match(/^data:(image\/\w+);base64,/);
+      const mimeType    = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+      const ext         = mimeType.split('/')[1] || 'jpg';
+      const ts          = Date.now();
+      const safeNum     = (fields.contractNumber || ts).toString().replace(/[^a-zA-Z0-9]/g, '');
+      const filePath    = `contract_scans/${gymId || 'unknown'}/${safeNum}_${ts}.${ext}`;
+
+      const file = bucket.file(filePath);
+      await file.save(imgBuffer, {
+        metadata: { contentType: mimeType },
+        public: true,
+      });
+      const imageUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
+
+      // 2. Save to Firestore contract_scans collection
+      const docData = {
+        gymId:              gymId || 'unknown',
+        commercial:         commercial || 'inconnu',
+        contractNumber:     fields.contractNumber     || null,
+        nom:                fields.nom                || null,
+        prenom:             fields.prenom             || null,
+        cin:                fields.cin                || null,
+        dateNaissance:      fields.dateNaissance      || null,
+        periodFrom:         fields.periodFrom         || null,
+        periodTo:           fields.periodTo           || null,
+        subscriptionAmount: fields.subscriptionAmount || null,
+        imageUrl,
+        storagePath: filePath,
+        scannedAt:   admin.firestore.FieldValue.serverTimestamp(),
+        status:      'pending',
+      };
+
+      const docRef = await db.collection('contract_scans').add(docData);
+      console.log(`[save-contract-scan] Saved ${docRef.id} for gym ${gymId}, contract ${fields.contractNumber}`);
+      return res.json({ ok: true, id: docRef.id, imageUrl });
+
+    } catch (err) {
+      console.error('[save-contract-scan] Error:', err.message);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── GET /api/contracts ────────────────────────────────────────────────────
+  // Admin-only: returns all scanned contracts ordered by date desc
+  r.get('/api/contracts', verifyAzureToken, requireAdmin, async (req, res) => {
+    if (!db) return res.status(500).json({ error: 'Firebase non disponible' });
+    try {
+      const { gymId, limit: lim = 100 } = req.query;
+      let query = db.collection('contract_scans').orderBy('scannedAt', 'desc').limit(Number(lim));
+      if (gymId) query = query.where('gymId', '==', gymId);
+
+      const snap = await query.get();
+      const contracts = snap.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        scannedAt: doc.data().scannedAt?.toDate?.()?.toISOString() || null,
+      }));
+      return res.json({ contracts, count: contracts.length });
+    } catch (err) {
+      console.error('[GET /api/contracts] Error:', err.message);
       return res.status(500).json({ error: err.message });
     }
   });
