@@ -169,14 +169,15 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
 
       try {
         const docId = `${gymId}_${today}`;
+        const normMethod = (method || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
         const addedDoc = await db.collection('megafit_daily_register').doc(docId).collection('entries').add({
           nom: member.fullName || '', tel: member.phone || '', contrat: member.contractNumber || '',
           commercial: (commercialName || 'COMMERCIAL').toUpperCase(), cin: member.cin || '',
           prix: payAmount,
-          espece:   Number(paymentsSplit?.espece   || 0) || (['especes','espece','cash'].includes((method||'').toLowerCase()) ? payAmount : 0),
-          tpe:      Number(paymentsSplit?.carte     || paymentsSplit?.tpe     || 0) || (['tpe','carte'].includes((method||'').toLowerCase()) ? payAmount : 0),
-          virement: Number(paymentsSplit?.virement  || 0) || ((method||'').toLowerCase() === 'virement' ? payAmount : 0),
-          cheque:   Number(paymentsSplit?.cheque    || 0) || ((method||'').toLowerCase() === 'cheque' ? payAmount : 0),
+          espece:   Number(paymentsSplit?.espece   || 0) || (['especes','espece','cash'].includes(normMethod) ? payAmount : 0),
+          tpe:      Number(paymentsSplit?.carte     || paymentsSplit?.tpe     || 0) || (['tpe','carte','carte bancaire'].includes(normMethod) ? payAmount : 0),
+          virement: Number(paymentsSplit?.virement  || 0) || (normMethod === 'virement' ? payAmount : 0),
+          cheque:   Number(paymentsSplit?.cheque    || 0) || (normMethod === 'cheque' ? payAmount : 0),
           abonnement: member.subscriptionName || member.plan || '',
           reste: newBalance,
           note_reste: newBalance > 0 ? `Reste: ${newBalance} DH` : '',
