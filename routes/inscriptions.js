@@ -656,6 +656,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
           fullName: `${ins.prenom || ''} ${ins.nom || ''}`.trim(),
           phone: ins.telephone || null,
           plan,
+          cin: ins.cin || null,
           subscriptionName: ins.subscriptionName || null,
           expiresOn: ins.periodTo || null,
           periodFrom: ins.periodFrom || null,
@@ -668,6 +669,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
           confirmedBy: req.user?.preferred_username || 'Admin'
         };
+
 
         // 🛡️ DEDUPLICATION CHECK (INSIDE TRANSACTION)
         const dupQuery = await db.collection('members')
