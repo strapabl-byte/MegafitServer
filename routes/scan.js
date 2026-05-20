@@ -47,6 +47,26 @@ function router(deps = {}) {
     return groqRes;
   }
 
+  // ── Helper: call OpenAI with gpt-4o-mini ────────────────────────────────────
+  async function callOpenAIVision(image, systemPrompt) {
+    const OPENAI_KEY = process.env.OPENAI_API_KEY;
+    if (!OPENAI_KEY) throw new Error('OPENAI_API_KEY non configurée');
+
+    return fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${OPENAI_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: [
+          { type: 'text',      text: systemPrompt },
+          { type: 'image_url', image_url: { url: image } },
+        ]}],
+        max_tokens: 600,
+        temperature: 0.1,
+      }),
+    });
+  }
+
   // ── POST /public/scan-cin ─────────────────────────────────────────────────
   r.post('/public/scan-cin', express.json({ limit: '10mb' }), async (req, res) => {
     const { image, side = 'recto' } = req.body;
@@ -93,8 +113,9 @@ function router(deps = {}) {
     if (!image || !image.startsWith('data:image')) {
       return res.status(400).json({ error: 'image base64 requis (data:image/...)' });
     }
-    if (!process.env.GROQ_SCAN_API_KEY) {
-      return res.status(500).json({ error: 'GROQ_SCAN_API_KEY non configurée côté serveur' });
+    const useOpenAI = !!process.env.OPENAI_API_KEY;
+    if (!useOpenAI && !process.env.GROQ_SCAN_API_KEY) {
+      return res.status(500).json({ error: 'Ni OPENAI_API_KEY ni GROQ_SCAN_API_KEY ne sont configurées côté serveur' });
     }
 
     const contractPrompt = `You are a gym registration assistant. A staff member has photographed a "Contrat d'Adhésion" (membership contract) form from a Moroccan gym called MEGA FIT. Extract the following fields and return ONLY a valid JSON object — no explanation, no markdown:
@@ -111,14 +132,22 @@ function router(deps = {}) {
 Use null for any field you cannot read clearly. Convert all dates to YYYY-MM-DD. Extract only numbers for subscriptionAmount (no DH, no TTC).`;
 
     try {
-      const groqRes = await callGroqVision(image, contractPrompt);
-      if (!groqRes.ok) {
-        const errText = await groqRes.text();
-        console.error('[scan-contract] Groq error:', errText);
-        return res.status(502).json({ error: 'Erreur Groq Vision', detail: errText });
+      let scanRes;
+      if (useOpenAI) {
+        console.log('[scan-contract] Call OpenAI Vision (gpt-4o-mini)...');
+        scanRes = await callOpenAIVision(image, contractPrompt);
+      } else {
+        console.log('[scan-contract] Fallback: Call Groq Vision...');
+        scanRes = await callGroqVision(image, contractPrompt);
       }
 
-      const data  = await groqRes.json();
+      if (!scanRes.ok) {
+        const errText = await scanRes.text();
+        console.error('[scan-contract] Vision error:', errText);
+        return res.status(502).json({ error: 'Erreur Service Vision', detail: errText });
+      }
+
+      const data  = await scanRes.json();
       const text  = data.choices?.[0]?.message?.content || '{}';
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
