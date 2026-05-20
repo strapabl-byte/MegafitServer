@@ -128,6 +128,18 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
       const memberGymId = member.location || member.gymId || '';
       if (memberGymId !== gymId) return res.status(403).json({ error: 'Gym mismatch — access denied' });
 
+      let cin = member.cin || '';
+      if (!cin && member.inscriptionId) {
+        try {
+          const insDoc = await db.collection('pending_members').doc(member.inscriptionId).get();
+          if (insDoc.exists && insDoc.data().cin) {
+            cin = insDoc.data().cin;
+          }
+        } catch (insErr) {
+          console.warn('[Settle/Public] Inscription fetch fallback failed:', insErr.message);
+        }
+      }
+
       const oldBalance = Number(member.balance || 0);
       const payAmount = Number(amount);
       if (payAmount <= 0 || payAmount > oldBalance) return res.status(400).json({ error: 'Invalid payment amount' });
@@ -161,6 +173,9 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
         lastPaymentDate: today,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       };
+      if (cin && !member.cin) {
+        updatePayload.cin = cin;
+      }
       if (newBalance === 0) updatePayload.balanceDeadline = admin.firestore.FieldValue.delete();
       await memberRef.update(updatePayload);
 
@@ -172,7 +187,7 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
         const normMethod = (method || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
         const addedDoc = await db.collection('megafit_daily_register').doc(docId).collection('entries').add({
           nom: member.fullName || '', tel: member.phone || '', contrat: member.contractNumber || '',
-          commercial: (commercialName || 'COMMERCIAL').toUpperCase(), cin: member.cin || '',
+          commercial: (commercialName || 'COMMERCIAL').toUpperCase(), cin: cin || '',
           prix: payAmount,
           espece:   Number(paymentsSplit?.espece   || 0) || (['especes','espece','cash'].includes(normMethod) ? payAmount : 0),
           tpe:      Number(paymentsSplit?.carte     || paymentsSplit?.tpe     || 0) || (['tpe','carte','carte bancaire'].includes(normMethod) ? payAmount : 0),
