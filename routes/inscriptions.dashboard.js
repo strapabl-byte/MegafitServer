@@ -26,7 +26,17 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
       if (contrat) {
         const dupContract = await entriesRef.where('contrat', '==', contrat).limit(1).get();
         if (!dupContract.empty) {
-          console.warn(`[DEDUP] autoRegisterCA: Duplicate contract ${contrat} found for ${gymId}/${today}. Skipping.`);
+          // ✅ CIN BACKFILL: If existing entry is missing a CIN but we now have one, update it
+          const existingEntry = dupContract.docs[0];
+          const existingCin = existingEntry.data().cin || '';
+          if (cin && cin.trim() !== '' && existingCin.trim() === '') {
+            await existingEntry.ref.update({ cin: cin.trim() });
+            if (lc && typeof lc.db !== 'undefined') {
+              try { lc.db.prepare('UPDATE register_cache SET cin = ? WHERE id = ?').run(cin.trim(), existingEntry.id); } catch (_) {}
+            }
+            console.log(`[CIN BACKFILL] Updated CIN for contract ${contrat}: ${cin}`);
+          }
+          console.warn(`[DEDUP] autoRegisterCA: Duplicate contract ${contrat} found for ${gymId}/${today}. Skipping insert.`);
           return;
         }
       } else if (nom && totalAmt > 0) {
