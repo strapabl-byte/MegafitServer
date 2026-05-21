@@ -26,8 +26,14 @@ module.exports = function(deps) {
 
   function dateRange(days) {
     const dates = [];
+    const moroccoNow = new Date(Date.now() + 3600000); // UTC+1
+    const moroccoHour = moroccoNow.getUTCHours();
+    // Before 6AM: start from yesterday (business day not started)
+    const start = new Date(moroccoNow);
+    if (moroccoHour < 6) start.setUTCDate(start.getUTCDate() - 1);
     for (let i = 0; i < days; i++) {
-      const d = new Date(); d.setDate(d.getDate() - i);
+      const d = new Date(start);
+      d.setUTCDate(d.getUTCDate() - i);
       dates.push(d.toISOString().slice(0, 10));
     }
     return dates;
@@ -84,8 +90,10 @@ module.exports = function(deps) {
       dates = thisMonthDates();
     } else if (p === 'week') {
       dates = dateRange(7);
+    } else if (p === 'range' && req.query.days) {
+      dates = dateRange(Math.min(parseInt(req.query.days), 365));
     } else if (p === 'date' && req.query.date) {
-      dates = [req.query.date]; // specific day selected by user
+      dates = [req.query.date];
     } else {
       dates = [todayDate()];
     }
@@ -113,10 +121,12 @@ module.exports = function(deps) {
         filterDates = thisMonthDates();
       } else if (req.query.period === 'week') {
         filterDates = dateRange(7);
+      } else if (req.query.period === 'range' && req.query.days) {
+        filterDates = dateRange(Math.min(parseInt(req.query.days), 365));
       } else if (req.query.period === 'date' && req.query.date) {
-        filterDates = [req.query.date]; // specific day
+        filterDates = [req.query.date];
       } else {
-        filterDates = null; // use hours
+        filterDates = null;
       }
 
       let rows;
