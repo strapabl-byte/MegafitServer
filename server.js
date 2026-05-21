@@ -449,6 +449,31 @@ app.post('/admin/fix-gym-isolation', (req, res) => {
   }
 });
 
+// ── ADMIN: Force-reload Odoo members from slim JSON (fixes gym_id mismatches) ─
+// POST /admin/reload-odoo-members
+app.post('/admin/reload-odoo-members', (req, res) => {
+  const secret   = req.headers['x-inject-secret'];
+  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
+  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+  try {
+    const slimPath = path.join(__dirname, 'data', 'odoo_members_slim.json');
+    if (!fs.existsSync(slimPath)) return res.status(404).json({ error: 'odoo_members_slim.json not found' });
+    const members = JSON.parse(fs.readFileSync(slimPath, 'utf8'));
+    const normName = s => (s || '').replace(/\s+/g, ' ').trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const deleted = lc.db.prepare('DELETE FROM odoo_members_cache').run().changes;
+    const insert = lc.db.prepare(`INSERT OR IGNORE INTO odoo_members_cache (full_name, first_name, last_name, gym_id, status, expires_on, name_norm) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+    const tx = lc.db.transaction((rows) => { for (const m of rows) insert.run(m.fullName, m.firstName, m.lastName, m.gymId, m.status, m.expiresOn, normName(m.fullName)); });
+    tx(members);
+    const byGym = lc.db.prepare('SELECT gym_id, COUNT(*) as c FROM odoo_members_cache GROUP BY gym_id').all();
+    const total  = lc.db.prepare('SELECT COUNT(*) as c FROM odoo_members_cache').get().c;
+    console.log(`✅ [ADMIN] Odoo members reloaded: deleted ${deleted}, inserted ${members.length}. By gym:`, byGym);
+    res.json({ ok: true, deleted, inserted: members.length, total, byGym });
+  } catch (err) {
+    console.error('[admin/reload-odoo-members] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── ADMIN: Clear pending_cache for a gym ───────────────────────────────────
 // POST /admin/clear-pending-cache  body: { gymId }
 app.post('/admin/clear-pending-cache', (req, res) => {
