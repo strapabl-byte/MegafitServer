@@ -778,6 +778,24 @@ Rules:
     }
   });
 
+  // ── GET /pending-decaissements (super admin only) ─────────────────────────
+  // Returns all décaissements with status='pending' across gyms for approval
+  router.get('/pending-decaissements', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const days = parseInt(req.query.days) || 30;
+      const rows = lc.db.prepare(`
+        SELECT * FROM decaissements_cache
+        WHERE status = 'pending'
+        AND date >= date('now', '-' || ? || ' days')
+        ORDER BY created_at DESC
+      `).all(days);
+      res.json({ ok: true, count: rows.length, pending: rows });
+    } catch (err) {
+      console.error('GET /pending-decaissements error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // ── Approval Endpoints ───────────────────────────────────────────────────
   router.patch('/decaissement/:id/approve', verifyAzureToken, requireAdmin, async (req, res) => {
     try {

@@ -652,6 +652,13 @@ function getDecaissements(gymId, date) {
   return db.prepare(sql).all(...g.params, date);
 }
 
+// Returns ONLY super-admin-validated décaissements (used in KPI revenue deduction)
+function getApprovedDecaissements(gymId, date) {
+  const g = buildInClause(getGymIds(gymId));
+  const sql = `SELECT * FROM decaissements_cache WHERE ${g.sql} AND date=? AND status='approved' ORDER BY created_at ASC`;
+  return db.prepare(sql).all(...g.params, date);
+}
+
 function deleteDecaissement(gymId, date, id) {
   db.prepare('DELETE FROM decaissements_cache WHERE id=? AND gym_id=? AND date=?').run(id, gymId, date);
 }
@@ -950,7 +957,7 @@ module.exports = {
   // register
   upsertRegister, getRegister, deleteRegisterEntry,
   // decaissements
-  upsertDecaissements, getDecaissements, deleteDecaissement,
+  upsertDecaissements, getDecaissements, getApprovedDecaissements, deleteDecaissement,
   // payments
   upsertPayments, getPayments, deletePayment,
   // meta
