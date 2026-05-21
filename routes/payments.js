@@ -15,11 +15,14 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
     return map[plan] || plan || '1 AN';
   }
 
-  async function autoRegisterCA({ gymId = 'dokarat', date, nom, tel, cin, plan, subscriptionName, amount, method, commercial, contrat, payments: split, reste, note }) {
+  async function autoRegisterCA({ gymId = 'dokarat', date, nom, tel, cin, plan, subscriptionName, amount, method, commercial, contrat, payments: split, reste, note, totalContract }) {
     try {
       const today = date || new Date().toISOString().slice(0, 10);
       const docId = `${gymId}_${today}`;
       const totalAmt = Number(amount) || 0;
+      // 💰 PRIX = total contract value (not just what was paid this session)
+      // Formula: totalContract if provided, else amount + reste (paid + balance = full contract)
+      const prixTotal = Number(totalContract) || (totalAmt + Number(reste || 0)) || totalAmt;
 
       // 🛡️ DEDUPLICATION CHECK: Prevent identical entries in the daily register
       const entriesRef = db.collection('megafit_daily_register').doc(docId).collection('entries');
@@ -39,15 +42,15 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
           console.warn(`[DEDUP] autoRegisterCA: Duplicate contract ${contrat} found for ${gymId}/${today}. Skipping insert.`);
           return;
         }
-      } else if (nom && totalAmt > 0) {
+      } else if (nom && prixTotal > 0) {
         const fiveMinsAgo = new Date(Date.now() - 5 * 60 * 1000);
         const dupName = await entriesRef
           .where('nom', '==', nom)
-          .where('prix', '==', totalAmt)
+          .where('prix', '==', prixTotal)
           .where('createdAt', '>=', fiveMinsAgo)
           .limit(1).get();
         if (!dupName.empty) {
-          console.warn(`[DEDUP] autoRegisterCA: Identical entry for ${nom} (${totalAmt} DH) found in last 5m. Skipping.`);
+          console.warn(`[DEDUP] autoRegisterCA: Identical entry for ${nom} (${prixTotal} DH total) found in last 5m. Skipping.`);
           return;
         }
       }
@@ -73,11 +76,11 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
         else                           espece   = totalAmt;
       }
 
-      const prix = tpe + espece + virement + cheque || totalAmt;
+      // prix = total contract (e.g. 4200 DH), payment columns = what client paid this session (e.g. 3200 DH)
       const addedDoc = await db.collection('megafit_daily_register').doc(docId).collection('entries').add({
         nom: nom || '', tel: tel || '', contrat: contrat || '',
         commercial: (commercial || 'FORM').toUpperCase(), cin: cin || '',
-        prix, tpe, espece, virement, cheque,
+        prix: prixTotal, tpe, espece, virement, cheque,
         abonnement: planToAbonnement(plan, subscriptionName),
         reste:      Number(reste) || 0,
         note_reste: note || (reste > 0 ? `Reste: ${reste} DH` : ''),
@@ -95,7 +98,7 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
         lc.upsertRegister(gymId, today, [{ id: addedDoc.id, ...newSnap.data() }]);
       }
       
-      console.log(`✅ AutoRegisterCA: ${nom} | ${prix} DH → ${docId}`);
+      console.log(`✅ AutoRegisterCA: ${nom} | prix=${prixTotal} DH (paid=${totalAmt} DH, reste=${Number(reste)||0} DH) → ${docId}`);
     } catch (err) {
       console.error('⚠️  AutoRegisterCA (non-blocking):', err.message);
     }
@@ -770,7 +773,10 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
         commercial: insData.commercial || req.user?.preferred_username || 'FORM',
         contrat: insData.contractNumber || '',
         payments: insData.payments || null,
-        reste: insData.totals?.balance || 0, note: note || '',
+        reste: insData.totals?.balance || 0,
+        note: note || '',
+        // 💰 Pass the full contract total so PRIX = total, not just what was paid
+        totalContract: insData.totals?.total || null,
       });
 
       if (insDoc.exists) {
