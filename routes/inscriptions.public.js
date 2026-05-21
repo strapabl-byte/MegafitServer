@@ -1,13 +1,32 @@
 'use strict';
 // routes/inscriptions.public.js
 // Public tablet-facing routes — form submission & member search require NO auth
-// Financial routes (settle-balance, debtors) require Azure token auth
+// Financial routes:
+//   /public/debtors       → dual auth: X-Inject-Secret OR Azure Bearer token
+//   /public/settle-balance → full Azure token required (write operation)
 
 const { Router } = require('express');
 const { verifyAzureToken } = require('../middleware/auth');
 
 module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, uploadBase64ToStorage, invalidateCache }) {
   const router = Router();
+
+  // 🔒 Dual-auth: accept X-Inject-Secret header OR a valid Azure Bearer token.
+  // Used only for READ-ONLY endpoints (debtors list).
+  // Write endpoints (settle-balance) must still use full verifyAzureToken.
+  function requireDebtorAccess(req, res, next) {
+    const injectSecret = process.env.INJECT_SECRET;
+    const clientSecret = req.headers['x-inject-secret'];
+
+    // Fast path: valid shared secret
+    if (injectSecret && clientSecret && clientSecret === injectSecret) {
+      req.user = { name: 'PWA-Shared-Secret', isServiceAccount: true };
+      return next();
+    }
+
+    // Fallback: full Azure JWT verification
+    return verifyAzureToken(req, res, next);
+  }
 
   const GYM_ALIAS_MAP = {
     'dokarat': 'dokarat', 'dokkarat': 'dokarat', 'doukkarate': 'dokarat', 'fes dokkarat': 'dokarat', 'doukarat': 'dokarat',
@@ -29,8 +48,8 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
     }
   });
 
-  // ── GET /public/debtors ─────────────────────────────────────── 🔒 AUTH ──
-  router.get('/public/debtors', verifyAzureToken, async (req, res) => {
+  // ── GET /public/debtors ─────────────────────── 🔒 DUAL-AUTH (secret or Azure) ──
+  router.get('/public/debtors', requireDebtorAccess, async (req, res) => {
     try {
       const gymId = (req.query.gymId || '').toLowerCase().trim();
       if (!VALID_GYMS.includes(gymId)) return res.status(400).json({ error: 'Invalid gymId' });
