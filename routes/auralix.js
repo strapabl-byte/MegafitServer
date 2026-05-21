@@ -11,7 +11,8 @@ module.exports = function(deps) {
   // Unified Auth Wrapper for Auralix
   function auth(req, res, next) {
     const token = (req.headers.authorization || '').replace('Bearer ', '');
-    const KEY = process.env.AURALIX_API_KEY || 'auralix-readonly-2026';
+    const KEY = process.env.AURALIX_API_KEY;
+    if (!KEY) console.error('[Auralix] WARNING: AURALIX_API_KEY env var not set! API key auth is disabled.');
     if (token === KEY) { req.au = { email: 'demo' }; return next(); }
     
     // Use the dashboard's enterprise auth
