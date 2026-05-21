@@ -1017,8 +1017,23 @@ Reply ONLY with valid JSON (no markdown):
       const incomeMonth = getRevenueAndBreakdown(monthStart);
       const incomeYear  = getRevenueAndBreakdown(yearStart);
 
+      // ── Real Odoo member total per gym ────────────────────────────────────────
+      const phOdoo = gymIds.map(() => '?').join(',');
+      const odooTotal = lc.db.prepare(
+        `SELECT COUNT(*) as c FROM odoo_members_cache WHERE gym_id IN (${phOdoo})`
+      ).get(...gymIds)?.c || 0;
+
+      // ── Unique members detected at door this month ─────────────────────────────
+      const monthStartStr = toLocalDateStr(monthStart);
+      const phDet = gymIds.map(() => '?').join(',');
+      const detectedMonth = lc.db.prepare(
+        `SELECT COUNT(DISTINCT name) as c FROM entries WHERE gym_id IN (${phDet}) AND date >= ?`
+      ).get(...gymIds, monthStartStr)?.c || 0;
+
       const kpis = {
         currentMonthLabel,   // e.g. "MAI 2026"
+        odooTotal,           // Real total from Odoo (e.g. 7429 for Dokarat)
+        detectedMonth,       // Unique people detected at door scanner this month
         newMembers: { day: countRegisterInRange(todayStart), week: countRegisterInRange(weekStart), month: countRegisterInRange(monthStart), year: countRegisterInRange(yearStart) },
         income:     { day: incomeDay.total, week: incomeWeek.total, month: incomeMonth.total, year: incomeYear.total },
         paymentMethods: { espece: incomeMonth.espece, tpe: incomeMonth.tpe, virement: incomeMonth.virement, cheque: incomeMonth.cheque },
