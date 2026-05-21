@@ -1,9 +1,10 @@
 'use strict';
 // routes/inscriptions.public.js
-// Public tablet-facing routes — NO auth required (secured by gymId validation)
-// Handles: form submission, member search, balance settlement, debtors list
+// Public tablet-facing routes — form submission & member search require NO auth
+// Financial routes (settle-balance, debtors) require Azure token auth
 
 const { Router } = require('express');
+const { verifyAzureToken } = require('../middleware/auth');
 
 module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, uploadBase64ToStorage, invalidateCache }) {
   const router = Router();
@@ -28,8 +29,8 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
     }
   });
 
-  // ── GET /public/debtors ───────────────────────────────────────────────────
-  router.get('/public/debtors', async (req, res) => {
+  // ── GET /public/debtors ─────────────────────────────────────── 🔒 AUTH ──
+  router.get('/public/debtors', verifyAzureToken, async (req, res) => {
     try {
       const gymId = (req.query.gymId || '').toLowerCase().trim();
       if (!VALID_GYMS.includes(gymId)) return res.status(400).json({ error: 'Invalid gymId' });
@@ -110,8 +111,9 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
     }
   });
 
-  // ── POST /public/settle-balance ───────────────────────────────────────────
-  router.post('/public/settle-balance', async (req, res) => {
+  // ── POST /public/settle-balance ─────────────────────────────── 🔒 AUTH ──
+  // Requires Azure token — this endpoint modifies member financial records.
+  router.post('/public/settle-balance', verifyAzureToken, async (req, res) => {
     try {
       const { memberId, gymId: rawGymId, amount, method, paymentsSplit, note,
               chequePhoto, chequePhotoBack, signatureClient, signatureCommercial, commercialName } = req.body;
