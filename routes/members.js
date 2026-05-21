@@ -627,5 +627,68 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
     }
   });
 
+
+  // ── PATCH /api/members/:id/balance — Super Admin: set or adjust balance ───
+  // Allows super admin to manually set or add a balance (reste) for a member.
+  // This balance will automatically appear in the PWA Pay Reste list (/public/debtors).
+  router.patch('/:id/balance', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const memberId = req.params.id;
+      const { balance, balanceDeadline, note, mode } = req.body;
+      // mode: 'set' (default) → replace, 'add' → add on top of existing
+      if (balance === undefined || balance === null) {
+        return res.status(400).json({ error: 'Missing balance amount' });
+      }
+
+      const ref = db.collection('members').doc(memberId);
+      const snap = await ref.get();
+      if (!snap.exists) return res.status(404).json({ error: 'Member not found' });
+
+      const member = snap.data();
+      const gymId = member.location || member.gymId || 'dokarat';
+
+      // 🔒 Super admin: verify gym access
+      if (!req.hasAccessToGym(gymId)) {
+        return res.status(403).json({ error: 'Access Denied: You do not have access to this gym' });
+      }
+
+      const oldBalance = Number(member.balance || 0);
+      const delta = Number(balance) || 0;
+      const newBalance = mode === 'add'
+        ? Math.max(0, oldBalance + delta)
+        : Math.max(0, delta);
+
+      const updateData = {
+        balance: newBalance,
+        balanceDeadline: balanceDeadline || null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        balanceLastEditedBy: req.user?.preferred_username || req.user?.name || 'SuperAdmin',
+        balanceLastEditedAt: new Date().toISOString(),
+        balanceNote: note || null,
+      };
+
+      await ref.update(updateData);
+
+      // Write-through to SQLite
+      try {
+        const updatedSnap = await ref.get();
+        lc.upsertMembers(gymId, [{ id: memberId, ...updatedSnap.data() }]);
+      } catch (cacheErr) {
+        console.warn('[balance-patch] SQLite sync failed:', cacheErr.message);
+      }
+
+      // Invalidate profile cache
+      delete apiCache.profiles[memberId];
+
+      console.log(`[BALANCE EDIT] ${req.user?.name || 'Admin'} set balance for ${member.fullName} (${gymId}): ${oldBalance} → ${newBalance} DH (mode: ${mode || 'set'})`);
+
+      res.json({ ok: true, memberId, oldBalance, newBalance, balanceDeadline: balanceDeadline || null });
+    } catch (err) {
+      console.error('Balance Patch Error:', err);
+      res.status(500).json({ error: 'Failed to update balance' });
+    }
+  });
+
   return router;
 };
+
