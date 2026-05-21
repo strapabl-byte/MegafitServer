@@ -779,7 +779,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
               commercial: ins?.commercial || ins?.submittedBy || 'FORM',
               contrat: ins?.contractNumber || '',
               payments: { espece, carte, virement, cheque },
-              reste: Math.max(0, Number(ins?.totals?.total || 0) - totalPaid),
+              reste: Number(ins?.totals?.balance ?? Math.max(0, Number(ins?.totals?.total || 0) - totalPaid)),
               note: `Inscription N°${ins?.contractNumber || ''} — ${ins?.subscriptionName || ''}`,
               chequePhoto: chequeUrl,
               chequePhotoBack: chequeUrlBack,
