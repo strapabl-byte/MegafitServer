@@ -971,7 +971,8 @@ Reply ONLY with valid JSON (no markdown):
         return count;
       };
 
-      // ?????? Revenue from SQLite register cache ??? sum ALL payment columns ??????
+      // 💰 Revenue from SQLite register cache — GROSS total (matches Register page)
+      // Note: décaissements are NOT subtracted here so the value matches the register exactly.
       const getRevenueAndBreakdown = (fromDate) => {
         let total = 0, espece = 0, tpe = 0, virement = 0, cheque = 0;
         const cursor = new Date(fromDate);
@@ -986,14 +987,6 @@ Reply ONLY with valid JSON (no markdown):
               espece += e_esp; tpe += e_tpe; virement += e_vir; cheque += e_che;
               total += e_esp + e_tpe + e_vir + e_che;
             });
-            const decs = lc.getDecaissements(gid, dateStr);
-            if (decs) {
-              decs.forEach(dec => {
-                const amt = Number(dec.montant) || 0;
-                espece -= amt;
-                total -= amt;
-              });
-            }
           }
           cursor.setDate(cursor.getDate() + 1);
         }
