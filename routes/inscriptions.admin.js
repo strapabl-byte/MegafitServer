@@ -327,8 +327,8 @@ module.exports = function inscriptionsAdminRouter({ db, admin, lc, apiCache, inv
   // Repair: propagates pdfUrl AND photo from confirmed inscriptions → member docs.
   // Accepts x-inject-secret header for maintenance curl calls.
   router.post('/api/inscriptions/fix-pdf-urls', async (req, res) => {
-    const secret = req.headers['x-inject-secret'] || req.body?.secret;
-    if (secret !== (process.env.SEED_SECRET || 'megafit-seed-2026')) {
+    const secret = req.headers['x-inject-secret']; // ?? header only - never accept secret in body
+    if (secret !== (process.env.INJECT_SECRET)) {
       if (!req.headers.authorization) return res.status(401).json({ error: 'Unauthorized' });
     }
 
@@ -413,8 +413,8 @@ module.exports = function inscriptionsAdminRouter({ db, admin, lc, apiCache, inv
   // Works across ALL statuses: pending, converted, awaiting_payment.
   // Accepts x-inject-secret for curl/CLI usage.
   router.post('/api/inscriptions/force-confirm-pending', async (req, res) => {
-    const secret = req.headers['x-inject-secret'] || req.body?.secret;
-    if (secret !== (process.env.SEED_SECRET || 'megafit-seed-2026')) {
+    const secret = req.headers['x-inject-secret']; // ?? header only - never accept secret in body
+    if (secret !== (process.env.INJECT_SECRET)) {
       if (!req.headers.authorization) return res.status(401).json({ error: 'Unauthorized' });
     }
 

@@ -1094,7 +1094,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
   router.post('/api/inscriptions/fix-pdf-urls', async (req, res) => {
     // Allow maintenance secret as bypass (same pattern as other admin endpoints)
     const secret = req.headers['x-inject-secret'] || req.body?.secret;
-    if (secret !== (process.env.SEED_SECRET || 'megafit-seed-2026')) {
+    if (secret !== (process.env.INJECT_SECRET)) {
       // Fall back to normal token auth
       if (!req.headers.authorization) return res.status(401).json({ error: 'Unauthorized' });
     }

@@ -1,23 +1,73 @@
 'use strict';
-// server.js — Entry point. ~100 lines. Mounts routers. Nothing more.
+// server.js — Entry point. Mounts routers. Nothing more.
 require('dotenv').config();
-const express = require('express');
-const helmet  = require('helmet');
-const cors    = require('cors');
-const multer  = require('multer');
-const crypto  = require('crypto');
-const path    = require('path');
-const fs      = require('fs');
-const admin   = require('firebase-admin');
-const lc      = require('./localCache');
+const express   = require('express');
+const helmet    = require('helmet');
+const cors      = require('cors');
+const rateLimit = require('express-rate-limit');
+const multer    = require('multer');
+const crypto    = require('crypto');
+const path      = require('path');
+const fs        = require('fs');
+const admin     = require('firebase-admin');
+const lc        = require('./localCache');
 const { syncGymCounts, scheduleNightlySync } = require('./auto_sync');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🔒 SECURITY: INJECT_SECRET must be set as an environment variable.
+// If not set, admin endpoints will refuse all requests.
+// ─────────────────────────────────────────────────────────────────────────────
+const INJECT_SECRET = process.env.INJECT_SECRET;
+if (!INJECT_SECRET) {
+  console.error('⚠️  WARNING: INJECT_SECRET env var is not set! All /admin/* endpoints are DISABLED until you set it in Render Environment Variables.');
+}
+const checkSecret = (req, res) => {
+  if (!INJECT_SECRET) return res.status(503).json({ error: 'Admin secret not configured on server. Set INJECT_SECRET env var.' });
+  const provided = req.headers['x-inject-secret'];
+  if (provided !== INJECT_SECRET) return res.status(403).json({ error: 'Forbidden' });
+  return null; // OK
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // App Setup
 // ─────────────────────────────────────────────────────────────────────────────
 const app = express();
 app.use(helmet());
-app.use(cors({ origin: true, credentials: true }));
+
+// 🔒 CORS: only allow our own frontend origins
+const ALLOWED_ORIGINS = [
+  'https://megafitauth.web.app',
+  'https://megafitauth.firebaseapp.com',
+  'https://megafitserverii.onrender.com',
+  'http://localhost:5173',
+  'http://localhost:4000',
+  'http://localhost:3000',
+];
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, Render internal, curl with auth)
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    callback(new Error(`CORS blocked: ${origin}`));
+  },
+  credentials: true,
+}));
+
+// 🔒 RATE LIMITING
+app.use('/public/', rateLimit({
+  windowMs: 60 * 1000, max: 60,
+  message: { error: 'Too many requests, slow down.' },
+  standardHeaders: true, legacyHeaders: false,
+}));
+app.use('/api/', rateLimit({
+  windowMs: 60 * 1000, max: 300,
+  message: { error: 'Too many requests, slow down.' },
+  standardHeaders: true, legacyHeaders: false,
+}));
+app.use('/admin/', rateLimit({
+  windowMs: 60 * 1000, max: 15,
+  message: { error: 'Too many admin requests.' },
+  standardHeaders: true, legacyHeaders: false,
+}));
 // Chrome Private Network Access — allows localhost:5173 to call localhost:4000
 // without triggering the "Access other apps" permission dialog.
 app.use((req, res, next) => {
@@ -194,14 +244,11 @@ app.use(auditLogger);
 // ADMIN: Export all stats and entries for 30 days
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/api/admin/export-all-stats', (req, res) => {
-  const secret = req.headers['x-inject-secret'];
-  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
-  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+  const fail = checkSecret(req, res); if (fail !== null) return;
   try {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
     const dateStr = thirtyDaysAgo.toISOString().slice(0, 10);
-    
     const stats = lc.db.prepare('SELECT * FROM daily_stats WHERE date >= ?').all(dateStr);
     const entries = lc.db.prepare('SELECT * FROM entries WHERE date >= ?').all(dateStr);
     res.json({ stats, entries });
@@ -211,9 +258,10 @@ app.get('/api/admin/export-all-stats', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// System Stats — live SQLite disk usage for Auralix dashboard
+// 🔒 System Stats — requires inject secret (exposes server internals)
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/api/system-stats', (req, res) => {
+  const fail = checkSecret(req, res); if (fail !== null) return;
   try {
     const fs   = require('fs');
     const path = require('path');
@@ -276,9 +324,7 @@ app.get('/api/system-stats', (req, res) => {
 // MUST be registered BEFORE wildcard routers — protected by INJECT_SECRET
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/admin/inject-stats', (req, res) => {
-  const secret = req.headers['x-inject-secret'];
-  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
-  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+  const fail = checkSecret(req, res); if (fail !== null) return;
   const { daily_stats } = req.body;
   if (!Array.isArray(daily_stats)) return res.status(400).json({ error: 'daily_stats array required' });
   let inserted = 0;
@@ -308,9 +354,7 @@ app.post('/admin/inject-stats', (req, res) => {
 // POST /admin/inject-register  body: { rows: [...], wipe: { gymId, dateFrom, dateTo } }
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/admin/inject-register', (req, res) => {
-  const secret   = req.headers['x-inject-secret'];
-  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
-  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+  const fail = checkSecret(req, res); if (fail !== null) return;
 
   const { rows, wipe } = req.body;
   if (!Array.isArray(rows)) return res.status(400).json({ error: 'rows array required' });
@@ -362,9 +406,7 @@ app.post('/admin/inject-register', (req, res) => {
 // POST /admin/inject-stats  body: { stats: [{gym_id, date, count, raw_count}] }
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/admin/inject-stats', (req, res) => {
-  const secret   = req.headers['x-inject-secret'];
-  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
-  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+  const fail = checkSecret(req, res); if (fail !== null) return;
 
   const { stats } = req.body;
   if (!Array.isArray(stats)) return res.status(400).json({ error: 'stats array required' });
@@ -394,9 +436,7 @@ app.post('/admin/inject-stats', (req, res) => {
 // Run once after deploying the upsertMembers bug fix.
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/admin/fix-gym-isolation', (req, res) => {
-  const secret   = req.headers['x-inject-secret'];
-  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
-  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+  const fail = checkSecret(req, res); if (fail !== null) return;
 
   try {
     const CANONICAL_GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
@@ -452,9 +492,7 @@ app.post('/admin/fix-gym-isolation', (req, res) => {
 // ── ADMIN: Force-reload Odoo members from slim JSON (fixes gym_id mismatches) ─
 // POST /admin/reload-odoo-members
 app.post('/admin/reload-odoo-members', (req, res) => {
-  const secret   = req.headers['x-inject-secret'];
-  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
-  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+  const fail = checkSecret(req, res); if (fail !== null) return;
   try {
     const slimPath = path.join(__dirname, 'data', 'odoo_members_slim.json');
     if (!fs.existsSync(slimPath)) return res.status(404).json({ error: 'odoo_members_slim.json not found' });
@@ -477,9 +515,7 @@ app.post('/admin/reload-odoo-members', (req, res) => {
 // ── ADMIN: Clear pending_cache for a gym ───────────────────────────────────
 // POST /admin/clear-pending-cache  body: { gymId }
 app.post('/admin/clear-pending-cache', (req, res) => {
-  const secret   = req.headers['x-inject-secret'];
-  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
-  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+  const fail = checkSecret(req, res); if (fail !== null) return;
 
   const { gymId } = req.body;
   if (!gymId) return res.status(400).json({ error: 'gymId required' });
@@ -493,11 +529,9 @@ app.post('/admin/clear-pending-cache', (req, res) => {
 });
 
 // ── ADMIN: Inspect pending_cache for a member (diagnostic) ─────────────────
-// GET /admin/inspect-pending?nom=Maazouzi&secret=megafit-seed-2026
+// GET /admin/inspect-pending?nom=Maazouzi  (secret in header: x-inject-secret)
 app.get('/admin/inspect-pending', (req, res) => {
-  const secret   = req.query.secret;
-  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
-  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+  const fail = checkSecret(req, res); if (fail !== null) return;
 
   const nom = (req.query.nom || '').trim();
   if (!nom) return res.status(400).json({ error: 'nom query param required' });
@@ -543,9 +577,7 @@ app.get('/admin/inspect-pending', (req, res) => {
 //   6. Write meta flag — endpoint becomes a no-op forever after
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/admin/fix-member-balances', async (req, res) => {
-  const secret   = req.headers['x-inject-secret'];
-  const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
-  if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
+  const fail = checkSecret(req, res); if (fail !== null) return;
 
   // ── ONE-TIME GUARD: Check if already done ──────────────────────────────────
   const alreadyDone = lc.getMeta('balance_fix_done');

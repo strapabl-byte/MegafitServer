@@ -1060,7 +1060,7 @@ Reply ONLY with valid JSON (no markdown):
   router.get('/api/admin/export-all-stats', async (req, res) => {
     try {
       const secret = req.headers['x-inject-secret'];
-      const expected = process.env.INJECT_SECRET || 'megafit-seed-2026';
+      const expected = process.env.INJECT_SECRET;
       if (secret !== expected) return res.status(403).json({ error: 'Forbidden' });
 
       const stats = db.prepare('SELECT * FROM daily_stats WHERE date >= ?').all(lc.getMoroccanDateStr(30));
