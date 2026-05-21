@@ -33,9 +33,12 @@ module.exports = function(deps) {
     return dates;
   }
 
-  // Returns only today's date string (Morocco time UTC+1)
+  // Returns today's date string (Morocco UTC+1), but before 6AM treat as yesterday
+  // so the business day resets at 6:00 AM, not midnight
   function todayDate() {
-    const d = new Date(Date.now() + 3600000);
+    const moroccoHour = (new Date().getUTCHours() + 1) % 24;
+    const d = new Date(Date.now() + 3600000); // shift to Morocco time
+    if (moroccoHour < 6) d.setUTCDate(d.getUTCDate() - 1); // before 6AM → yesterday
     return d.toISOString().slice(0, 10);
   }
 
@@ -76,11 +79,13 @@ module.exports = function(deps) {
     const p = req.query.period || 'today';
     let dates;
     if (p === 'today' || p === '24h') {
-      dates = [todayDate()]; // Only today
+      dates = [todayDate()];
     } else if (p === 'month') {
-      dates = thisMonthDates(); // From 1st of current month to today
+      dates = thisMonthDates();
     } else if (p === 'week') {
-      dates = dateRange(7); // Last 7 days
+      dates = dateRange(7);
+    } else if (p === 'date' && req.query.date) {
+      dates = [req.query.date]; // specific day selected by user
     } else {
       dates = [todayDate()];
     }
@@ -108,6 +113,8 @@ module.exports = function(deps) {
         filterDates = thisMonthDates();
       } else if (req.query.period === 'week') {
         filterDates = dateRange(7);
+      } else if (req.query.period === 'date' && req.query.date) {
+        filterDates = [req.query.date]; // specific day
       } else {
         filterDates = null; // use hours
       }
