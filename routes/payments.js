@@ -313,7 +313,34 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
       let payments = snap.docs.map(d => ({ id: d.id, ...d.data() }));
 
       // 2. Fetch payments linked to the member's true inscriptionId (for cases where memberId was not set on the payment)
-      const diskMember = lc.getMemberById ? lc.getMemberById(req.params.memberId) : null;
+      let diskMember = lc.getMemberById ? lc.getMemberById(req.params.memberId) : null;
+      if (!diskMember && req.params.memberId.startsWith('odoo-')) {
+        const odooId = req.params.memberId.replace('odoo-', '');
+        const row = lc.db ? lc.db.prepare('SELECT * FROM odoo_members_cache WHERE id = ?').get(odooId) : null;
+        if (row) {
+          diskMember = {
+            id: req.params.memberId,
+            fullName: row.full_name,
+            full_name: row.full_name,
+            gym_id: row.gym_id,
+            location: row.gym_id,
+            plan: 'Monthly',
+            status: 'expired',
+            expires_on: row.expires_on,
+            expiresOn: row.expires_on,
+            created_at: row.expires_on,
+            createdAt: row.expires_on,
+            total_paid: 0,
+            totalPaid: 0,
+            last_payment_date: null,
+            lastPaymentDate: null,
+            isArchive: true,
+            is_archive: 1,
+            importedFromOdoo: true,
+            isImported: true,
+          };
+        }
+      }
       const diskMemberData = diskMember || null;
       let trueInscriptionId = diskMemberData?.inscriptionId || diskMemberData?.inscription_id || null;
 
