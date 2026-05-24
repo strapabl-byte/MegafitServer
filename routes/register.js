@@ -391,13 +391,35 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
 
       const duplicates = [];
 
+      // Helper to identify if a register entry is an installment/split/balance payment
+      function isInstallment(e) {
+        if (!e) return false;
+        if (e.source === 'reste_settlement') return true;
+        const clean = str => (str || '')
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '');
+        const note = clean(e.note_reste);
+        const abonnement = clean(e.abonnement);
+        const keywords = ['reste', 'reglement', 'complement', 'solde', 'acompte', 'versement', 'split'];
+        return keywords.some(k => note.includes(k) || abonnement.includes(k));
+      }
+
       // CIN-based duplicates
       Object.entries(byCin).forEach(([cin, entries]) => {
-        if (entries.length < 2) return;
+        // Filter out installment/split payments first
+        const activeEntries = entries.filter(e => !isInstallment(e));
+        if (activeEntries.length < 2) return;
+        
         // Sort by date
-        entries.sort((a, b) => a.date.localeCompare(b.date));
-        for (let i = 1; i < entries.length; i++) {
-          const prev = entries[i-1], curr = entries[i];
+        activeEntries.sort((a, b) => a.date.localeCompare(b.date));
+        for (let i = 1; i < activeEntries.length; i++) {
+          const prev = activeEntries[i-1], curr = activeEntries[i];
+          
+          // If they share a valid contract number, skip (they belong to the same subscription transaction)
+          const sameContract = (prev.contrat && curr.contrat && prev.contrat.trim() !== '' && prev.contrat.trim() !== '-' && prev.contrat === curr.contrat);
+          if (sameContract) continue;
+
           const daysDiff = Math.round((new Date(curr.date) - new Date(prev.date)) / 86400000);
           const sameGym = prev.gym_id === curr.gym_id;
           const type = (sameGym && daysDiff < 45) ? 'suspect' : 'renouvellement';
@@ -417,18 +439,28 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
 
       // Name-only duplicates (no CIN match already found above)
       Object.entries(byName).forEach(([nom, entries]) => {
-        if (entries.length < 2) return;
-        const hasCin = entries.some(e => {
+        // Filter out installment/split payments first
+        const activeEntries = entries.filter(e => !isInstallment(e));
+        if (activeEntries.length < 2) return;
+        
+        // Skip if already captured by CIN logic
+        const hasCin = activeEntries.some(e => {
           const cin = (e.cin||'').trim().toUpperCase();
           return cin && cin !== '-' && cin.length > 2 && byCin[cin]?.length > 1;
         });
-        if (hasCin) return; // already captured by CIN logic
-        entries.sort((a, b) => a.date.localeCompare(b.date));
-        const daysDiff = Math.round((new Date(entries[entries.length-1].date) - new Date(entries[0].date)) / 86400000);
+        if (hasCin) return; 
+
+        // If all active entries share the same valid contract number, skip (same subscription contract)
+        const firstContrat = (activeEntries[0].contrat || '').trim();
+        const allSameContract = firstContrat !== '' && firstContrat !== '-' && activeEntries.every(e => (e.contrat || '').trim() === firstContrat);
+        if (allSameContract) return;
+
+        activeEntries.sort((a, b) => a.date.localeCompare(b.date));
+        const daysDiff = Math.round((new Date(activeEntries[activeEntries.length-1].date) - new Date(activeEntries[0].date)) / 86400000);
         duplicates.push({
           type: 'nom_seulement',
           cin: null,
-          entries: entries.map(e => ({
+          entries: activeEntries.map(e => ({
             id: e.id, nom: e.nom, gym_id: e.gym_id, date: e.date,
             prix: Number(e.prix), abonnement: e.abonnement, commercial: e.commercial
           })),
@@ -720,7 +752,8 @@ Rules:
         cheque: r.cheque,
         reste: r.reste,
         note_reste: r.note_reste,
-        abonnement: r.abonnement
+        abonnement: r.abonnement,
+        source: r.source
       }));
 
       res.json({ ok: true, entries });
