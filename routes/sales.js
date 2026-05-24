@@ -458,13 +458,21 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
 
       // ── PASS 0: Load cached verdicts from SQLite ──────────────────────────
       // Key: register_id (PRIMARY KEY) — one row per inscription, ever.
-      const cachedRows = lc.db.prepare(`
-        SELECT register_id, type, confidence, matched_name, prev_club, prev_gym_id,
-               prev_status, last_sub, ai_verified, ai_reason, detection_mode,
-               used_variant, was_split
-        FROM resub_intelligence_cache
-        WHERE register_id IN (${rows.map(() => '?').join(',')})
-      `).all(...rows.map(r => String(r.id)));
+      // Chunk to avoid SQLite variable limits (999) when fetching multi-gym/multi-month
+      const cachedRows = [];
+      const batchSize = 900;
+      for (let i = 0; i < rows.length; i += batchSize) {
+        const batch = rows.slice(i, i + batchSize);
+        const placeholdersCache = batch.map(() => '?').join(',');
+        const batchRows = lc.db.prepare(`
+          SELECT register_id, type, confidence, matched_name, prev_club, prev_gym_id,
+                 prev_status, last_sub, ai_verified, ai_reason, detection_mode,
+                 used_variant, was_split
+          FROM resub_intelligence_cache
+          WHERE register_id IN (${placeholdersCache})
+        `).all(...batch.map(r => String(r.id)));
+        cachedRows.push(...batchRows);
+      }
 
       const cacheMap = new Map(cachedRows.map(c => [String(c.register_id), c]));
       console.log(`[ReSubCache] ${cacheMap.size}/${rows.length} inscriptions already cached`);
