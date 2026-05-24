@@ -347,9 +347,80 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
         ORDER BY date ASC
       `).all(...gymIds, `${target}-01`, `${target}-31`);
 
-      // ── 1. RESTE EN ATTENTE ───────────────────────────────────────────────
+      // ── 1A. DETECT SETTLED & PARTIALLY SETTLED BALANCE PAYMENTS ───────────
+      const settledList = [];
+      const partiallySettledList = [];
+      const processedKeys = new Set();
+
+      const restSettlements = allEntries.filter(e => e.source === 'reste_settlement');
+
+      for (const e of restSettlements) {
+        const memberKey = (e.cin && e.cin !== '-' && e.cin.trim().length > 2)
+          ? `cin:${e.cin.trim().toUpperCase()}`
+          : `name:${e.nom.trim().toUpperCase()}`;
+
+        if (processedKeys.has(memberKey)) {
+          continue;
+        }
+        processedKeys.add(memberKey);
+
+        // Fetch all history for this member to compute true balance state
+        const history = lc.db.prepare(`
+          SELECT * FROM register_cache
+          WHERE gym_id = ?
+            AND (
+              (nom = ? AND nom != '') 
+              OR (cin = ? AND cin != '' AND cin != '-')
+            )
+          ORDER BY date ASC, created_at ASC
+        `).all(e.gym_id, e.nom, e.cin);
+
+        const orig = history.find(h => h.source !== 'reste_settlement');
+        const latest = history[history.length - 1];
+        const latestReste = Number(latest.reste) || 0;
+
+        const prixTotal = orig ? Number(orig.prix) : (Number(latest.prix) || 0);
+        const totalPaid = history.reduce((sum, h) => sum + (Number(h.tpe)||0) + (Number(h.espece)||0) + (Number(h.virement)||0) + (Number(h.cheque)||0), 0);
+
+        if (latestReste <= 0) {
+          settledList.push({
+            id: latest.id,
+            nom: e.nom,
+            cin: e.cin,
+            tel: e.tel,
+            gym_id: e.gym_id,
+            date: latest.date,
+            prix: prixTotal,
+            totalPaid,
+            commercial: e.commercial,
+            note: e.note_reste || 'Reste réglé'
+          });
+        } else {
+          partiallySettledList.push({
+            id: latest.id,
+            nom: e.nom,
+            cin: e.cin,
+            tel: e.tel,
+            gym_id: e.gym_id,
+            date: latest.date,
+            prix: prixTotal,
+            totalPaid,
+            reste: latestReste,
+            commercial: e.commercial,
+            note: e.note_reste || `Reste partiel : ${latestReste} DH`
+          });
+        }
+      }
+
+      // ── 1B. RESTE EN ATTENTE ───────────────────────────────────────────────
       const resteEntries = allEntries
         .map(e => {
+          // Skip if this member has already paid their balance (fully or partially) this month
+          const memberKey = (e.cin && e.cin !== '-' && e.cin.trim().length > 2)
+            ? `cin:${e.cin.trim().toUpperCase()}`
+            : `name:${e.nom.trim().toUpperCase()}`;
+          if (processedKeys.has(memberKey)) return null;
+
           const paid = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
           const prix = Number(e.prix) || 0;
           let r = Number(e.reste) || 0;
@@ -624,6 +695,8 @@ Rules:
         totalEntries, score,
         insight,
         reste: resteEntries,
+        settled: settledList,
+        partiallySettled: partiallySettledList,
         duplicates: duplicates.sort((a, b) => (a.type === 'suspect' ? -1 : 1)),
         anomalies,
         expertFindings,
@@ -633,7 +706,9 @@ Rules:
           renewals: duplicates.filter(d => d.type === 'renouvellement').length,
           nameOnlyDuplicates: duplicates.filter(d => d.type === 'nom_seulement').length,
           prixZero: anomalies.length,
-          advancedAlerts: expertFindings.length
+          advancedAlerts: expertFindings.length,
+          totalSettled: settledList.length,
+          totalPartiallySettled: partiallySettledList.length
         }
       });
     } catch (err) {
