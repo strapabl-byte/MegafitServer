@@ -183,6 +183,47 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         finalMembers = [...finalMembers, ...normalizedPdf];
       }
 
+      // 2b️⃣ Merge archived Odoo members
+      try {
+        const getGymIds = (gId) => {
+          if (!gId || gId === 'all') return [];
+          if (Array.isArray(gId)) return gId;
+          return String(gId).split(',').map(s => s.trim()).filter(Boolean);
+        };
+        const buildInClause = (gymIds, prefix = 'gym_id') => {
+          if (gymIds.length === 0) return { sql: '1=1', params: [] };
+          const placeholders = gymIds.map(() => '?').join(',');
+          return { sql: `${prefix} IN (${placeholders})`, params: gymIds };
+        };
+
+        const odooGymIds = getGymIds(gymId);
+        const odooClause = buildInClause(odooGymIds);
+        const odooRows = lc.db ? lc.db.prepare(`SELECT * FROM odoo_members_cache WHERE ${odooClause.sql}`).all(...odooClause.params) : [];
+        
+        const odooMembers = odooRows.map(row => ({
+          id: `odoo-${row.id}`,
+          gym_id: row.gym_id,
+          location: row.gym_id,
+          full_name: row.full_name,
+          fullName: row.full_name,
+          expires_on: row.expires_on,
+          expiresOn: row.expires_on,
+          status: 'expired',
+          is_archive: 1,
+          isArchive: true,
+          importedFromOdoo: true,
+          isImported: true,
+          phone: '',
+          plan: 'Monthly',
+          subscription_name: 'Monthly',
+          isPendingWithPdf: false,
+        }));
+
+        finalMembers = [...finalMembers, ...odooMembers];
+      } catch (odooErr) {
+        console.error('Failed to merge Odoo members:', odooErr.message);
+      }
+
       // 3️⃣ Local search (zero Firebase reads)
       if (searchQuery) {
         const q = searchQuery.toLowerCase();
@@ -285,6 +326,38 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       // 1️⃣ Check disk first
       const diskMember = lc.getMemberById ? lc.getMemberById(req.params.id) : null;
       if (diskMember) return res.json(diskMember);
+
+      // Check if it's an Odoo archived member
+      if (req.params.id.startsWith('odoo-')) {
+        const odooId = req.params.id.replace('odoo-', '');
+        const row = lc.db ? lc.db.prepare('SELECT * FROM odoo_members_cache WHERE id = ?').get(odooId) : null;
+        if (row) {
+          return res.json({
+            id: req.params.id,
+            gym_id: row.gym_id,
+            location: row.gym_id,
+            fullName: row.full_name,
+            full_name: row.full_name,
+            status: 'expired',
+            isArchive: true,
+            is_archive: 1,
+            expiresOn: row.expires_on,
+            expires_on: row.expires_on,
+            importedFromOdoo: true,
+            isImported: true,
+            phone: '',
+            plan: 'Monthly',
+            subscriptionName: 'Monthly',
+            qrToken: '',
+            photo: null,
+            image: null,
+            pdfUrl: null,
+            createdAt: row.expires_on,
+            created_at: row.expires_on,
+          });
+        }
+      }
+
       // 2️⃣ Only if not on disk, check Firebase (e.g. brand-new member not yet in seed)
       const doc = await db.collection('members').doc(req.params.id).get();
       if (!doc.exists) return res.status(404).json({ error: 'Member not found' });
@@ -321,6 +394,46 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
 
       // 2️⃣ Try SQLite disk first
       let member = lc.getMemberById ? lc.getMemberById(memberId) : null;
+      if (!member && memberId.startsWith('odoo-')) {
+        const odooId = memberId.replace('odoo-', '');
+        const row = lc.db ? lc.db.prepare('SELECT * FROM odoo_members_cache WHERE id = ?').get(odooId) : null;
+        if (row) {
+          member = {
+            id: memberId,
+            fullName: row.full_name,
+            full_name: row.full_name,
+            phone: '',
+            plan: 'Monthly',
+            status: 'expired',
+            birthday: null,
+            expiresOn: row.expires_on,
+            expires_on: row.expires_on,
+            photo: null,
+            email: null,
+            location: row.gym_id,
+            qrToken: '',
+            pdfUrl: null,
+            contractNumber: null,
+            cin: null,
+            balance: 0,
+            isFrozen: false,
+            inscriptionId: null,
+            subscriptionName: 'Monthly',
+            periodFrom: null,
+            periodTo: row.expires_on,
+            adresse: null,
+            ville: null,
+            commercial: null,
+            totalPaid: 0,
+            payments: null,
+            createdAtStr: row.expires_on,
+            source: 'odoo',
+            isArchive: true,
+            is_archive: 1,
+            isImported: true,
+          };
+        }
+      }
       if (member) {
         // Normalize disk field names to camelCase
         member = {
