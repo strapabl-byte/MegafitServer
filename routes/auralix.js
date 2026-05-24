@@ -74,7 +74,7 @@ module.exports = function(deps) {
       const revenue = Math.round(rows.reduce((s, r) => s + (r.t || 0), 0));
       const dec = lc.db.prepare(
         `SELECT COALESCE(CAST(montant AS REAL),0) AS m FROM decaissements_cache
-         WHERE gym_id=? AND date IN (${ph}) AND (status='approved' OR status IS NULL)`
+         WHERE gym_id=? AND date IN (${ph}) AND (status IS NULL OR status != 'rejected')`
       ).all(gymId, ...dates);
       const decaissement = Math.round(dec.reduce((s, r) => s + (r.m || 0), 0));
       return { revenue, members: rows.length, entries: rows.length, decaissement, net: revenue - decaissement };
