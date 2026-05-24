@@ -987,13 +987,15 @@ Reply ONLY with valid JSON (no markdown):
               espece += e_esp; tpe += e_tpe; virement += e_vir; cheque += e_che;
               total += e_esp + e_tpe + e_vir + e_che;
             });
-            // Only subtract APPROVED décaissements (validated by super admin)
-            const approvedDecs = lc.getApprovedDecaissements(gid, dateStr);
-            if (approvedDecs?.length) {
-              approvedDecs.forEach(dec => {
-                const amt = Number(dec.montant) || 0;
-                espece -= amt;
-                total -= amt;
+            // Subtract all décaissements except rejected ones
+            const decs = lc.getDecaissements(gid, dateStr);
+            if (decs?.length) {
+              decs.forEach(dec => {
+                if (dec.status !== 'rejected') {
+                  const amt = Number(dec.montant) || 0;
+                  espece -= amt;
+                  total -= amt;
+                }
               });
             }
           }
@@ -1830,7 +1832,15 @@ ${fullContext}`
             `SELECT COALESCE(SUM(CAST(tpe AS NUMERIC) + CAST(espece AS NUMERIC) + CAST(virement AS NUMERIC) + CAST(cheque AS NUMERIC)), 0) AS total
              FROM register_cache WHERE ${filter} AND date >= ? AND date <= ?`
           ).get(monthStart, today);
-          revenue = Math.round(rev?.total || 0);
+          
+          const decs = lc.db.prepare(
+            `SELECT COALESCE(SUM(CAST(montant AS NUMERIC)), 0) AS total
+             FROM decaissements_cache
+             WHERE gym_id = ? AND date >= ? AND date <= ? AND (status IS NULL OR status != 'rejected')`
+          ).get(gid, monthStart, today);
+          
+          const decAmt = Number(decs?.total) || 0;
+          revenue = Math.round(rev?.total || 0) - decAmt;
 
           const regs = lc.db.prepare(
             `SELECT COUNT(*) AS cnt FROM register_cache WHERE ${filter} AND date >= ? AND date <= ?`

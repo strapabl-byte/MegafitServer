@@ -130,7 +130,7 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
         for (let d = 1; d <= daysInMonth; d++) {
           const dateStr = `${target}-${String(d).padStart(2,'0')}`;
           const decs = lc.getDecaissements(gid, dateStr) || [];
-          decs.filter(dec => dec.status === 'approved' || !dec.status)
+          decs.filter(dec => dec.status !== 'rejected')
               .forEach(dec => { totalDecaissements += Number(dec.montant) || 0; });
         }
       });

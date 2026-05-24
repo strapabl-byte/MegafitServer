@@ -244,9 +244,9 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
                 else { const prix = Number(e.prix)||0; if (prix > 0 && prix > paid) reste += prix - paid; }
               });
 
-              // ✅ Subtract approved décaissements (same as KPI endpoint)
+              // Subtract all décaissements except rejected ones
               const decs = lc.getDecaissements(gid, dateStr) || [];
-              decs.filter(d => d.status === 'approved' || !d.status)
+              decs.filter(d => d.status !== 'rejected')
                   .forEach(d => { ca -= Number(d.montant) || 0; });
 
               if (ca > 0) calendarData[dateStr] = (calendarData[dateStr] || 0) + ca;
@@ -674,8 +674,8 @@ Rules:
         createdAt:   r.created_at || '',
       }));
 
-      // Only sum APPROVED — pending and rejected are NOT counted
-      const countable = entries.filter(e => e.status === 'approved');
+      // Only sum non-rejected décaissements
+      const countable = entries.filter(e => e.status !== 'rejected');
       const total = countable.reduce((sum, e) => sum + e.montant, 0);
       const byGym = {};
       countable.forEach(e => { byGym[e.gymId] = (byGym[e.gymId] || 0) + e.montant; });
