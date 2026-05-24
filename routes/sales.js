@@ -425,6 +425,32 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
         ORDER BY date DESC
       `).all(...gymIds, startDate, endDate);
 
+      if (rows.length === 0) {
+        return res.json({
+          ok: true,
+          month: dateLabel,
+          dateRange: { startDate, endDate },
+          gymIds,
+          summary: { total: 0, newCount: 0, resubCount: 0, possible: 0 },
+          perGym: gymIds.reduce((acc, gid) => {
+            acc[gid] = {
+              gymId:      gid,
+              clubName:   GYM_TO_CLUB[gid] || gid,
+              total:      0,
+              newCount:   0,
+              resubCount: 0,
+              possible:   0,
+              resubRate:  0,
+              members:    [],
+            };
+            return acc;
+          }, {}),
+          members: [],
+          csvIndexSize: _csvCache?.members?.length || 0,
+          cacheStats: { hits: 0, misses: 0, total: 0 },
+        });
+      }
+
       // Pre-warm CSV index (fast after first call)
       loadOdooCSV();
 
