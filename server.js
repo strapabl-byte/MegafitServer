@@ -12,6 +12,7 @@ const fs        = require('fs');
 const admin     = require('firebase-admin');
 const lc        = require('./localCache');
 const { syncGymCounts, scheduleNightlySync } = require('./auto_sync');
+const { verifyAzureToken: _vat, requireAdmin } = require('./middleware/auth');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 🔒 SECURITY: INJECT_SECRET must be set as an environment variable.
@@ -260,8 +261,7 @@ app.get('/api/admin/export-all-stats', (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // 🔒 System Stats — requires inject secret (exposes server internals)
 // ─────────────────────────────────────────────────────────────────────────────
-app.get('/api/system-stats', (req, res) => {
-  const fail = checkSecret(req, res); if (fail !== null) return;
+app.get('/api/system-stats', _vat, requireAdmin, (req, res) => {
   try {
     const fs   = require('fs');
     const path = require('path');
@@ -715,7 +715,6 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString
 // (inject-stats endpoint moved above route mounts — see line ~193)
 
 // Debug: see what your token contains (temporary — remove after fixing ADMIN_EMAILS)
-const { verifyAzureToken: _vat } = require('./middleware/auth');
 app.get('/me', _vat, (req, res) => res.json({
   isAdmin: req.isAdmin,
   isManager: req.isManager,
