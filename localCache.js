@@ -104,6 +104,7 @@ db.exec(`
     virement    REAL DEFAULT 0,
     cheque      REAL DEFAULT 0,
     abonnement  TEXT,
+    source      TEXT,
     created_at  TEXT,
     synced_at   TEXT,
     PRIMARY KEY (id, gym_id)
@@ -254,6 +255,7 @@ try { db.exec("ALTER TABLE register_cache ADD COLUMN tel TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE register_cache ADD COLUMN prix REAL DEFAULT 0;"); } catch (e) {}
 try { db.exec("ALTER TABLE register_cache ADD COLUMN reste REAL DEFAULT 0;"); } catch (e) {}
 try { db.exec("ALTER TABLE register_cache ADD COLUMN note_reste TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE register_cache ADD COLUMN source TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE pending_cache ADD COLUMN pdf_url TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE pending_cache ADD COLUMN totals TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE pending_cache ADD COLUMN payments TEXT;"); } catch (e) {}
@@ -567,9 +569,9 @@ function getMemberById(memberId) {
 
 const insertRegister = db.prepare(`
   INSERT OR REPLACE INTO register_cache 
-    (id, gym_id, date, nom, cin, tel, contrat, commercial, prix, tpe, espece, virement, cheque, reste, note_reste, abonnement, created_at, synced_at)
+    (id, gym_id, date, nom, cin, tel, contrat, commercial, prix, tpe, espece, virement, cheque, reste, note_reste, abonnement, source, created_at, synced_at)
   VALUES 
-    (@id, @gym_id, @date, @nom, @cin, @tel, @contrat, @commercial, @prix, @tpe, @espece, @virement, @cheque, @reste, @note_reste, @abonnement, @created_at, @synced_at)
+    (@id, @gym_id, @date, @nom, @cin, @tel, @contrat, @commercial, @prix, @tpe, @espece, @virement, @cheque, @reste, @note_reste, @abonnement, @source, @created_at, @synced_at)
 `);
 
 function upsertRegister(gymId, date, entriesArr) {
@@ -595,6 +597,7 @@ function upsertRegister(gymId, date, entriesArr) {
     reste:      Number(e.reste) || 0,
     note_reste: e.note_reste || '',
     abonnement: e.abonnement || '',
+    source:     e.source || '',
     created_at: typeof e.createdAt === 'string' ? e.createdAt : 
                typeof e.created_at === 'string' ? e.created_at :
                (e.createdAt && typeof e.createdAt.toDate === 'function') ? e.createdAt.toDate().toISOString() :

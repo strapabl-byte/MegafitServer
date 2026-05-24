@@ -48,7 +48,7 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
         SELECT
           UPPER(TRIM(commercial))  AS commercial,
           gym_id,
-          COUNT(*)                 AS inscriptions,
+          SUM(CASE WHEN COALESCE(source, '') != 'reste_settlement' THEN 1 ELSE 0 END) AS inscriptions,
           SUM(CAST(tpe AS NUMERIC) + CAST(espece AS NUMERIC) + CAST(virement AS NUMERIC) + CAST(cheque AS NUMERIC)) AS revenue,
           MIN(date)                AS first_sale,
           MAX(date)                AS last_sale
@@ -65,7 +65,7 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
           UPPER(TRIM(commercial))  AS commercial,
           gym_id,
           date,
-          COUNT(*)   AS count,
+          SUM(CASE WHEN COALESCE(source, '') != 'reste_settlement' THEN 1 ELSE 0 END) AS count,
           SUM(CAST(tpe AS NUMERIC) + CAST(espece AS NUMERIC) + CAST(virement AS NUMERIC) + CAST(cheque AS NUMERIC))  AS revenue
         FROM register_cache
         WHERE gym_id IN (${placeholders})
@@ -203,7 +203,7 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
 
         const stats = lc.db.prepare(`
           SELECT 
-            COUNT(*) as inscriptions, 
+            SUM(CASE WHEN COALESCE(source, '') != 'reste_settlement' THEN 1 ELSE 0 END) as inscriptions, 
             SUM(CAST(tpe AS NUMERIC) + CAST(espece AS NUMERIC) + CAST(virement AS NUMERIC) + CAST(cheque AS NUMERIC)) as revenue 
           FROM register_cache 
           WHERE gym_id IN (${placeholders}) AND ${dateWhere}
@@ -320,7 +320,7 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
         SELECT
           UPPER(TRIM(commercial)) AS commercial,
           substr(date, 1, 7)       AS month,
-          COUNT(*)                 AS inscriptions,
+          SUM(CASE WHEN COALESCE(source, '') != 'reste_settlement' THEN 1 ELSE 0 END) AS inscriptions,
           SUM(CAST(tpe AS NUMERIC) + CAST(espece AS NUMERIC) + CAST(virement AS NUMERIC) + CAST(cheque AS NUMERIC)) AS revenue
         FROM register_cache
         WHERE gym_id IN (${placeholders})
@@ -422,6 +422,7 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
         FROM register_cache
         WHERE gym_id IN (${placeholders})
           AND date >= ? AND date <= ?
+          AND COALESCE(source, '') != 'reste_settlement'
         ORDER BY date DESC
       `).all(...gymIds, startDate, endDate);
 

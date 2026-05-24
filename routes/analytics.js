@@ -965,7 +965,9 @@ Reply ONLY with valid JSON (no markdown):
         const cursor = new Date(fromDate);
         while (cursor <= now) {
           const dateStr = toLocalDateStr(cursor);
-          for (const gid of gymIds) count += lc.getRegister(gid, dateStr).length;
+          for (const gid of gymIds) {
+            count += lc.getRegister(gid, dateStr).filter(e => e.source !== 'reste_settlement').length;
+          }
           cursor.setDate(cursor.getDate() + 1);
         }
         return count;
@@ -1285,7 +1287,7 @@ Rules:
       let salesContext = '';
       try {
         const salesRows = lc.db.prepare(`
-          SELECT date, nom, prix, tpe, espece, virement, cheque, reste, note_reste, abonnement 
+          SELECT date, nom, prix, tpe, espece, virement, cheque, reste, note_reste, abonnement, source 
           FROM register_cache 
           WHERE gym_id = ? OR ? = 'all'
           ORDER BY date DESC, created_at DESC 
@@ -1293,7 +1295,7 @@ Rules:
         `).all(sector, sector);
         if (salesRows.length > 0) {
           salesContext = `\n--- RECENT SALES & REGISTER ENTRIES ---\n` +
-            salesRows.map(s => `  ${s.date} | ${s.nom} | ${s.prix}DH | ${s.abonnement} | Note: ${s.note_reste||'none'}`).join('\n');
+            salesRows.map(s => `  ${s.date} | ${s.nom} | ${s.prix}DH | ${s.abonnement} | Note: ${s.note_reste||'none'} | Source: ${s.source||'register'}`).join('\n');
         }
       } catch (err) {
         console.error("Auralix sales context error:", err);
@@ -1843,7 +1845,7 @@ ${fullContext}`
           revenue = Math.round(rev?.total || 0) - decAmt;
 
           const regs = lc.db.prepare(
-            `SELECT COUNT(*) AS cnt FROM register_cache WHERE ${filter} AND date >= ? AND date <= ?`
+            `SELECT COUNT(*) AS cnt FROM register_cache WHERE ${filter} AND date >= ? AND date <= ? AND COALESCE(source, '') != 'reste_settlement'`
           ).get(monthStart, today);
           registrations = regs?.cnt || 0;
         } catch (e) {
