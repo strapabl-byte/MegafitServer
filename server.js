@@ -708,9 +708,122 @@ app.use('/',                require('./routes/scan')(deps));          // /public
 app.use('/',                require('./routes/auralix')(deps));   // /api/auralix/* (Firebase token auth)
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PUSH NOTIFICATIONS — POST /api/send-notification
+// Fetches member's expoPushToken from Firestore and dispatches via Expo.
+// Protected: requires valid Azure token (dashboard session).
+// ─────────────────────────────────────────────────────────────────────────────
+app.post('/api/send-notification', _vat, async (req, res) => {
+  const { memberId, title, body, data } = req.body;
+
+  if (!memberId || !title || !body) {
+    return res.status(400).json({ ok: false, error: 'memberId, title, and body are required.' });
+  }
+
+  try {
+    // 1. Fetch member's push token from Firestore
+    const memberSnap = await db.collection('members').doc(memberId).get();
+    if (!memberSnap.exists) {
+      return res.status(404).json({ ok: false, error: `Member ${memberId} not found.` });
+    }
+
+    const token = memberSnap.data()?.expoPushToken;
+    if (!token || !token.startsWith('ExponentPushToken')) {
+      return res.status(422).json({ ok: false, error: 'Member has no valid Expo push token.' });
+    }
+
+    // 2. Send via Expo Push API
+    const expoRes = await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        ...(process.env.EXPO_ACCESS_TOKEN
+          ? { 'Authorization': `Bearer ${process.env.EXPO_ACCESS_TOKEN}` }
+          : {}),
+      },
+      body: JSON.stringify({
+        to: token,
+        sound: 'default',
+        title,
+        body,
+        data: data || {},
+      }),
+    });
+
+    const expoJson = await expoRes.json();
+    const ticket = Array.isArray(expoJson.data) ? expoJson.data[0] : expoJson;
+
+    if (ticket?.status === 'ok' || expoRes.ok) {
+      console.log(`✅ [push] Sent to member ${memberId}`);
+      return res.json({ ok: true, sent: 1, memberId, ticket });
+    } else {
+      console.warn(`⚠️ [push] Expo error for ${memberId}:`, ticket);
+      return res.status(502).json({ ok: false, error: ticket?.message || 'Expo API error', ticket });
+    }
+
+  } catch (err) {
+    console.error('🔥 [push] Error:', err.message);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUSH NOTIFICATIONS — POST /api/send-notification-bulk
+// Sends to multiple members by audience filter (all active, expiring, expired).
+// Body: { audience: 'all'|'expiring'|'expired', gymId?, title, body, data? }
+// ─────────────────────────────────────────────────────────────────────────────
+app.post('/api/send-notification-bulk', _vat, async (req, res) => {
+  const { audience = 'all', gymId, title, body, data } = req.body;
+  if (!title || !body) return res.status(400).json({ ok: false, error: 'title and body required' });
+
+  try {
+    const col = db.collection('members');
+    const now = new Date().toISOString().slice(0, 10);
+    const in7 = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+
+    let q = col.where('expoPushToken', '!=', null);
+    if (audience === 'expiring') { q = q.where('expiresOn', '>=', now).where('expiresOn', '<=', in7); }
+    else if (audience === 'expired') { q = q.where('expiresOn', '<', now); }
+    else { q = q.where('status', '==', 'active'); }
+
+    const snap = await q.get();
+    let members = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (gymId && gymId !== 'all') members = members.filter(m => m.gymId === gymId || m.location === gymId);
+
+    const valid = members.filter(m => m.expoPushToken?.startsWith('ExponentPushToken'));
+    if (!valid.length) return res.json({ ok: true, sent: 0, skipped: members.length, error: 'No valid tokens' });
+
+    // Batch to Expo (up to 100 per request)
+    const BATCH = 100;
+    let sent = 0, failed = 0;
+    for (let i = 0; i < valid.length; i += BATCH) {
+      const batch = valid.slice(i, i + BATCH).map(m => ({
+        to: m.expoPushToken, sound: 'default', title, body, data: data || {},
+      }));
+      try {
+        const r = await fetch('https://exp.host/--/api/v2/push/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify(batch),
+        });
+        const j = await r.json();
+        (j.data || []).forEach(t => { if (t.status === 'ok') sent++; else failed++; });
+      } catch { failed += batch.length; }
+    }
+
+    console.log(`✅ [push-bulk] audience=${audience} gym=${gymId||'all'} sent=${sent} failed=${failed}`);
+    return res.json({ ok: true, sent, failed, total: valid.length });
+  } catch (err) {
+    console.error('🔥 [push-bulk] Error:', err.message);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Healthcheck
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
+
 
 // (inject-stats endpoint moved above route mounts — see line ~193)
 
