@@ -418,7 +418,7 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
       // Fetch all inscriptions in the date range across selected gyms
       const rows = lc.db.prepare(`
         SELECT id, gym_id, nom, date, abonnement, tel, cin,
-               (tpe + espece + virement + cheque) AS total
+               (COALESCE(tpe,0) + COALESCE(espece,0) + COALESCE(virement,0) + COALESCE(cheque,0)) AS total
         FROM register_cache
         WHERE gym_id IN (${placeholders})
           AND date >= ? AND date <= ?
@@ -675,7 +675,7 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
         },
       });
     } catch (err) {
-      console.error('GET /api/sales/resub-matrix error:', err);
+      console.error('GET /api/sales/resub-matrix error:', err.message, err.stack);
       res.status(500).json({ error: err.message });
     }
   });

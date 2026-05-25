@@ -308,6 +308,18 @@ try { db.exec(`
   CREATE INDEX IF NOT EXISTS idx_resub_cache_nom ON resub_intelligence_cache(nom_key);
 `); } catch (e) {}
 
+// ── Resub Intelligence Cache Migrations (Render disk compatibility) ────────────
+// Columns added after initial deployment — safe no-ops if column already exists
+try { db.exec("ALTER TABLE resub_intelligence_cache ADD COLUMN ai_verified   INTEGER DEFAULT 0"); } catch(_) {}
+try { db.exec("ALTER TABLE resub_intelligence_cache ADD COLUMN ai_reason     TEXT"); }            catch(_) {}
+try { db.exec("ALTER TABLE resub_intelligence_cache ADD COLUMN detection_mode TEXT DEFAULT 'FUZZY'"); } catch(_) {}
+try { db.exec("ALTER TABLE resub_intelligence_cache ADD COLUMN used_variant  TEXT"); }            catch(_) {}
+try { db.exec("ALTER TABLE resub_intelligence_cache ADD COLUMN was_split     INTEGER DEFAULT 0"); } catch(_) {}
+try { db.exec("ALTER TABLE resub_intelligence_cache ADD COLUMN prev_status   TEXT"); }            catch(_) {}
+try { db.exec("ALTER TABLE resub_intelligence_cache ADD COLUMN prev_gym_id   TEXT"); }            catch(_) {}
+try { db.exec("ALTER TABLE resub_intelligence_cache ADD COLUMN prev_club     TEXT"); }            catch(_) {}
+try { db.exec("ALTER TABLE resub_intelligence_cache ADD COLUMN last_sub      TEXT"); }            catch(_) {}
+
 
 console.log(`💾 SQLite cache initialised → ${DB_PATH}`);
 
