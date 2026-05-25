@@ -8,8 +8,11 @@ module.exports = function analyticsRouter({ db, admin, lc, apiCache, isQuotaExce
   const router = Router();
 
   function getMoroccanDateStr() {
-    const d = new Date();
-    d.setTime(d.getTime() + 60 * 60 * 1000);
+    // ⏰ 6AM Business-Day Reset — matches Auralix PWA logic exactly.
+    // Before 6AM Morocco time, we treat it as the previous business day
+    // so revenue figures are consistent across both systems at any hour.
+    const d = new Date(Date.now() + 3600000); // shift to UTC+1 (Morocco)
+    if (d.getUTCHours() < 6) d.setUTCDate(d.getUTCDate() - 1); // before 6AM → previous day
     return d.toISOString().slice(0, 10);
   }
 
@@ -923,7 +926,7 @@ Reply ONLY with valid JSON (no markdown):
           }
       }
       const cached = apiCache.kpis[gymId];
-      if (cached && Date.now() - cached.ts < 30 * 1000) return res.json(cached.data);
+      if (cached && Date.now() - cached.ts < 5 * 1000) return res.json(cached.data); // 5s TTL — near-real-time
 
       const parseLocalDate = (dateStr) => {
         const [y, m, d] = dateStr.split('-').map(Number);
@@ -944,11 +947,14 @@ Reply ONLY with valid JSON (no markdown):
       );
 
       // 📅 Calendar-month start (Moroccan): always 1st of the current month
-      const monthStart = new Date(todayStart.getFullYear(), todayStart.getMonth(), 1);
-      // Rolling 7-day window for Week
-      const weekStart  = new Date(todayStart.getFullYear(), todayStart.getMonth(), todayStart.getDate() - 6);
+      const monthStart     = new Date(todayStart.getFullYear(), todayStart.getMonth(), 1);
+      // Rolling 7-day window (last 7 business days, same as Auralix PWA)
+      const weekStart      = new Date(todayStart.getFullYear(), todayStart.getMonth(), todayStart.getDate() - 6);
+      // Yesterday (single business day)
+      const yesterdayStart = new Date(todayStart.getFullYear(), todayStart.getMonth(), todayStart.getDate() - 1);
+      const yesterdayEnd   = new Date(todayStart.getFullYear(), todayStart.getMonth(), todayStart.getDate() - 1, 23, 59, 59);
       // Rolling 12-month window for Year
-      const yearStart  = new Date(todayStart.getFullYear(), todayStart.getMonth(), todayStart.getDate() - 364);
+      const yearStart      = new Date(todayStart.getFullYear(), todayStart.getMonth(), todayStart.getDate() - 364);
 
       // Month label for frontend display (e.g. "MAI 2026")
       const MONTH_NAMES_FR = ['JAN','FÉV','MAR','AVR','MAI','JUN','JUL','AOÛ','SEP','OCT','NOV','DÉC'];
@@ -960,10 +966,11 @@ Reply ONLY with valid JSON (no markdown):
       const toLocalDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 
       // ?????? New members count from register (source of truth, same as Register page) ??????
-      const countRegisterInRange = (fromDate) => {
+      const countRegisterInRange = (fromDate, toDate = null) => {
         let count = 0;
         const cursor = new Date(fromDate);
-        while (cursor <= now) {
+        const limit = toDate || now;
+        while (cursor <= limit) {
           const dateStr = toLocalDateStr(cursor);
           for (const gid of gymIds) {
             count += lc.getRegister(gid, dateStr).filter(e => e.source !== 'reste_settlement').length;
@@ -973,12 +980,12 @@ Reply ONLY with valid JSON (no markdown):
         return count;
       };
 
-      // 💰 Revenue from SQLite register cache — GROSS minus APPROVED décaissements only
-      // Pending décaissements (awaiting super admin validation) are NOT deducted.
-      const getRevenueAndBreakdown = (fromDate) => {
+      // 💰 Revenue from SQLite register cache — GROSS minus non-rejected décaissements
+      const getRevenueAndBreakdown = (fromDate, toDate = null) => {
         let total = 0, espece = 0, tpe = 0, virement = 0, cheque = 0;
         const cursor = new Date(fromDate);
-        while (cursor <= now) {
+        const limit = toDate || now;
+        while (cursor <= limit) {
           const dateStr = toLocalDateStr(cursor);
           for (const gid of gymIds) {
             lc.getRegister(gid, dateStr).forEach(e => {
@@ -1018,10 +1025,11 @@ Reply ONLY with valid JSON (no markdown):
         return count;
       })();
       console.log(`💾 [KPI] SQLite: ${monthCachedCount} entries for ${gymId} (${currentMonthLabel}) — reading from disk only`);
-      const incomeDay   = getRevenueAndBreakdown(todayStart);
-      const incomeWeek  = getRevenueAndBreakdown(weekStart);
-      const incomeMonth = getRevenueAndBreakdown(monthStart);
-      const incomeYear  = getRevenueAndBreakdown(yearStart);
+      const incomeDay       = getRevenueAndBreakdown(todayStart);
+      const incomeYesterday = getRevenueAndBreakdown(yesterdayStart, yesterdayEnd);
+      const incomeWeek      = getRevenueAndBreakdown(weekStart);
+      const incomeMonth     = getRevenueAndBreakdown(monthStart);
+      const incomeYear      = getRevenueAndBreakdown(yearStart);
 
       // ── Real Odoo member total per gym ────────────────────────────────────────
       const phOdoo = gymIds.map(() => '?').join(',');
@@ -1040,8 +1048,8 @@ Reply ONLY with valid JSON (no markdown):
         currentMonthLabel,   // e.g. "MAI 2026"
         odooTotal,           // Real total from Odoo (e.g. 7429 for Dokarat)
         detectedMonth,       // Unique people detected at door scanner this month
-        newMembers: { day: countRegisterInRange(todayStart), week: countRegisterInRange(weekStart), month: countRegisterInRange(monthStart), year: countRegisterInRange(yearStart) },
-        income:     { day: incomeDay.total, week: incomeWeek.total, month: incomeMonth.total, year: incomeYear.total },
+        newMembers: { day: countRegisterInRange(todayStart), yesterday: countRegisterInRange(yesterdayStart, yesterdayEnd), week: countRegisterInRange(weekStart), month: countRegisterInRange(monthStart), year: countRegisterInRange(yearStart) },
+        income:     { day: incomeDay.total, yesterday: incomeYesterday.total, week: incomeWeek.total, month: incomeMonth.total, year: incomeYear.total },
         paymentMethods: { espece: incomeMonth.espece, tpe: incomeMonth.tpe, virement: incomeMonth.virement, cheque: incomeMonth.cheque },
         paymentMethodsByPeriod: {
           day:   { espece: incomeDay.espece,   tpe: incomeDay.tpe,   virement: incomeDay.virement,   cheque: incomeDay.cheque   },
