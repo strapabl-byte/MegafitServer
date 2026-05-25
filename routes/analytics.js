@@ -523,7 +523,7 @@ Reply ONLY with valid JSON (no markdown):
       // ── BATCH-LOAD all entries + identity cache in 1 query (not N queries) ──
       const allEntries = [];
       for (const gid of targetGymIds) {
-        for (const e of lc.getEntries(gid, today, limitCount)) {
+        for (const e of lc.getEntries(gid, { date: today, limit: limitCount })) {
           allEntries.push({ ...e, _gid: gid });
         }
       }
@@ -688,7 +688,7 @@ Reply ONLY with valid JSON (no markdown):
         }
 
         // Batch load all entries + identity cache
-        const allEntries = lc.getEntries(gid, today, 50).map(e => ({ ...e, _gid: gid }));
+        const allEntries = lc.getEntries(gid, { date: today, limit: 50 }).map(e => ({ ...e, _gid: gid }));
         const cacheKeys = allEntries.map(e =>
           e.user_id ? `uid_${e.user_id}_at_${gid}` : `name_${normId(e.name)}_at_${gid}`
         );
