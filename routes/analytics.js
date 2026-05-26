@@ -1053,10 +1053,17 @@ Reply ONLY with valid JSON (no markdown):
         `SELECT COUNT(DISTINCT name) as c FROM entries WHERE gym_id IN (${phDet}) AND date >= ?`
       ).get(...gymIds, monthStartStr)?.c || 0;
 
+      // ── Active subscriptions: members with expires_on >= today (not archived) ──
+      const phAct = gymIds.map(() => '?').join(',');
+      const activeSubscriptions = lc.db.prepare(
+        `SELECT COUNT(*) as c FROM members_cache WHERE gym_id IN (${phAct}) AND expires_on >= ? AND is_archive = 0`
+      ).get(...gymIds, todayStr)?.c || 0;
+
       const kpis = {
         currentMonthLabel,   // e.g. "MAI 2026"
         odooTotal,           // Real total from Odoo (e.g. 7429 for Dokarat)
         detectedMonth,       // Unique people detected at door scanner this month
+        activeSubscriptions, // Members with non-expired subscription (from members_cache)
         newMembers: { day: countRegisterInRange(todayStart), yesterday: countRegisterInRange(yesterdayStart, yesterdayEnd), week: countRegisterInRange(weekStart), month: countRegisterInRange(monthStart), year: countRegisterInRange(yearStart) },
         income:     { day: incomeDay.total, yesterday: incomeYesterday.total, week: incomeWeek.total, month: incomeMonth.total, year: incomeYear.total },
         paymentMethods: { espece: incomeMonth.espece, tpe: incomeMonth.tpe, virement: incomeMonth.virement, cheque: incomeMonth.cheque },
