@@ -866,12 +866,17 @@ async function seedSQLiteHistoricalStats() {
     
     // Seed Door Stats
     console.log('🚀 Checking/Seeding SQLite with 30-day stats...');
-    for (const gymId of ['dokarat', 'marjane']) {
-      const dateStrs = [], docIds = [];
-      const missingDates = [];
-      for (let i = 29; i >= 0; i--) {
-        const d = new Date(Date.now() + 3600000 - i * 86400000).toISOString().slice(0, 10);
-        dateStrs.push(d);
+      const anchorStr = lc.getMoroccanDateStr ? lc.getMoroccanDateStr() : new Date().toISOString().slice(0,10);
+      const [sy, sm, sd] = anchorStr.split('-').map(Number);
+      const seedAnchor = new Date(sy, sm - 1, sd);
+      for (const gymId of ['dokarat', 'marjane']) {
+        const dateStrs = [], docIds = [];
+        const missingDates = [];
+        for (let i = 29; i >= 0; i--) {
+          const dd = new Date(seedAnchor);
+          dd.setDate(dd.getDate() - i);
+          const d = `${dd.getFullYear()}-${String(dd.getMonth()+1).padStart(2,'0')}-${String(dd.getDate()).padStart(2,'0')}`;
+          dateStrs.push(d);
         // 🔒 DISK-FIRST: Only fetch from Firebase if this date has no data on disk
         const existing = lc.getDailyStat ? lc.getDailyStat(gymId, d) : null;
         if (!existing || !existing.count) {

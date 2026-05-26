@@ -830,10 +830,19 @@ Reply ONLY with valid JSON (no markdown):
       } else {
          if (groupBy === 'month') days = 365;
          if (groupBy === 'year') days = 1825;
+         // ── Use Morocco-local date as anchor (avoids UTC day-boundary duplication) ──
+         // getMoroccanDateStr() returns today's date in Africa/Casablanca timezone.
+         // Stepping back N days from this anchor ensures today's bar is always a clean
+         // empty slot — no yesterday data bleeds into the last position.
+         const anchorStr = getMoroccanDateStr(); // e.g. "2026-05-26"
+         const [ay, am, ad] = anchorStr.split('-').map(Number);
+         const anchor = new Date(ay, am - 1, ad); // midnight local, no TZ shift
          const offset = includeToday ? 0 : 1;
-         dateStrs = Array.from({ length: days }, (_, i) =>
-            new Date(Date.now() + 3600000 - (days - 1 - i + offset) * 86400000).toISOString().slice(0, 10)
-         );
+         dateStrs = Array.from({ length: days }, (_, i) => {
+            const d = new Date(anchor);
+            d.setDate(d.getDate() - (days - 1 - i + offset));
+            return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+         });
       }
       
       dateStrs.sort(); // ensure chronological order
