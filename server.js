@@ -718,14 +718,43 @@ app.use('/',                require('./routes/auralix')(deps));   // /api/aurali
 // Protected: requires valid Azure token (dashboard session).
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/api/send-notification', _vat, async (req, res) => {
-  const { memberId, title, body, data } = req.body;
+  const { memberId, title, body, subtitle, imageUrl, data } = req.body;
 
   if (!memberId || !title || !body) {
     return res.status(400).json({ ok: false, error: 'memberId, title, and body are required.' });
   }
 
+  // 1. Attempt to dispatch to the App Server
   try {
-    // 1. Fetch member's push token from Firestore
+    console.log(`[push] Attempting App Server dispatch for ${memberId}`);
+    const appRes = await fetch('https://app-8t2u.onrender.com/api/send-notification', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        memberId,
+        title,
+        body,
+        subtitle: subtitle || '',
+        imageUrl: imageUrl || null,
+        channelId: 'gym-alerts',
+        sound: 'Notif.wav',
+        data: data || {},
+      }),
+    });
+
+    const appJson = await appRes.json();
+    if (appRes.ok && appJson.ok) {
+      console.log(`✅ [push] App Server successfully sent to member ${memberId}`);
+      return res.json({ ok: true, sent: 1, memberId, source: 'app-server', result: appJson });
+    }
+    console.warn(`⚠️ [push] App Server failed (status ${appRes.status}):`, appJson);
+  } catch (err) {
+    console.warn(`⚠️ [push] App Server unreachable for ${memberId}:`, err.message);
+  }
+
+  // 2. Fallback: Dispatch directly via Expo Push API using Firestore token
+  try {
+    console.log(`[push] Falling back to direct Expo dispatch for ${memberId}`);
     const memberSnap = await db.collection('members').doc(memberId).get();
     if (!memberSnap.exists) {
       return res.status(404).json({ ok: false, error: `Member ${memberId} not found.` });
@@ -736,7 +765,6 @@ app.post('/api/send-notification', _vat, async (req, res) => {
       return res.status(422).json({ ok: false, error: 'Member has no valid Expo push token.' });
     }
 
-    // 2. Send via Expo Push API
     const expoRes = await fetch('https://exp.host/--/api/v2/push/send', {
       method: 'POST',
       headers: {
@@ -748,10 +776,15 @@ app.post('/api/send-notification', _vat, async (req, res) => {
       },
       body: JSON.stringify({
         to: token,
-        sound: 'default',
+        sound: 'Notif.wav',
+        channelId: 'gym-alerts',
         title,
+        subtitle: subtitle || undefined,
         body,
-        data: data || {},
+        data: {
+          ...(data || {}),
+          imageUrl: imageUrl || undefined,
+        },
       }),
     });
 
@@ -759,15 +792,15 @@ app.post('/api/send-notification', _vat, async (req, res) => {
     const ticket = Array.isArray(expoJson.data) ? expoJson.data[0] : expoJson;
 
     if (ticket?.status === 'ok' || expoRes.ok) {
-      console.log(`✅ [push] Sent to member ${memberId}`);
-      return res.json({ ok: true, sent: 1, memberId, ticket });
+      console.log(`✅ [push] Direct Expo sent successfully to member ${memberId}`);
+      return res.json({ ok: true, sent: 1, memberId, source: 'expo-direct', ticket });
     } else {
-      console.warn(`⚠️ [push] Expo error for ${memberId}:`, ticket);
+      console.warn(`⚠️ [push] Direct Expo error for ${memberId}:`, ticket);
       return res.status(502).json({ ok: false, error: ticket?.message || 'Expo API error', ticket });
     }
 
   } catch (err) {
-    console.error('🔥 [push] Error:', err.message);
+    console.error('🔥 [push] Direct Expo fallback error:', err.message);
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
@@ -775,13 +808,13 @@ app.post('/api/send-notification', _vat, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // PUSH NOTIFICATIONS — POST /api/send-notification-bulk
 // Sends to multiple members by audience filter (all active, expiring, expired).
-// Body: { audience: 'all'|'expiring'|'expired', gymId?, title, body, data? }
+// Body: { audience: 'all'|'expiring'|'expired', gymId?, title, body, imageUrl?, data? }
 // Rate-limited: 100 per batch, 200ms pause between batches (≤ 500 notif/sec safe).
 // ─────────────────────────────────────────────────────────────────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 app.post('/api/send-notification-bulk', _vat, async (req, res) => {
-  const { audience = 'all', gymId, title, subtitle, body, data } = req.body;
+  const { audience = 'all', gymId, title, subtitle, body, imageUrl, data } = req.body;
   if (!title || !body) return res.status(400).json({ ok: false, error: 'title and body required' });
 
   try {
@@ -792,7 +825,7 @@ app.post('/api/send-notification-bulk', _vat, async (req, res) => {
     let q = col.where('expoPushToken', '!=', null);
     if (audience === 'expiring') { q = q.where('expiresOn', '>=', now).where('expiresOn', '<=', in7); }
     else if (audience === 'expired') { q = q.where('expiresOn', '<', now); }
-    else { q = q.where('status', '==', 'active'); }
+    // Note: 'all' targets all users who use the app (anyone with a valid push token), no status filter
 
     const snap = await q.get();
     let members = snap.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -811,7 +844,16 @@ app.post('/api/send-notification-bulk', _vat, async (req, res) => {
       const batchNum = Math.floor(i / BATCH_SIZE) + 1;
       const chunk = valid.slice(i, i + BATCH_SIZE);
       const messages = chunk.map(m => ({
-        to: m.expoPushToken, sound: 'default', title, subtitle: subtitle || undefined, body, data: data || {},
+        to: m.expoPushToken,
+        sound: 'Notif.wav',
+        channelId: 'gym-alerts',
+        title,
+        subtitle: subtitle || undefined,
+        body,
+        data: {
+          ...(data || {}),
+          imageUrl: imageUrl || undefined,
+        },
       }));
 
       try {
