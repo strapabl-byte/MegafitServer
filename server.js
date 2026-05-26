@@ -43,6 +43,10 @@ const ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'http://localhost:4000',
   'http://localhost:3000',
+  // 📡 Local network testing (same WiFi)
+  'http://192.168.1.143:5173',
+  'http://192.168.1.143:3001',
+  'http://192.168.1.143:5174',
 ];
 app.use(cors({
   origin: (origin, callback) => {
@@ -693,6 +697,7 @@ app.use('/api/members',     require('./routes/members')(deps));
 app.use('/api/register',    require('./routes/register')(deps));
 app.use('/api/payments',    require('./routes/payments')(deps));
 app.use('/api/sales',       require('./routes/sales')(deps));
+app.use('/api/relance',     require('./routes/relance')(deps));   // 🎂 Relance: birthdays, expiring subs, inactive
 // analytics router — stored so we can call pollDoorEntries() from the interval
 
 const analyticsRouter = require('./routes/analytics')(deps);
