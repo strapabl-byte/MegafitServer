@@ -771,7 +771,10 @@ app.post('/api/send-notification', _vat, async (req, res) => {
 // PUSH NOTIFICATIONS — POST /api/send-notification-bulk
 // Sends to multiple members by audience filter (all active, expiring, expired).
 // Body: { audience: 'all'|'expiring'|'expired', gymId?, title, body, data? }
+// Rate-limited: 100 per batch, 200ms pause between batches (≤ 500 notif/sec safe).
 // ─────────────────────────────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
 app.post('/api/send-notification-bulk', _vat, async (req, res) => {
   const { audience = 'all', gymId, title, body, data } = req.body;
   if (!title || !body) return res.status(400).json({ ok: false, error: 'title and body required' });
@@ -791,33 +794,48 @@ app.post('/api/send-notification-bulk', _vat, async (req, res) => {
     if (gymId && gymId !== 'all') members = members.filter(m => m.gymId === gymId || m.location === gymId);
 
     const valid = members.filter(m => m.expoPushToken?.startsWith('ExponentPushToken'));
-    if (!valid.length) return res.json({ ok: true, sent: 0, skipped: members.length, error: 'No valid tokens' });
+    if (!valid.length) return res.json({ ok: true, sent: 0, failed: 0, total: 0, skipped: members.length });
 
-    // Batch to Expo (up to 100 per request)
-    const BATCH = 100;
+    // Batch to Expo: 100 per request, 200ms between batches (firewall against rate limits)
+    const BATCH_SIZE = 100;
+    const BATCH_DELAY_MS = 200;
     let sent = 0, failed = 0;
-    for (let i = 0; i < valid.length; i += BATCH) {
-      const batch = valid.slice(i, i + BATCH).map(m => ({
+    const totalBatches = Math.ceil(valid.length / BATCH_SIZE);
+
+    for (let i = 0; i < valid.length; i += BATCH_SIZE) {
+      const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+      const chunk = valid.slice(i, i + BATCH_SIZE);
+      const messages = chunk.map(m => ({
         to: m.expoPushToken, sound: 'default', title, body, data: data || {},
       }));
+
       try {
         const r = await fetch('https://exp.host/--/api/v2/push/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-          body: JSON.stringify(batch),
+          body: JSON.stringify(messages),
         });
         const j = await r.json();
         (j.data || []).forEach(t => { if (t.status === 'ok') sent++; else failed++; });
-      } catch { failed += batch.length; }
+        console.log(`📤 [push-bulk] batch ${batchNum}/${totalBatches} — sent=${sent} failed=${failed}`);
+      } catch {
+        failed += chunk.length;
+      }
+
+      // Rate-limit firewall: pause between batches (except after last batch)
+      if (i + BATCH_SIZE < valid.length) {
+        await sleep(BATCH_DELAY_MS);
+      }
     }
 
-    console.log(`✅ [push-bulk] audience=${audience} gym=${gymId||'all'} sent=${sent} failed=${failed}`);
-    return res.json({ ok: true, sent, failed, total: valid.length });
+    console.log(`✅ [push-bulk] DONE audience=${audience} gym=${gymId||'all'} sent=${sent} failed=${failed} total=${valid.length}`);
+    return res.json({ ok: true, sent, failed, total: valid.length, batches: totalBatches });
   } catch (err) {
     console.error('🔥 [push-bulk] Error:', err.message);
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Healthcheck
