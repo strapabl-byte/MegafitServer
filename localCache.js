@@ -320,8 +320,51 @@ try { db.exec("ALTER TABLE resub_intelligence_cache ADD COLUMN prev_gym_id   TEX
 try { db.exec("ALTER TABLE resub_intelligence_cache ADD COLUMN prev_club     TEXT"); }            catch(_) {}
 try { db.exec("ALTER TABLE resub_intelligence_cache ADD COLUMN last_sub      TEXT"); }            catch(_) {}
 
+// ── Relance System ────────────────────────────────────────────────────────────
+// relance_birthdays: full birthday directory imported from Odoo CSV exports
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS relance_birthdays (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    gym_id       TEXT NOT NULL,
+    full_name    TEXT NOT NULL,
+    phone        TEXT,
+    birth_month  INTEGER NOT NULL,
+    birth_day    INTEGER NOT NULL,
+    birth_year   INTEGER,
+    age_2026     INTEGER,
+    member_id    TEXT,
+    imported_at  TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_rb_gym   ON relance_birthdays(gym_id);
+  CREATE INDEX IF NOT EXISTS idx_rb_md    ON relance_birthdays(birth_month, birth_day);
+  CREATE INDEX IF NOT EXISTS idx_rb_phone ON relance_birthdays(phone);
+`); } catch(e) {}
+
+// relance_calls: commercial call log (birthday, expiring subscription, inactive follow-ups)
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS relance_calls (
+    id           TEXT PRIMARY KEY,
+    gym_id       TEXT NOT NULL,
+    list_type    TEXT NOT NULL,
+    member_id    TEXT,
+    birthday_id  INTEGER,
+    member_name  TEXT NOT NULL,
+    member_phone TEXT,
+    commercial   TEXT NOT NULL,
+    called       INTEGER DEFAULT 0,
+    feedback     TEXT,
+    comment      TEXT,
+    call_date    TEXT,
+    created_at   TEXT DEFAULT (datetime('now')),
+    updated_at   TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_rc_gym        ON relance_calls(gym_id, list_type);
+  CREATE INDEX IF NOT EXISTS idx_rc_commercial ON relance_calls(commercial);
+  CREATE INDEX IF NOT EXISTS idx_rc_member     ON relance_calls(member_id);
+`); } catch(e) {}
 
 console.log(`💾 SQLite cache initialised → ${DB_PATH}`);
+
 
 // ── HELPERS ──────────────────────────────────────────────────────────────────
 
