@@ -305,5 +305,50 @@ module.exports = function createRelanceRouter(deps) {
     }
   });
 
+  // ── POST /api/relance/import-birthdays ──────────────────────────────────
+  // Bulk-import birthday rows from JSON. Protected by x-inject-secret header.
+  // Body: { gymId, rows: [{ full_name, phone, birth_month, birth_day, birth_year }] }
+  router.post('/import-birthdays', (req, res) => {
+    const secret = process.env.INJECT_SECRET || 'megafit_inject_2024';
+    if (req.headers['x-inject-secret'] !== secret) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    try {
+      const { gymId, rows } = req.body;
+      if (!gymId || !Array.isArray(rows)) {
+        return res.status(400).json({ error: 'gymId and rows[] required' });
+      }
+
+      const insert = lc.db.prepare(
+        `INSERT OR IGNORE INTO relance_birthdays
+           (gym_id, full_name, phone, birth_month, birth_day, birth_year)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      );
+
+      const importMany = lc.db.transaction((items) => {
+        let inserted = 0;
+        for (const r of items) {
+          const info = insert.run(
+            gymId,
+            (r.full_name || '').trim(),
+            (r.phone   || '').trim() || null,
+            parseInt(r.birth_month, 10) || null,
+            parseInt(r.birth_day,   10) || null,
+            parseInt(r.birth_year,  10) || null,
+          );
+          if (info.changes > 0) inserted++;
+        }
+        return inserted;
+      });
+
+      const inserted = importMany(rows);
+      const total = lc.db.prepare('SELECT COUNT(*) as n FROM relance_birthdays WHERE gym_id=?').get(gymId);
+      res.json({ ok: true, inserted, total: total?.n || 0 });
+    } catch (err) {
+      console.error('[relance/import-birthdays]', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   return router;
 };
