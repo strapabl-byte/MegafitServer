@@ -776,7 +776,7 @@ app.post('/api/send-notification', _vat, async (req, res) => {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 app.post('/api/send-notification-bulk', _vat, async (req, res) => {
-  const { audience = 'all', gymId, title, body, data } = req.body;
+  const { audience = 'all', gymId, title, subtitle, body, data } = req.body;
   if (!title || !body) return res.status(400).json({ ok: false, error: 'title and body required' });
 
   try {
@@ -806,7 +806,7 @@ app.post('/api/send-notification-bulk', _vat, async (req, res) => {
       const batchNum = Math.floor(i / BATCH_SIZE) + 1;
       const chunk = valid.slice(i, i + BATCH_SIZE);
       const messages = chunk.map(m => ({
-        to: m.expoPushToken, sound: 'default', title, body, data: data || {},
+        to: m.expoPushToken, sound: 'default', title, subtitle: subtitle || undefined, body, data: data || {},
       }));
 
       try {
