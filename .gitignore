@@ -8,3 +8,7 @@ serviceAccount_recrute.json
 verified_april_stats.json
 .DS_Store
 dist/
+# One-time scripts — never committed
+scripts/
+scratch/
+*.csv
