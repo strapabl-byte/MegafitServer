@@ -1053,10 +1053,11 @@ Reply ONLY with valid JSON (no markdown):
         `SELECT COUNT(DISTINCT name) as c FROM entries WHERE gym_id IN (${phDet}) AND date >= ?`
       ).get(...gymIds, monthStartStr)?.c || 0;
 
-      // ── Active subscriptions: members with expires_on >= today (not archived) ──
+      // ── Active subscriptions: all members (incl. archived) with expires_on >= today ──
+      // Archive flag is an admin UI status only; subscription validity is based on expiry date alone.
       const phAct = gymIds.map(() => '?').join(',');
       const activeSubscriptions = lc.db.prepare(
-        `SELECT COUNT(*) as c FROM members_cache WHERE gym_id IN (${phAct}) AND expires_on >= ? AND is_archive = 0`
+        `SELECT COUNT(*) as c FROM members_cache WHERE gym_id IN (${phAct}) AND expires_on >= ?`
       ).get(...gymIds, todayStr)?.c || 0;
 
       const kpis = {
