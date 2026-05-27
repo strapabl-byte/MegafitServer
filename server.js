@@ -724,6 +724,30 @@ app.post('/api/send-notification', _vat, async (req, res) => {
     return res.status(400).json({ ok: false, error: 'memberId, title, and body are required.' });
   }
 
+  // Fetch member details to support name personalization
+  let memberName = 'Membre';
+  let memberSnap = null;
+  try {
+    memberSnap = await db.collection('members').doc(memberId).get();
+    if (memberSnap.exists) {
+      memberName = memberSnap.data()?.fullName || 'Membre';
+    }
+  } catch (err) {
+    console.warn(`⚠️ [push] Could not fetch member ${memberId} details for personalization:`, err.message);
+  }
+
+  const firstName = memberName !== 'Membre' ? memberName.split(' ')[0] : 'Membre';
+  const personalTitle = title
+    .replace(/\{name\}/g, memberName)
+    .replace(/\{firstname\}/g, firstName)
+    .replace(/\[name\]/g, memberName)
+    .replace(/\[firstname\]/g, firstName);
+  const personalBody = body
+    .replace(/\{name\}/g, memberName)
+    .replace(/\{firstname\}/g, firstName)
+    .replace(/\[name\]/g, memberName)
+    .replace(/\[firstname\]/g, firstName);
+
   // 1. Attempt to dispatch to the App Server
   try {
     console.log(`[push] Attempting App Server dispatch for ${memberId}`);
@@ -732,8 +756,8 @@ app.post('/api/send-notification', _vat, async (req, res) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         memberId,
-        title,
-        body,
+        title: personalTitle,
+        body: personalBody,
         subtitle: subtitle || '',
         imageUrl: imageUrl || null,
         channelId: 'gym-alerts',
@@ -755,8 +779,10 @@ app.post('/api/send-notification', _vat, async (req, res) => {
   // 2. Fallback: Dispatch directly via Expo Push API using Firestore token
   try {
     console.log(`[push] Falling back to direct Expo dispatch for ${memberId}`);
-    const memberSnap = await db.collection('members').doc(memberId).get();
-    if (!memberSnap.exists) {
+    if (!memberSnap) {
+      memberSnap = await db.collection('members').doc(memberId).get();
+    }
+    if (!memberSnap || !memberSnap.exists) {
       return res.status(404).json({ ok: false, error: `Member ${memberId} not found.` });
     }
 
@@ -778,9 +804,10 @@ app.post('/api/send-notification', _vat, async (req, res) => {
         to: token,
         sound: 'Notif.wav',
         channelId: 'gym-alerts',
-        title,
+        title: personalTitle,
         subtitle: subtitle || undefined,
-        body,
+        body: personalBody,
+        mutableContent: true,
         data: {
           ...(data || {}),
           imageUrl: imageUrl || undefined,
@@ -834,27 +861,63 @@ app.post('/api/send-notification-bulk', _vat, async (req, res) => {
     const valid = members.filter(m => m.expoPushToken?.startsWith('ExponentPushToken'));
     if (!valid.length) return res.json({ ok: true, sent: 0, failed: 0, total: 0, skipped: members.length });
 
+    // ── Deduplicate by token ──────────────────────────────────────────────
+    // Multiple members may share the same push token when users log in/out
+    // on the same device without clearing the old token.  Keep only the
+    // member whose lastLogin is the most recent for each unique token.
+    const tokenMap = new Map();
+    for (const m of valid) {
+      const existing = tokenMap.get(m.expoPushToken);
+      if (!existing) { tokenMap.set(m.expoPushToken, m); continue; }
+      const mTime  = m.lastLogin        ? new Date(m.lastLogin).getTime()        : 0;
+      const eTime  = existing.lastLogin  ? new Date(existing.lastLogin).getTime() : 0;
+      if (mTime > eTime) tokenMap.set(m.expoPushToken, m);
+    }
+    const deduped = [...tokenMap.values()];
+    const dupsRemoved = valid.length - deduped.length;
+    if (dupsRemoved > 0) {
+      console.log(`⚠️ [push-bulk] Deduplicated ${dupsRemoved} duplicate token(s) — ${valid.length} → ${deduped.length} unique devices`);
+    }
+
     // Batch to Expo: 100 per request, 200ms between batches (firewall against rate limits)
     const BATCH_SIZE = 100;
     const BATCH_DELAY_MS = 200;
     let sent = 0, failed = 0;
-    const totalBatches = Math.ceil(valid.length / BATCH_SIZE);
+    const totalBatches = Math.ceil(deduped.length / BATCH_SIZE);
 
-    for (let i = 0; i < valid.length; i += BATCH_SIZE) {
+    for (let i = 0; i < deduped.length; i += BATCH_SIZE) {
       const batchNum = Math.floor(i / BATCH_SIZE) + 1;
-      const chunk = valid.slice(i, i + BATCH_SIZE);
-      const messages = chunk.map(m => ({
-        to: m.expoPushToken,
-        sound: 'Notif.wav',
-        channelId: 'gym-alerts',
-        title,
-        subtitle: subtitle || undefined,
-        body,
-        data: {
-          ...(data || {}),
-          imageUrl: imageUrl || undefined,
-        },
-      }));
+      const chunk = deduped.slice(i, i + BATCH_SIZE);
+      const messages = chunk.map(m => {
+        const mName = m.fullName || 'Membre';
+        const fName = mName !== 'Membre' ? mName.split(' ')[0] : 'Membre';
+        
+        const personalTitle = title
+          .replace(/\{name\}/g, mName)
+          .replace(/\{firstname\}/g, fName)
+          .replace(/\[name\]/g, mName)
+          .replace(/\[firstname\]/g, fName);
+          
+        const personalBody = body
+          .replace(/\{name\}/g, mName)
+          .replace(/\{firstname\}/g, fName)
+          .replace(/\[name\]/g, mName)
+          .replace(/\[firstname\]/g, fName);
+
+        return {
+          to: m.expoPushToken,
+          sound: 'Notif.wav',
+          channelId: 'gym-alerts',
+          title: personalTitle,
+          subtitle: subtitle || undefined,
+          body: personalBody,
+          mutableContent: true,
+          data: {
+            ...(data || {}),
+            imageUrl: imageUrl || undefined,
+          },
+        };
+      });
 
       try {
         const r = await fetch('https://exp.host/--/api/v2/push/send', {
@@ -870,13 +933,13 @@ app.post('/api/send-notification-bulk', _vat, async (req, res) => {
       }
 
       // Rate-limit firewall: pause between batches (except after last batch)
-      if (i + BATCH_SIZE < valid.length) {
+      if (i + BATCH_SIZE < deduped.length) {
         await sleep(BATCH_DELAY_MS);
       }
     }
 
-    console.log(`✅ [push-bulk] DONE audience=${audience} gym=${gymId||'all'} sent=${sent} failed=${failed} total=${valid.length}`);
-    return res.json({ ok: true, sent, failed, total: valid.length, batches: totalBatches });
+    console.log(`✅ [push-bulk] DONE audience=${audience} gym=${gymId||'all'} sent=${sent} failed=${failed} total=${deduped.length} (dupsRemoved=${dupsRemoved})`);
+    return res.json({ ok: true, sent, failed, total: deduped.length, duplicatesRemoved: dupsRemoved, batches: totalBatches });
   } catch (err) {
     console.error('🔥 [push-bulk] Error:', err.message);
     return res.status(500).json({ ok: false, error: err.message });
