@@ -833,6 +833,31 @@ app.post('/api/send-notification', _vat, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DEBUG — GET /api/debug-push
+// Returns Firebase status + count of members with push tokens. No auth needed.
+// ─────────────────────────────────────────────────────────────────────────────
+app.get('/api/debug-push', async (req, res) => {
+  const fbOk = !!db;
+  let tokenCount = '?', sampleTokens = [];
+  if (fbOk) {
+    try {
+      const snap = await db.collection('members').where('expoPushToken', '!=', null).get();
+      tokenCount = snap.size;
+      sampleTokens = snap.docs.slice(0, 3).map(d => ({
+        name: d.data().fullName || 'Unknown',
+        token: d.data().expoPushToken?.slice(0, 30) + '...',
+      }));
+    } catch (e) { tokenCount = `ERROR: ${e.message}`; }
+  }
+  return res.json({
+    firebaseInitialized: fbOk,
+    membersWithToken: tokenCount,
+    samples: sampleTokens,
+    nodeEnv: process.env.NODE_ENV,
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PUSH NOTIFICATIONS — POST /api/send-notification-bulk
 // Sends to multiple members by audience filter (all active, expiring, expired).
 // Body: { audience: 'all'|'expiring'|'expired', gymId?, title, body, imageUrl?, data? }
@@ -843,6 +868,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 app.post('/api/send-notification-bulk', _vat, async (req, res) => {
   const { audience = 'all', gymId, title, subtitle, body, imageUrl, data } = req.body;
   if (!title || !body) return res.status(400).json({ ok: false, error: 'title and body required' });
+  if (!db) return res.status(503).json({ ok: false, error: 'Firebase Admin not initialized on server. Check FIREBASE_SERVICE_ACCOUNT env var on Render.' });
 
   try {
     const col = db.collection('members');
