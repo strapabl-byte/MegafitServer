@@ -16,8 +16,8 @@ const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 const GROQ_VISION_URL  = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_CIN_MODEL   = 'meta-llama/llama-4-scout-17b-16e-instruct';
 const OPENAI_URL       = 'https://api.openai.com/v1/chat/completions';
-const OPENAI_SMART     = 'gpt-5.5';         // Smart Scan — best accuracy, handwriting
-const OPENAI_FAST      = 'gpt-5.5-instant'; // Quick Scan — fast + cost-effective
+const OPENAI_SMART     = 'gpt-5.5-pro';     // Smart Scan — best handwriting OCR accuracy (parallel test-time compute)
+const OPENAI_FAST      = 'gpt-5.5-instant'; // Quick Scan — fast + cost-effective (clean/typed contracts)
 
 // ── Image preprocessing with sharp ───────────────────────────────────────────
 /**
