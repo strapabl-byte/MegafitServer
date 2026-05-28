@@ -1,15 +1,16 @@
 // routes/scan.js
-// 📷 CIN + Contract Scanner — Smart Multi-Crop GPT-4o Vision
+// 📷 CIN + Contract Scanner — Smart Multi-Crop GPT-5.5 Vision
 //
 // POST /public/scan-cin            { image, side }          → Groq Llama 4 Scout (fast ID OCR)
-// POST /public/scan-contract       { image, mode? }         → GPT-4o Vision, 6 crops, rich schema
-// POST /public/save-contract-scan  { image, fields, gymId, commercial }
+// POST /public/scan-contract       { image, mode? }         → OpenAI Responses API, 6 crops, Structured Outputs
+// POST /public/save-contract-scan  { image, fields, gymId, commercial, corrections }
 // GET  /api/contracts              (admin only) — list saved contract scans
 // PATCH /api/contracts/:id         (admin only) — update fields / status
 
 'use strict';
 const express = require('express');
 const sharp   = require('sharp');
+const OpenAI  = require('openai');
 const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 
 // ── Model config ──────────────────────────────────────────────────────────────
@@ -19,73 +20,66 @@ const OPENAI_URL       = 'https://api.openai.com/v1/chat/completions';
 const OPENAI_SMART     = 'gpt-5.5-2026-04-23'; // Smart Scan — confirmed available on this account
 const OPENAI_FAST      = 'gpt-4o-mini';         // Quick Scan — fast + cost-effective
 
+// ── Calibrated crop map for MegaFit A4 contract (% of page) ───────────────────
+// Skips logo/header at top 18%, maps exactly to content zones
+const CROP_MAP = {
+  topLeft:  { left: 0.03, top: 0.18, width: 0.48, height: 0.28 }, // identity: nom, prénom, CIN, naissance
+  topRight: { left: 0.50, top: 0.18, width: 0.47, height: 0.28 }, // phone, ville, adresse, urgence
+  midLeft:  { left: 0.03, top: 0.43, width: 0.48, height: 0.38 }, // dates abonnement, durée, montant
+  midRight: { left: 0.50, top: 0.43, width: 0.47, height: 0.38 }, // options, paiement, mode
+  bottom:   { left: 0.03, top: 0.78, width: 0.94, height: 0.20 }, // accès, signature, date
+};
+
 // ── Image preprocessing with sharp ───────────────────────────────────────────
-/**
- * Takes a base64 data-URI, returns an object with:
- *   { full, topLeft, topRight, midLeft, midRight, bottom }
- * Each value is a base64 JPEG data-URI ready to send to OpenAI.
- */
 async function preprocessAndCrop(base64DataUri) {
-  // Strip the data: prefix
   const match = base64DataUri.match(/^data:(image\/\w+);base64,(.+)$/);
   if (!match) throw new Error('Format image invalide (attendu: data:image/...;base64,...)');
   const inputBuffer = Buffer.from(match[2], 'base64');
 
-  // 1. Decode + auto-rotate EXIF + normalise to JPEG
-  const raw = sharp(inputBuffer).rotate(); // auto-rotate from EXIF
-
-  // 2. Get metadata to know original dimensions
+  const raw = sharp(inputBuffer).rotate();
   const meta = await raw.clone().metadata();
   const origW = meta.width  || 1200;
   const origH = meta.height || 1700;
 
-  // 3. Cap at 1200px wide to stay within GPT vision token limits (6 images × tiles)
-  const targetW = Math.min(Math.max(origW, 900), 1200);
+  const targetW = Math.min(Math.max(origW, 1000), 2000);
   const targetH = Math.round((targetW / origW) * origH);
 
-  // 4. Enhance: normalise contrast, moderate sharpening
   const enhanced = raw.clone()
     .resize(targetW, targetH, { fit: 'fill' })
     .normalise()
     .sharpen({ sigma: 1.0, m1: 0.5, m2: 2.0 })
-    .jpeg({ quality: 80 });
+    .jpeg({ quality: 85 });
 
   const fullBuf = await enhanced.toBuffer();
   const fullB64 = `data:image/jpeg;base64,${fullBuf.toString('base64')}`;
 
-  // 5. Generate 5 crops (relative to targetW × targetH)
-  //   top-left   : member identity (nom, prénom, CIN, naissance)
-  //   top-right  : phone / address / contact
-  //   mid-left   : subscription dates + price
-  //   mid-right  : options + payment method
-  //   bottom     : access type / signature / date
-
-  // Use a shared enhanced base buffer for cropping
   const base = sharp(fullBuf);
-
   const cropToB64 = async (left, top, width, height) => {
     const w = Math.min(width,  targetW - left);
     const h = Math.min(height, targetH - top);
-    if (w <= 0 || h <= 0) return fullB64; // safety fallback
+    if (w <= 0 || h <= 0) return fullB64;
     const buf = await base.clone()
       .extract({ left, top, width: w, height: h })
       .normalise()
       .sharpen({ sigma: 1.2, m1: 0.6, m2: 2.5 })
-      .jpeg({ quality: 82 })
+      .jpeg({ quality: 90 })
       .toBuffer();
     return `data:image/jpeg;base64,${buf.toString('base64')}`;
   };
 
-  const halfW  = Math.floor(targetW / 2);
-  const thirdH = Math.floor(targetH / 3);
+  const px = (box) => ({
+    left:   Math.round(targetW * box.left),
+    top:    Math.round(targetH * box.top),
+    width:  Math.round(targetW * box.width),
+    height: Math.round(targetH * box.height),
+  });
 
-  const [topLeft, topRight, midLeft, midRight, bottom] = await Promise.all([
-    cropToB64(0,             0,               halfW,  thirdH),
-    cropToB64(halfW,         0,               halfW,  thirdH),
-    cropToB64(0,             thirdH,          halfW,  thirdH),
-    cropToB64(halfW,         thirdH,          halfW,  thirdH),
-    cropToB64(0,             thirdH * 2,      targetW, thirdH + (targetH - thirdH * 3)),
-  ]);
+  const [topLeft, topRight, midLeft, midRight, bottom] = await Promise.all(
+    ['topLeft','topRight','midLeft','midRight','bottom'].map(k => {
+      const p = px(CROP_MAP[k]);
+      return cropToB64(p.left, p.top, p.width, p.height);
+    })
+  );
 
   return { full: fullB64, topLeft, topRight, midLeft, midRight, bottom };
 }
@@ -123,19 +117,156 @@ async function callGroqVision(image, systemPrompt) {
   return groqRes;
 }
 
-// ── OpenAI Vision call — multi-image (contract scanner) ─────────────────────
+// ── OpenAI Responses API — Structured Outputs (guaranteed valid JSON schema) ────
+const GYM_CONTRACT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['documentType','contract','member','subscription','options','payment','access','signature','review'],
+  properties: {
+    documentType: { type: 'string', enum: ['gym_membership_contract'] },
+    contract: {
+      type: 'object', additionalProperties: false,
+      required: ['club','commercial','contractNumber','isRenewal'],
+      properties: {
+        club:           { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        commercial:     { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        contractNumber: { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        isRenewal:      { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'boolean' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+      },
+    },
+    member: {
+      type: 'object', additionalProperties: false,
+      required: ['civility','lastName','firstName','cin','birthDate','address','postalCode','city','phone','email','emergencyContactName','emergencyPhone'],
+      properties: {
+        civility:             { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        lastName:             { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        firstName:            { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        cin:                  { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        birthDate:            { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        address:              { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        postalCode:           { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        city:                 { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        phone:                { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        email:                { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        emergencyContactName: { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        emergencyPhone:       { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+      },
+    },
+    subscription: {
+      type: 'object', additionalProperties: false,
+      required: ['durationDays','durationWeeks','durationMonths','durationYears','startDate','endDate','totalAmountDhs'],
+      properties: {
+        durationDays:    { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'number' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        durationWeeks:   { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'number' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        durationMonths:  { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'number' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        durationYears:   { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'number' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        startDate:       { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        endDate:         { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        totalAmountDhs:  { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'number' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+      },
+    },
+    options: {
+      type: 'object', additionalProperties: false,
+      required: ['withTransfer','withoutTransfer','privateCoaching','insurance','covidInsurance'],
+      properties: {
+        withTransfer:    { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'boolean' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        withoutTransfer: { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'boolean' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        privateCoaching: { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'boolean' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        insurance:       { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'boolean' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        covidInsurance:  { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'boolean' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+      },
+    },
+    payment: {
+      type: 'object', additionalProperties: false,
+      required: ['paymentMethod','cashAmountDhs','cardAmountDhs','chequeAmountDhs','transferAmountDhs','remainingAmountDhs'],
+      properties: {
+        paymentMethod:      { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        cashAmountDhs:      { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'number' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        cardAmountDhs:      { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'number' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        chequeAmountDhs:    { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'number' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        transferAmountDhs:  { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'number' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        remainingAmountDhs: { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'number' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+      },
+    },
+    access: {
+      type: 'object', additionalProperties: false,
+      required: ['local','multiclub'],
+      properties: {
+        local:     { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'boolean' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        multiclub: { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'boolean' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+      },
+    },
+    signature: {
+      type: 'object', additionalProperties: false,
+      required: ['city','date','memberSigned','staffSigned'],
+      properties: {
+        city:         { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        date:         { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'string' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        memberSigned: { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'boolean' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+        staffSigned:  { type: 'object', additionalProperties: false, required: ['value','raw','confidence','needsReview'], properties: { value: { anyOf: [{ type: 'boolean' }, { type: 'null' }] }, raw: { anyOf: [{ type: 'string' }, { type: 'null' }] }, confidence: { type: 'number' }, needsReview: { type: 'boolean' } } },
+      },
+    },
+    review: {
+      type: 'object', additionalProperties: false,
+      required: ['overallConfidence','fieldsNeedingReview','warnings'],
+      properties: {
+        overallConfidence:   { type: 'number', minimum: 0, maximum: 1 },
+        fieldsNeedingReview: { type: 'array', items: { type: 'string' } },
+        warnings:            { type: 'array', items: { type: 'string' } },
+      },
+    },
+  },
+};
+
+// ── OpenAI Responses API — Structured Outputs (guaranteed valid JSON schema) ────
+async function callOpenAIResponses(crops, systemPrompt, model) {
+  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+  const imageInputs = [
+    { type: 'input_image', image_url: crops.full,     detail: 'low'  },
+    { type: 'input_image', image_url: crops.topLeft,  detail: 'high' },
+    { type: 'input_image', image_url: crops.topRight, detail: 'high' },
+    { type: 'input_image', image_url: crops.midLeft,  detail: 'high' },
+    { type: 'input_image', image_url: crops.midRight, detail: 'high' },
+    { type: 'input_image', image_url: crops.bottom,   detail: 'high' },
+  ];
+
+  const response = await openai.responses.create({
+    model,
+    reasoning: { effort: 'high' },
+    input: [
+      { role: 'system', content: [{ type: 'input_text', text: systemPrompt }] },
+      { role: 'user',   content: [
+        { type: 'input_text', text: 'Extract this gym membership contract into structured JSON.' },
+        ...imageInputs,
+      ]},
+    ],
+    text: {
+      format: {
+        type:   'json_schema',
+        name:   'gym_contract_extraction',
+        strict: true,
+        schema: GYM_CONTRACT_SCHEMA,
+      },
+    },
+    max_output_tokens: 10000,
+  });
+
+  return response.output_parsed || (response.output_text ? JSON.parse(response.output_text) : null);
+}
+
+// ── OpenAI Vision call — multi-image (chat/completions fallback) ───────────
 async function callOpenAIMultiImage(crops, systemPrompt, model = OPENAI_SMART) {
   const OPENAI_KEY = process.env.OPENAI_API_KEY;
-  if (!OPENAI_KEY) throw new Error('OPENAI_API_KEY non configurée. Ajoutez-la dans les variables d\'environnement Render.');
+  if (!OPENAI_KEY) throw new Error('OPENAI_API_KEY non configurée.');
 
-  // Full image: 'low' for layout context, crops: 'high' for reading handwriting
   const imageBlocks = [
-    toImageBlock(crops.full,     'low'),   // overview context only
-    toImageBlock(crops.topLeft,  'high'),  // identity: nom, prénom, CIN
-    toImageBlock(crops.topRight, 'high'),  // phone, ville, address
-    toImageBlock(crops.midLeft,  'high'),  // dates, duration
-    toImageBlock(crops.midRight, 'high'),  // payment, options
-    toImageBlock(crops.bottom,   'high'),  // signature, access, date
+    toImageBlock(crops.full,     'low'),
+    toImageBlock(crops.topLeft,  'high'),
+    toImageBlock(crops.topRight, 'high'),
+    toImageBlock(crops.midLeft,  'high'),
+    toImageBlock(crops.midRight, 'high'),
+    toImageBlock(crops.bottom,   'high'),
   ];
 
   const res = await fetch(OPENAI_URL, {
@@ -144,14 +275,6 @@ async function callOpenAIMultiImage(crops, systemPrompt, model = OPENAI_SMART) {
     body: JSON.stringify({
       model,
       messages: [
-        {
-          role: 'system',
-          content: systemPrompt,
-        },
-        {
-          role: 'user',
-          content: [
-            {
               type: 'text',
               text: 'Voici le contrat complet (image 1) suivi de 5 sections recadrées (images 2–6). Extrais toutes les données visibles dans le JSON demandé.',
             },
@@ -559,68 +682,137 @@ function router(deps = {}) {
       console.log(`[scan-contract] Crops ready. Full size: ${crops.full.length} chars`);
 
       // ── Step 2: Fetch recent human corrections from Firestore (few-shot learning) ──
-      let corrections = [];
+      let pastCorrections = [];
       if (db) {
         try {
           const corrSnap = await db.collection('scan_corrections')
             .orderBy('correctedAt', 'desc')
             .limit(40)
             .get();
-          corrections = corrSnap.docs.map(d => d.data());
-          if (corrections.length > 0)
-            console.log(`[scan-contract] Injecting ${corrections.length} past corrections into prompt`);
+          pastCorrections = corrSnap.docs.map(d => d.data());
+          if (pastCorrections.length > 0)
+            console.log(`[scan-contract] Injecting ${pastCorrections.length} past corrections into prompt`);
         } catch (e) {
           console.warn('[scan-contract] Could not fetch corrections:', e.message);
         }
       }
-      const systemPrompt = buildSystemPrompt(corrections);
+      const systemPrompt = buildSystemPrompt(pastCorrections);
 
-      // ── Step 3: Call vision model ───────────────────────────────────────────
-      let scanRes;
+      // ── Step 3: Call vision model (Responses API → fallback to chat/completions) ──
+      let parsed = null;
+      let usedResponsesAPI = false;
       if (useOpenAI) {
-        scanRes = await callOpenAIMultiImage(crops, systemPrompt, model);
-      } else {
-        console.warn('[scan-contract] No OPENAI_API_KEY — using Groq fallback (single image, less accurate)');
-        scanRes = await callGroqContractFallback(crops, systemPrompt);
+        // Try Responses API first (Structured Outputs — guaranteed valid JSON)
+        try {
+          console.log('[scan-contract] Trying Responses API with Structured Outputs...');
+          parsed = await callOpenAIResponses(crops, systemPrompt, model);
+          usedResponsesAPI = true;
+          console.log('[scan-contract] Responses API success');
+        } catch (respErr) {
+          console.warn('[scan-contract] Responses API failed, falling back to chat/completions:', respErr.message);
+        }
+      }
+      // Fallback: chat/completions (raw fetch)
+      if (!parsed) {
+        let scanRes;
+        if (useOpenAI) {
+          scanRes = await callOpenAIMultiImage(crops, systemPrompt, model);
+        } else {
+          console.warn('[scan-contract] No OPENAI_API_KEY — using Groq fallback');
+          scanRes = await callGroqContractFallback(crops, systemPrompt);
+        }
+        if (!scanRes.ok) {
+          const errText = await scanRes.text();
+          console.error('[scan-contract] Vision error:', errText);
+          return res.status(502).json({ error: 'Erreur Vision API', detail: errText });
+        }
+        const data = await scanRes.json();
+        const rawText = data.choices?.[0]?.message?.content || '{}';
+        console.log('[scan-contract] chat/completions response length:', rawText.length);
+        try {
+          const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+          if (!jsonMatch) throw new Error('No JSON in response');
+          parsed = JSON.parse(jsonMatch[0]);
+        } catch (parseErr) {
+          console.error('[scan-contract] JSON parse error:', parseErr.message);
+          parsed = {};
+        }
       }
 
-      if (!scanRes.ok) {
-        const errText = await scanRes.text();
-        console.error('[scan-contract] Vision error:', errText);
-        return res.status(502).json({ error: 'Erreur Vision API', detail: errText });
-      }
+      // ── Step 4: Normalise into schema ──────────────────────────────────────
+      let rich = normaliseExtracted(parsed || {});
 
-      const data = await scanRes.json();
-      const rawText = data.choices?.[0]?.message?.content || '{}';
-      console.log('[scan-contract] Raw AI response length:', rawText.length);
-
-      // ── Step 4: Parse and normalise into schema ─────────────────────────────
-      let parsed;
-      try {
-        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) throw new Error('No JSON in AI response');
-        parsed = JSON.parse(jsonMatch[0]);
-      } catch (parseErr) {
-        console.error('[scan-contract] JSON parse error:', parseErr.message, '\nRaw:', rawText.slice(0, 500));
-        // Return empty schema rather than crashing
-        parsed = {};
-      }
-
-      const rich = normaliseExtracted(parsed);
-
-      // ── Step 5: Business validation pass ────────────────────────────────────
+      // ── Step 5: Business validation pass ───────────────────────────────────
       const warnings = validateContract(rich);
       if (warnings.length) console.log('[scan-contract] Validation warnings:', warnings);
 
-      // ── Step 6: Return both rich + legacy flat ───────────────────────────────
+      // ── Step 6: Deep Scan fallback — rescan only uncertain fields ───────────
+      let deepScanRun = false;
+      if (useOpenAI && rich.review.overallConfidence < 0.85 && rich.review.fieldsNeedingReview.length > 0) {
+        console.log(`[scan-contract] Confidence ${rich.review.overallConfidence} < 0.85, running Deep Scan on ${rich.review.fieldsNeedingReview.length} uncertain fields...`);
+        try {
+          const uncertainFields = rich.review.fieldsNeedingReview.join(', ');
+          const deepPrompt = `${systemPrompt}\n\nDEEP SCAN — SECOND PASS:\nThe first extraction had uncertain fields: ${uncertainFields}\nFocus exclusively on re-reading these fields from the crops. Return only corrected values for uncertain fields; keep all other fields exactly as they are. Apply maximum attention to these zones.`;
+
+          // Identify which crops are relevant based on uncertain field paths
+          const needsTop  = uncertainFields.match(/civility|lastName|firstName|cin|birthDate|address|postalCode|city|phone|email|emergency|commercial|contractNumber/i);
+          const needsMid  = uncertainFields.match(/subscription|startDate|endDate|duration|total|payment|cash|card|cheque|transfer|remaining|options|coaching|insurance/i);
+          const needsBot  = uncertainFields.match(/access|signature|memberSigned|staffSigned|date|local|multiclub/i);
+
+          const deepCrops = {
+            full:     crops.full,
+            topLeft:  needsTop ? crops.topLeft  : crops.full,
+            topRight: needsTop ? crops.topRight : crops.full,
+            midLeft:  needsMid ? crops.midLeft  : crops.full,
+            midRight: needsMid ? crops.midRight : crops.full,
+            bottom:   needsBot ? crops.bottom   : crops.full,
+          };
+
+          let deepParsed = null;
+          try {
+            deepParsed = await callOpenAIResponses(deepCrops, deepPrompt, model);
+          } catch {
+            const deepRes = await callOpenAIMultiImage(deepCrops, deepPrompt, model);
+            if (deepRes.ok) {
+              const deepData = await deepRes.json();
+              const deepText = deepData.choices?.[0]?.message?.content || '{}';
+              const m = deepText.match(/\{[\s\S]*\}/);
+              if (m) deepParsed = JSON.parse(m[0]);
+            }
+          }
+
+          if (deepParsed) {
+            // Merge: only overwrite fields that were uncertain
+            const deepRich = normaliseExtracted(deepParsed);
+            rich.review.fieldsNeedingReview.forEach(path => {
+              const parts = path.split('.');
+              if (parts.length === 2) {
+                const [section, key] = parts;
+                if (deepRich[section]?.[key]?.value !== null && deepRich[section]?.[key]?.confidence > (rich[section]?.[key]?.confidence || 0)) {
+                  rich[section][key] = deepRich[section][key];
+                }
+              }
+            });
+            validateContract(rich); // revalidate after merge
+            deepScanRun = true;
+            console.log(`[scan-contract] Deep Scan complete. New confidence: ${rich.review.overallConfidence}`);
+          }
+        } catch (deepErr) {
+          console.warn('[scan-contract] Deep Scan failed (non-critical):', deepErr.message);
+        }
+      }
+
+      // ── Step 7: Return both rich + legacy flat ──────────────────────────────
       const legacy = flattenToLegacy(rich);
-      console.log(`[scan-contract] Done. Overall confidence: ${rich.review.overallConfidence}, fieldsNeedingReview: ${rich.review.fieldsNeedingReview.length}`);
+      console.log(`[scan-contract] Done. Confidence: ${rich.review.overallConfidence}, uncertain: ${rich.review.fieldsNeedingReview.length}, API: ${usedResponsesAPI ? 'Responses' : 'chat/completions'}, deepScan: ${deepScanRun}`);
 
       return res.json({
         rich,
         legacy,
         model: model || 'groq-fallback',
         useOpenAI,
+        usedResponsesAPI,
+        deepScanRun,
         cropsGenerated: 6,
       });
 
