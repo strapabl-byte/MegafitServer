@@ -39,8 +39,8 @@ async function preprocessAndCrop(base64DataUri) {
   const origW = meta.width  || 1200;
   const origH = meta.height || 1700;
 
-  // 3. Resize to at least 2000px wide (upscale if needed), maintain aspect
-  const targetW = Math.max(origW, 2000);
+  // 3. Cap at 1200px wide to stay within GPT vision token limits (6 images × tiles)
+  const targetW = Math.min(Math.max(origW, 900), 1200);
   const targetH = Math.round((targetW / origW) * origH);
 
   // 4. Enhance: normalise contrast, moderate sharpening
@@ -48,7 +48,7 @@ async function preprocessAndCrop(base64DataUri) {
     .resize(targetW, targetH, { fit: 'fill' })
     .normalise()
     .sharpen({ sigma: 1.0, m1: 0.5, m2: 2.0 })
-    .jpeg({ quality: 92 });
+    .jpeg({ quality: 80 });
 
   const fullBuf = await enhanced.toBuffer();
   const fullB64 = `data:image/jpeg;base64,${fullBuf.toString('base64')}`;
@@ -71,7 +71,7 @@ async function preprocessAndCrop(base64DataUri) {
       .extract({ left, top, width: w, height: h })
       .normalise()
       .sharpen({ sigma: 1.2, m1: 0.6, m2: 2.5 })
-      .jpeg({ quality: 94 })
+      .jpeg({ quality: 82 })
       .toBuffer();
     return `data:image/jpeg;base64,${buf.toString('base64')}`;
   };
@@ -128,15 +128,14 @@ async function callOpenAIMultiImage(crops, systemPrompt, model = OPENAI_SMART) {
   const OPENAI_KEY = process.env.OPENAI_API_KEY;
   if (!OPENAI_KEY) throw new Error('OPENAI_API_KEY non configurée. Ajoutez-la dans les variables d\'environnement Render.');
 
-  const detail = model === OPENAI_SMART ? 'high' : 'high';
-
+  // Full image: 'low' for layout context, crops: 'high' for reading handwriting
   const imageBlocks = [
-    toImageBlock(crops.full,     detail),
-    toImageBlock(crops.topLeft,  detail),
-    toImageBlock(crops.topRight, detail),
-    toImageBlock(crops.midLeft,  detail),
-    toImageBlock(crops.midRight, detail),
-    toImageBlock(crops.bottom,   detail),
+    toImageBlock(crops.full,     'low'),   // overview context only
+    toImageBlock(crops.topLeft,  'high'),  // identity: nom, prénom, CIN
+    toImageBlock(crops.topRight, 'high'),  // phone, ville, address
+    toImageBlock(crops.midLeft,  'high'),  // dates, duration
+    toImageBlock(crops.midRight, 'high'),  // payment, options
+    toImageBlock(crops.bottom,   'high'),  // signature, access, date
   ];
 
   const res = await fetch(OPENAI_URL, {
@@ -160,8 +159,7 @@ async function callOpenAIMultiImage(crops, systemPrompt, model = OPENAI_SMART) {
           ],
         },
       ],
-      max_completion_tokens: 2000,
-      response_format: { type: 'json_object' },
+      max_completion_tokens: 8000,
     }),
   });
   return res;
