@@ -14,11 +14,12 @@ const OpenAI  = require('openai');
 const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 
 // ── Model config ──────────────────────────────────────────────────────────────
-const GROQ_VISION_URL  = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_CIN_MODEL   = 'meta-llama/llama-4-scout-17b-16e-instruct';
-const OPENAI_URL       = 'https://api.openai.com/v1/chat/completions';
-const OPENAI_SMART     = 'gpt-5.5-2026-04-23'; // Smart Scan — confirmed available on this account
-const OPENAI_FAST      = 'gpt-4o-mini';         // Quick Scan — fast + cost-effective
+const GROQ_VISION_URL      = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_CIN_MODEL       = 'meta-llama/llama-4-scout-17b-16e-instruct';    // CIN scanner
+const GROQ_CONTRACT_MODEL  = 'meta-llama/llama-4-maverick-17b-128e-instruct'; // Contract scanner (free tier)
+const OPENAI_URL           = 'https://api.openai.com/v1/chat/completions';
+const OPENAI_SMART         = 'gpt-5.5-2026-04-23'; // Deep scan only — confirmed on account
+const OPENAI_FAST          = 'gpt-4o-mini';         // kept for quick/legacy mode
 
 // ── Calibrated crop map for MegaFit A4 contract (% of page) ───────────────────
 // Skips logo/header at top 18%, maps exactly to content zones
@@ -41,7 +42,7 @@ async function preprocessAndCrop(base64DataUri) {
   const origW = meta.width  || 1200;
   const origH = meta.height || 1700;
 
-  const targetW = Math.min(Math.max(origW, 1000), 2000);
+  const targetW = Math.min(Math.max(origW, 1000), 1600); // 1600px: ~30% fewer tokens vs 2000px, same quality for flat contracts
   const targetH = Math.round((targetW / origW) * origH);
 
   const enhanced = raw.clone()
@@ -219,9 +220,11 @@ const GYM_CONTRACT_SCHEMA = {
 };
 
 // ── OpenAI Responses API — Structured Outputs (guaranteed valid JSON schema) ────
-async function callOpenAIResponses(crops, systemPrompt, model) {
+// effort: 'low' saves ~50% reasoning tokens — use for deep scan pass
+async function callOpenAIResponses(crops, systemPrompt, model, effort = 'low') {
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+  // Only include crops that aren't just the full image as placeholder
   const imageInputs = [
     { type: 'input_image', image_url: crops.full,     detail: 'low'  },
     { type: 'input_image', image_url: crops.topLeft,  detail: 'high' },
@@ -233,7 +236,7 @@ async function callOpenAIResponses(crops, systemPrompt, model) {
 
   const response = await openai.responses.create({
     model,
-    reasoning: { effort: 'high' },
+    reasoning: { effort },           // 'low' = ~50% cheaper reasoning tokens
     input: [
       { role: 'system', content: [{ type: 'input_text', text: systemPrompt }] },
       { role: 'user',   content: [
@@ -249,7 +252,7 @@ async function callOpenAIResponses(crops, systemPrompt, model) {
         schema: GYM_CONTRACT_SCHEMA,
       },
     },
-    max_output_tokens: 10000,
+    max_output_tokens: 6000, // trimmed from 10000 — JSON output is ~1500 tokens
   });
 
   return response.output_parsed || (response.output_text ? JSON.parse(response.output_text) : null);
@@ -287,7 +290,38 @@ async function callOpenAIMultiImage(crops, systemPrompt, model = OPENAI_SMART) {
   return res;
 }
 
-// ── Groq fallback (single image) for contract when no OpenAI key ─────────────
+// ── Groq Llama 4 Maverick — Pass 1 contract scanner (FREE, 4 images) ─────────
+async function callGroqContractScan(crops, prompt) {
+  const PRIMARY_KEY  = process.env.GROQ_SCAN_API_KEY;
+  const FALLBACK_KEY = process.env.GROQ_SCAN_API_KEY_FALLBACK;
+  if (!PRIMARY_KEY) throw new Error('GROQ_SCAN_API_KEY non configurée');
+
+  const call = (apiKey) => fetch(GROQ_VISION_URL, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: GROQ_CONTRACT_MODEL,
+      messages: [{ role: 'user', content: [
+        { type: 'text',      text: prompt },
+        { type: 'image_url', image_url: { url: crops.full     } }, // full page (overview)
+        { type: 'image_url', image_url: { url: crops.topLeft  } }, // identity zone (nom, CIN...)
+        { type: 'image_url', image_url: { url: crops.midLeft  } }, // subscription (dates, montant)
+        { type: 'image_url', image_url: { url: crops.midRight } }, // payment (options, mode)
+      ]}],
+      max_tokens: 4000,
+      temperature: 0.05,
+    }),
+  });
+
+  let res = await call(PRIMARY_KEY);
+  if (res.status === 429 && FALLBACK_KEY) {
+    console.warn('[scan-contract] Groq rate-limited, switching to fallback key...');
+    res = await call(FALLBACK_KEY);
+  }
+  return res;
+}
+
+// ── Groq fallback (single image) — kept for backward compat / no-OpenAI mode ──
 async function callGroqContractFallback(crops, contractPrompt) {
   const PRIMARY_KEY  = process.env.GROQ_SCAN_API_KEY;
   const FALLBACK_KEY = process.env.GROQ_SCAN_API_KEY_FALLBACK;
@@ -297,13 +331,13 @@ async function callGroqContractFallback(crops, contractPrompt) {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: GROQ_CIN_MODEL,
+      model: GROQ_CONTRACT_MODEL,
       messages: [{ role: 'user', content: [
         { type: 'text', text: contractPrompt },
         { type: 'image_url', image_url: { url: crops.full } },
       ]}],
-      max_tokens: 1200,
-      temperature: 0.1,
+      max_tokens: 4000,
+      temperature: 0.05,
     }),
   });
 
@@ -506,6 +540,37 @@ function flattenToLegacy(rich) {
   };
 }
 
+// ── Build lean Groq prompt (for Pass 1 — Llama 4 Maverick, no JSON schema in text) ──
+// Groq doesn’t support Structured Outputs, so we embed the schema structure in text.
+// Kept compact to minimise tokens. Same correction injection as GPT-5.5 prompt.
+function buildGroqPrompt(corrections = []) {
+  const base = `You are an expert OCR engine for Moroccan gym membership contracts (French).
+You receive 4 images: full contract + 3 key crops (identity, subscription, payment zones).
+Use ALL 4 images together — crops are high-resolution sections of the full page.
+
+RULES:
+- NEVER invent data. Blank/illegible → value:null, confidence:0.2, needsReview:false
+- Uncertain reading → confidence<0.7, needsReview:true
+- Dates → YYYY-MM-DD. Phone → 10 digits (0XXXXXXXXX). Amounts → numbers (MAD).
+- Checked boxes (tick, X, ink mark) → true. Empty box → false.
+- commercial field: leave null unless clearly visible.
+
+Return ONLY valid JSON, no markdown, no explanation:
+{"documentType":"gym_membership_contract","contract":{"club":{"value":null,"confidence":0,"raw":"","needsReview":false},"commercial":{"value":null,"confidence":0.5,"raw":"","needsReview":false},"contractNumber":{"value":null,"confidence":0,"raw":"","needsReview":false},"isRenewal":{"value":false,"confidence":0.5,"raw":"","needsReview":false}},"member":{"civility":{"value":null,"confidence":0,"raw":"","needsReview":false},"lastName":{"value":null,"confidence":0,"raw":"","needsReview":false},"firstName":{"value":null,"confidence":0,"raw":"","needsReview":false},"cin":{"value":null,"confidence":0,"raw":"","needsReview":false},"birthDate":{"value":null,"confidence":0,"raw":"","needsReview":false},"address":{"value":null,"confidence":0,"raw":"","needsReview":false},"postalCode":{"value":null,"confidence":0,"raw":"","needsReview":false},"city":{"value":null,"confidence":0,"raw":"","needsReview":false},"phone":{"value":null,"confidence":0,"raw":"","needsReview":false},"email":{"value":null,"confidence":0,"raw":"","needsReview":false},"emergencyContactName":{"value":null,"confidence":0,"raw":"","needsReview":false},"emergencyPhone":{"value":null,"confidence":0,"raw":"","needsReview":false}},"subscription":{"durationDays":{"value":null,"confidence":0,"raw":"","needsReview":false},"durationWeeks":{"value":null,"confidence":0,"raw":"","needsReview":false},"durationMonths":{"value":null,"confidence":0,"raw":"","needsReview":false},"durationYears":{"value":null,"confidence":0,"raw":"","needsReview":false},"startDate":{"value":null,"confidence":0,"raw":"","needsReview":false},"endDate":{"value":null,"confidence":0,"raw":"","needsReview":false},"totalAmountDhs":{"value":null,"confidence":0,"raw":"","needsReview":false}},"options":{"withTransfer":{"value":false,"confidence":0,"raw":"","needsReview":false},"withoutTransfer":{"value":false,"confidence":0,"raw":"","needsReview":false},"privateCoaching":{"value":false,"confidence":0,"raw":"","needsReview":false},"insurance":{"value":false,"confidence":0,"raw":"","needsReview":false},"covidInsurance":{"value":false,"confidence":0,"raw":"","needsReview":false}},"payment":{"paymentMethod":{"value":null,"confidence":0,"raw":"","needsReview":false},"cashAmountDhs":{"value":null,"confidence":0,"raw":"","needsReview":false},"cardAmountDhs":{"value":null,"confidence":0,"raw":"","needsReview":false},"chequeAmountDhs":{"value":null,"confidence":0,"raw":"","needsReview":false},"transferAmountDhs":{"value":null,"confidence":0,"raw":"","needsReview":false},"remainingAmountDhs":{"value":null,"confidence":0,"raw":"","needsReview":false}},"access":{"local":{"value":false,"confidence":0,"raw":"","needsReview":false},"multiclub":{"value":false,"confidence":0,"raw":"","needsReview":false}},"signature":{"city":{"value":null,"confidence":0,"raw":"","needsReview":false},"date":{"value":null,"confidence":0,"raw":"","needsReview":false},"memberSigned":{"value":false,"confidence":0,"raw":"","needsReview":false},"staffSigned":{"value":false,"confidence":0,"raw":"","needsReview":false}},"review":{"overallConfidence":0,"fieldsNeedingReview":[],"warnings":[]}}`;
+
+  if (!corrections || corrections.length === 0) return base;
+  const seen = new Set();
+  const unique = corrections.filter(c => {
+    const key = `${c.field}|${c.aiValue}`;
+    if (seen.has(key)) return false;
+    seen.add(key); return true;
+  });
+  const examples = unique.map(c =>
+    `  - field "${c.field}": AI read "${c.aiValue}" → corrected to "${c.humanValue}"`
+  ).join('\n');
+  return base + `\n\nPAST CORRECTIONS (${unique.length}) — learn from these:\n${examples}`;
+}
+
 // ── Build system prompt — optionally enhanced with human corrections ──────────
 function buildSystemPrompt(corrections = []) {
   const base = `
@@ -669,10 +734,7 @@ function router(deps = {}) {
       return res.status(400).json({ error: 'image base64 requis (data:image/...)' });
     }
 
-    const useOpenAI = !!process.env.OPENAI_API_KEY;
-    const model     = useOpenAI ? (mode === 'fast' ? OPENAI_FAST : OPENAI_SMART) : null;
-
-    console.log(`[scan-contract] mode=${mode}, useOpenAI=${useOpenAI}, model=${model || 'groq-fallback'}`);
+    console.log(`[scan-contract] mode=${mode}`);
 
     try {
       // ── Step 1: Preprocess + generate 6 images ──────────────────────────────
@@ -690,73 +752,65 @@ function router(deps = {}) {
             .get();
           pastCorrections = corrSnap.docs.map(d => d.data());
           if (pastCorrections.length > 0)
-            console.log(`[scan-contract] Injecting ${pastCorrections.length} past corrections into prompt`);
+            console.log(`[scan-contract] Injecting ${pastCorrections.length} past corrections`);
         } catch (e) {
           console.warn('[scan-contract] Could not fetch corrections:', e.message);
         }
       }
-      const systemPrompt = buildSystemPrompt(pastCorrections);
 
-      // ── Step 3: Call vision model (Responses API → fallback to chat/completions) ──
-      let parsed = null;
-      let usedResponsesAPI = false;
-      if (useOpenAI) {
-        // Try Responses API first (Structured Outputs — guaranteed valid JSON)
+      // ── Step 3: PASS 1 — Groq Llama 4 Maverick (FREE, 4 images, ~2-3s) ──────
+      let parsed      = null;
+      let pass1Model  = 'none';
+      const GROQ_KEY  = process.env.GROQ_SCAN_API_KEY;
+      const useOpenAI = !!process.env.OPENAI_API_KEY;
+
+      if (GROQ_KEY) {
         try {
-          console.log('[scan-contract] Trying Responses API with Structured Outputs...');
-          parsed = await callOpenAIResponses(crops, systemPrompt, model);
-          usedResponsesAPI = true;
-          console.log('[scan-contract] Responses API success');
-        } catch (respErr) {
-          console.warn('[scan-contract] Responses API failed, falling back to chat/completions:', respErr.message);
-        }
-      }
-      // Fallback: chat/completions (raw fetch)
-      if (!parsed) {
-        let scanRes;
-        if (useOpenAI) {
-          scanRes = await callOpenAIMultiImage(crops, systemPrompt, model);
-        } else {
-          console.warn('[scan-contract] No OPENAI_API_KEY — using Groq fallback');
-          scanRes = await callGroqContractFallback(crops, systemPrompt);
-        }
-        if (!scanRes.ok) {
-          const errText = await scanRes.text();
-          console.error('[scan-contract] Vision error:', errText);
-          return res.status(502).json({ error: 'Erreur Vision API', detail: errText });
-        }
-        const data = await scanRes.json();
-        const rawText = data.choices?.[0]?.message?.content || '{}';
-        console.log('[scan-contract] chat/completions response length:', rawText.length);
-        try {
-          const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-          if (!jsonMatch) throw new Error('No JSON in response');
-          parsed = JSON.parse(jsonMatch[0]);
-        } catch (parseErr) {
-          console.error('[scan-contract] JSON parse error:', parseErr.message);
-          parsed = {};
+          console.log('[scan-contract] Pass 1: Groq Llama 4 Maverick (free)...');
+          const groqRes = await callGroqContractScan(crops, buildGroqPrompt(pastCorrections));
+          if (groqRes.ok) {
+            const groqData = await groqRes.json();
+            const rawText  = groqData.choices?.[0]?.message?.content || '{}';
+            const m = rawText.match(/\{[\s\S]*\}/);
+            if (m) {
+              parsed     = JSON.parse(m[0]);
+              pass1Model = GROQ_CONTRACT_MODEL;
+              console.log('[scan-contract] Groq Pass 1 success');
+            }
+          } else {
+            const errText = await groqRes.text();
+            console.warn(`[scan-contract] Groq Pass 1 HTTP ${groqRes.status}:`, errText.slice(0, 200));
+          }
+        } catch (groqErr) {
+          console.warn('[scan-contract] Groq Pass 1 exception:', groqErr.message);
         }
       }
 
-      // ── Step 4: Normalise into schema ──────────────────────────────────────
+      // ── Step 4: Normalise + validate Pass 1 result ──────────────────────────
       let rich = normaliseExtracted(parsed || {});
+      validateContract(rich);
+      console.log(`[scan-contract] Pass 1 (${pass1Model}): confidence=${rich.review.overallConfidence}, uncertain=${rich.review.fieldsNeedingReview.length}`);
 
-      // ── Step 5: Business validation pass ───────────────────────────────────
-      const warnings = validateContract(rich);
-      if (warnings.length) console.log('[scan-contract] Validation warnings:', warnings);
+      // ── Step 5: PASS 2 — GPT-5.5 effort:low (only when confidence < 0.80) ───
+      let deepScanRun      = false;
+      let usedResponsesAPI = false;
+      const needsDeepScan  = rich.review.overallConfidence < 0.80 || !GROQ_KEY;
 
-      // ── Step 6: Deep Scan fallback — rescan only uncertain fields ───────────
-      let deepScanRun = false;
-      if (useOpenAI && rich.review.overallConfidence < 0.85 && rich.review.fieldsNeedingReview.length > 0) {
-        console.log(`[scan-contract] Confidence ${rich.review.overallConfidence} < 0.85, running Deep Scan on ${rich.review.fieldsNeedingReview.length} uncertain fields...`);
+      if (useOpenAI && needsDeepScan) {
+        const reason = !GROQ_KEY ? 'no Groq key' : `confidence ${rich.review.overallConfidence} < 0.80`;
+        console.log(`[scan-contract] Pass 2: GPT-5.5 effort:low (${reason}), ${rich.review.fieldsNeedingReview.length} uncertain fields...`);
         try {
           const uncertainFields = rich.review.fieldsNeedingReview.join(', ');
-          const deepPrompt = `${systemPrompt}\n\nDEEP SCAN — SECOND PASS:\nThe first extraction had uncertain fields: ${uncertainFields}\nFocus exclusively on re-reading these fields from the crops. Return only corrected values for uncertain fields; keep all other fields exactly as they are. Apply maximum attention to these zones.`;
+          const deepPrompt = buildSystemPrompt(pastCorrections) +
+            (uncertainFields
+              ? `\n\nSECOND PASS — Pass 1 (Groq) uncertain fields: ${uncertainFields}\nFocus on these zones with maximum precision. Return the complete schema.`
+              : '');
 
-          // Identify which crops are relevant based on uncertain field paths
-          const needsTop  = uncertainFields.match(/civility|lastName|firstName|cin|birthDate|address|postalCode|city|phone|email|emergency|commercial|contractNumber/i);
-          const needsMid  = uncertainFields.match(/subscription|startDate|endDate|duration|total|payment|cash|card|cheque|transfer|remaining|options|coaching|insurance/i);
-          const needsBot  = uncertainFields.match(/access|signature|memberSigned|staffSigned|date|local|multiclub/i);
+          // Select only crops relevant to uncertain fields (saves tokens)
+          const noUnc = rich.review.fieldsNeedingReview.length === 0;
+          const needsTop = noUnc || uncertainFields.match(/civility|lastName|firstName|cin|birthDate|address|postal|city|phone|email|emergency|commercial|contractNumber/i);
+          const needsMid = noUnc || uncertainFields.match(/subscription|startDate|endDate|duration|total|payment|cash|card|cheque|transfer|remaining|options|coaching|insurance/i);
+          const needsBot = noUnc || uncertainFields.match(/access|signature|memberSigned|staffSigned|date|local|multiclub/i);
 
           const deepCrops = {
             full:     crops.full,
@@ -769,9 +823,11 @@ function router(deps = {}) {
 
           let deepParsed = null;
           try {
-            deepParsed = await callOpenAIResponses(deepCrops, deepPrompt, model);
-          } catch {
-            const deepRes = await callOpenAIMultiImage(deepCrops, deepPrompt, model);
+            deepParsed = await callOpenAIResponses(deepCrops, deepPrompt, OPENAI_SMART, 'low');
+            usedResponsesAPI = true;
+          } catch (respErr) {
+            console.warn('[scan-contract] Responses API failed, trying chat/completions:', respErr.message);
+            const deepRes = await callOpenAIMultiImage(deepCrops, deepPrompt, OPENAI_SMART);
             if (deepRes.ok) {
               const deepData = await deepRes.json();
               const deepText = deepData.choices?.[0]?.message?.content || '{}';
@@ -781,38 +837,45 @@ function router(deps = {}) {
           }
 
           if (deepParsed) {
-            // Merge: only overwrite fields that were uncertain
             const deepRich = normaliseExtracted(deepParsed);
-            rich.review.fieldsNeedingReview.forEach(path => {
-              const parts = path.split('.');
-              if (parts.length === 2) {
-                const [section, key] = parts;
-                if (deepRich[section]?.[key]?.value !== null && deepRich[section]?.[key]?.confidence > (rich[section]?.[key]?.confidence || 0)) {
-                  rich[section][key] = deepRich[section][key];
+            if (GROQ_KEY && rich.review.fieldsNeedingReview.length > 0) {
+              // Targeted merge: only upgrade fields that were uncertain in Pass 1
+              rich.review.fieldsNeedingReview.forEach(path => {
+                const parts = path.split('.');
+                if (parts.length === 2) {
+                  const [section, key] = parts;
+                  if (deepRich[section]?.[key]?.confidence > (rich[section]?.[key]?.confidence || 0)) {
+                    rich[section][key] = deepRich[section][key];
+                  }
                 }
-              }
-            });
-            validateContract(rich); // revalidate after merge
+              });
+            } else {
+              // No Groq pass 1 — GPT-5.5 is primary, use its full result
+              rich = deepRich;
+            }
+            validateContract(rich);
             deepScanRun = true;
-            console.log(`[scan-contract] Deep Scan complete. New confidence: ${rich.review.overallConfidence}`);
+            console.log(`[scan-contract] Pass 2 done. Final confidence: ${rich.review.overallConfidence}`);
           }
         } catch (deepErr) {
-          console.warn('[scan-contract] Deep Scan failed (non-critical):', deepErr.message);
+          console.warn('[scan-contract] Pass 2 failed (non-critical):', deepErr.message);
         }
       }
 
-      // ── Step 7: Return both rich + legacy flat ──────────────────────────────
+      // ── Step 6: Return both rich + legacy flat ──────────────────────────────
       const legacy = flattenToLegacy(rich);
-      console.log(`[scan-contract] Done. Confidence: ${rich.review.overallConfidence}, uncertain: ${rich.review.fieldsNeedingReview.length}, API: ${usedResponsesAPI ? 'Responses' : 'chat/completions'}, deepScan: ${deepScanRun}`);
+      const finalModel = deepScanRun ? `${pass1Model}+gpt5.5-low` : pass1Model;
+      console.log(`[scan-contract] Done. model=${finalModel}, confidence=${rich.review.overallConfidence}, uncertain=${rich.review.fieldsNeedingReview.length}, deepScan=${deepScanRun}`);
 
       return res.json({
         rich,
         legacy,
-        model: model || 'groq-fallback',
+        model: finalModel,
         useOpenAI,
         usedResponsesAPI,
         deepScanRun,
-        cropsGenerated: 6,
+        pass1Model,
+        cropsGenerated: deepScanRun ? 6 : 4,
       });
 
     } catch (err) {
