@@ -713,6 +713,45 @@ app.use('/',                require('./routes/scan')(deps));          // /public
 app.use('/',                require('./routes/auralix')(deps));   // /api/auralix/* (Firebase token auth)
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PUSH NOTIFICATIONS HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+function extractFirstName(fullName) {
+  if (!fullName || fullName === 'Membre') return 'Membre';
+  
+  const clean = fullName.trim().replace(/\s+/g, ' ');
+  const parts = clean.split(' ');
+  if (parts.length === 1) return parts[0];
+  
+  const firstWord = parts[0].toLowerCase();
+  const familyPrefixes = ['ben', 'ait', 'aït', 'be', 'bou', 'ould', 'bin', 'ibn'];
+  
+  if (familyPrefixes.includes(firstWord)) {
+    return parts[parts.length - 1];
+  }
+  
+  const firstLower = parts[0].toLowerCase();
+  const secondLower = parts[1].toLowerCase();
+  
+  const compoundStarts = ['fatima', 'moulay', 'sidi', 'lalla'];
+  if (compoundStarts.includes(firstLower)) {
+    return `${parts[0]} ${parts[1]}`;
+  }
+  
+  if (firstLower === 'mohamed' || firstLower === 'mohammed') {
+    const commonSecond = ['amine', 'yassine', 'ali', 'redas', 'reda', 'anas', 'taha', 'amjad'];
+    if (commonSecond.includes(secondLower)) {
+      return `${parts[0]} ${parts[1]}`;
+    }
+  }
+
+  if (firstLower === 'el' || firstLower === 'al') {
+    return `${parts[0]} ${parts[1]}`;
+  }
+  
+  return parts[0];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PUSH NOTIFICATIONS — POST /api/send-notification
 // Fetches member's expoPushToken from Firestore and dispatches via Expo.
 // Protected: requires valid Azure token (dashboard session).
@@ -736,7 +775,7 @@ app.post('/api/send-notification', _vat, async (req, res) => {
     console.warn(`⚠️ [push] Could not fetch member ${memberId} details for personalization:`, err.message);
   }
 
-  const firstName = memberName !== 'Membre' ? memberName.split(' ')[0] : 'Membre';
+  const firstName = extractFirstName(memberName);
   const personalTitle = title
     .replace(/\{name\}/g, memberName)
     .replace(/\{firstname\}/g, firstName)
@@ -916,7 +955,7 @@ app.post('/api/send-notification-bulk', _vat, async (req, res) => {
       const chunk = deduped.slice(i, i + BATCH_SIZE);
       const messages = chunk.map(m => {
         const mName = m.fullName || 'Membre';
-        const fName = mName !== 'Membre' ? mName.split(' ')[0] : 'Membre';
+        const fName = extractFirstName(mName);
         
         const personalTitle = title
           .replace(/\{name\}/g, mName)
