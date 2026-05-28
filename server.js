@@ -929,13 +929,28 @@ app.post('/api/send-notification-bulk', _vat, async (req, res) => {
     // ── Deduplicate by token ──────────────────────────────────────────────
     // Multiple members may share the same push token when users log in/out
     // on the same device without clearing the old token.  Keep only the
-    // member whose lastLogin is the most recent for each unique token.
+    // member whose lastActive / lastLogin is the most recent for each unique token.
+    const getActiveTime = (m) => {
+      if (m.lastActive) {
+        if (typeof m.lastActive.toDate === 'function') return m.lastActive.toDate().getTime();
+        if (m.lastActive._seconds) return m.lastActive._seconds * 1000;
+        return new Date(m.lastActive).getTime();
+      }
+      if (m.lastLogin) return new Date(m.lastLogin).getTime();
+      if (m.updatedAt) {
+        if (typeof m.updatedAt.toDate === 'function') return m.updatedAt.toDate().getTime();
+        if (m.updatedAt._seconds) return m.updatedAt._seconds * 1000;
+        return new Date(m.updatedAt).getTime();
+      }
+      return 0;
+    };
+
     const tokenMap = new Map();
     for (const m of valid) {
       const existing = tokenMap.get(m.expoPushToken);
       if (!existing) { tokenMap.set(m.expoPushToken, m); continue; }
-      const mTime  = m.lastLogin        ? new Date(m.lastLogin).getTime()        : 0;
-      const eTime  = existing.lastLogin  ? new Date(existing.lastLogin).getTime() : 0;
+      const mTime = getActiveTime(m);
+      const eTime = getActiveTime(existing);
       if (mTime > eTime) tokenMap.set(m.expoPushToken, m);
     }
     const deduped = [...tokenMap.values()];
