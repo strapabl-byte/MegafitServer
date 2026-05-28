@@ -275,12 +275,11 @@ async function callOpenAIMultiImage(crops, systemPrompt, model = OPENAI_SMART) {
     body: JSON.stringify({
       model,
       messages: [
-              type: 'text',
-              text: 'Voici le contrat complet (image 1) suivi de 5 sections recadrées (images 2–6). Extrais toutes les données visibles dans le JSON demandé.',
-            },
-            ...imageBlocks,
-          ],
-        },
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: [
+          { type: 'text', text: 'Voici le contrat complet (image 1) suivi de 5 sections recadrées (images 2–6). Extrais toutes les données visibles dans le JSON demandé.' },
+          ...imageBlocks,
+        ]},
       ],
       max_completion_tokens: 8000,
     }),
