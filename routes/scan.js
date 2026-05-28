@@ -16,8 +16,8 @@ const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 const GROQ_VISION_URL  = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_CIN_MODEL   = 'meta-llama/llama-4-scout-17b-16e-instruct';
 const OPENAI_URL       = 'https://api.openai.com/v1/chat/completions';
-const OPENAI_SMART     = 'gpt-5.5-pro';     // Smart Scan — best handwriting OCR accuracy (parallel test-time compute)
-const OPENAI_FAST      = 'gpt-5.5-instant'; // Quick Scan — fast + cost-effective (clean/typed contracts)
+const OPENAI_SMART     = 'gpt-5.5-2026-04-23'; // Smart Scan — confirmed available on this account
+const OPENAI_FAST      = 'gpt-4o-mini';         // Quick Scan — fast + cost-effective
 
 // ── Image preprocessing with sharp ───────────────────────────────────────────
 /**
@@ -160,8 +160,7 @@ async function callOpenAIMultiImage(crops, systemPrompt, model = OPENAI_SMART) {
           ],
         },
       ],
-      max_tokens: 2000,
-      temperature: 0.05,
+      max_completion_tokens: 2000,
       response_format: { type: 'json_object' },
     }),
   });
