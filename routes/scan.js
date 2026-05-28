@@ -384,8 +384,9 @@ function flattenToLegacy(rich) {
   };
 }
 
-// ── System prompt for contract extraction ────────────────────────────────────
-const CONTRACT_SYSTEM_PROMPT = `
+// ── Build system prompt — optionally enhanced with human corrections ──────────
+function buildSystemPrompt(corrections = []) {
+  const base = `
 You are a high-accuracy document extraction engine specialised in Moroccan gym membership contracts (Contrat d'Adhésion — MEGA FIT).
 
 You receive 6 images:
@@ -468,6 +469,23 @@ Required JSON schema (return ALL fields, even if null):
 }
 `.trim();
 
+  if (!corrections || corrections.length === 0) return base;
+
+  // Deduplicate by field+aiValue to avoid noise
+  const seen = new Set();
+  const unique = corrections.filter(c => {
+    const key = `${c.field}|${c.aiValue}`;
+    if (seen.has(key)) return false;
+    seen.add(key); return true;
+  });
+
+  const examples = unique.map(c =>
+    `  - field "${c.field}": AI read "${c.aiValue}" → human corrected to "${c.humanValue}"`
+  ).join('\n');
+
+  return base + `\n\nHUMAN CORRECTION HISTORY (${unique.length} past corrections — learn from these patterns to improve accuracy):\n${examples}\n\nApply these learned patterns: pay extra attention to similar handwriting, digit/letter confusion (0/O, 1/l/I, 5/S, 8/B), and spacing in the corrected fields above.`;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Router factory
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -540,14 +558,30 @@ function router(deps = {}) {
       const crops = await preprocessAndCrop(image);
       console.log(`[scan-contract] Crops ready. Full size: ${crops.full.length} chars`);
 
-      // ── Step 2: Call vision model ───────────────────────────────────────────
+      // ── Step 2: Fetch recent human corrections from Firestore (few-shot learning) ──
+      let corrections = [];
+      if (db) {
+        try {
+          const corrSnap = await db.collection('scan_corrections')
+            .orderBy('correctedAt', 'desc')
+            .limit(40)
+            .get();
+          corrections = corrSnap.docs.map(d => d.data());
+          if (corrections.length > 0)
+            console.log(`[scan-contract] Injecting ${corrections.length} past corrections into prompt`);
+        } catch (e) {
+          console.warn('[scan-contract] Could not fetch corrections:', e.message);
+        }
+      }
+      const systemPrompt = buildSystemPrompt(corrections);
+
+      // ── Step 3: Call vision model ───────────────────────────────────────────
       let scanRes;
       if (useOpenAI) {
-        scanRes = await callOpenAIMultiImage(crops, CONTRACT_SYSTEM_PROMPT, model);
+        scanRes = await callOpenAIMultiImage(crops, systemPrompt, model);
       } else {
-        // Fallback: Groq with full image only
         console.warn('[scan-contract] No OPENAI_API_KEY — using Groq fallback (single image, less accurate)');
-        scanRes = await callGroqContractFallback(crops, CONTRACT_SYSTEM_PROMPT);
+        scanRes = await callGroqContractFallback(crops, systemPrompt);
       }
 
       if (!scanRes.ok) {
@@ -560,7 +594,7 @@ function router(deps = {}) {
       const rawText = data.choices?.[0]?.message?.content || '{}';
       console.log('[scan-contract] Raw AI response length:', rawText.length);
 
-      // ── Step 3: Parse and normalise into schema ─────────────────────────────
+      // ── Step 4: Parse and normalise into schema ─────────────────────────────
       let parsed;
       try {
         const jsonMatch = rawText.match(/\{[\s\S]*\}/);
@@ -574,11 +608,11 @@ function router(deps = {}) {
 
       const rich = normaliseExtracted(parsed);
 
-      // ── Step 4: Business validation pass ────────────────────────────────────
+      // ── Step 5: Business validation pass ────────────────────────────────────
       const warnings = validateContract(rich);
       if (warnings.length) console.log('[scan-contract] Validation warnings:', warnings);
 
-      // ── Step 5: Return both rich + legacy flat ───────────────────────────────
+      // ── Step 6: Return both rich + legacy flat ───────────────────────────────
       const legacy = flattenToLegacy(rich);
       console.log(`[scan-contract] Done. Overall confidence: ${rich.review.overallConfidence}, fieldsNeedingReview: ${rich.review.fieldsNeedingReview.length}`);
 
@@ -599,7 +633,7 @@ function router(deps = {}) {
   // ── POST /public/save-contract-scan ──────────────────────────────────────
   // Saves image → Firebase Storage, rich schema → Firestore contract_scans
   r.post('/public/save-contract-scan', express.json({ limit: '25mb' }), async (req, res) => {
-    const { image, rich, fields = {}, gymId, commercial } = req.body;
+    const { image, rich, fields = {}, gymId, commercial, corrections = [] } = req.body;
     if (!image || !image.startsWith('data:image')) {
       return res.status(400).json({ error: 'image base64 requis' });
     }
@@ -657,7 +691,30 @@ function router(deps = {}) {
 
       const docRef = await db.collection('contract_scans').add(docData);
       console.log(`[save-contract-scan] Saved ${docRef.id} for gym ${gymId}, contract ${legacy.contractNumber}, confidence ${rich?.review?.overallConfidence}`);
-      return res.json({ ok: true, id: docRef.id, imageUrl, overallConfidence: rich?.review?.overallConfidence });
+
+      // ── Save field corrections for future few-shot learning ─────────────────
+      const validCorrections = (corrections || []).filter(
+        c => c.field && c.aiValue !== undefined && c.humanValue !== undefined
+           && String(c.aiValue).trim() !== String(c.humanValue).trim()
+      );
+      if (validCorrections.length > 0) {
+        const batch = db.batch();
+        validCorrections.forEach(c => {
+          const ref = db.collection('scan_corrections').doc();
+          batch.set(ref, {
+            field:       c.field,
+            aiValue:     String(c.aiValue),
+            humanValue:  String(c.humanValue),
+            gymId:       gymId || 'unknown',
+            contractId:  docRef.id,
+            correctedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        });
+        await batch.commit();
+        console.log(`[save-contract-scan] Stored ${validCorrections.length} corrections for future learning`);
+      }
+
+      return res.json({ ok: true, id: docRef.id, imageUrl, overallConfidence: rich?.review?.overallConfidence, correctionsSaved: validCorrections.length });
 
     } catch (err) {
       console.error('[save-contract-scan] Error:', err.message);
