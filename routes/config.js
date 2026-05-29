@@ -93,6 +93,91 @@ module.exports = function configRouter({ db, admin }) {
     } catch (err) { res.status(500).json({ error: 'Status endpoint error' }); }
   });
 
+  // ── GET /public/member-inscriptions/:memberId ─────────────────────────────
+  // Returns inscription history for the member portal. No auth required —
+  // the memberId is already a non-guessable Firestore document ID that proves
+  // the user legitimately scanned their own QR code.
+  router.get('/public/member-inscriptions/:memberId', async (req, res) => {
+    try {
+      const memberId = req.params.memberId;
+      if (!memberId) return res.status(400).json({ error: 'memberId required' });
+
+      // ── Step 1: look up inscriptions directly linked to this member ──────
+      const directSnap = await db.collection('pending_members')
+        .where('memberId', '==', memberId)
+        .orderBy('createdAt', 'desc')
+        .limit(10)
+        .get();
+
+      const seen = new Set();
+      const inscriptions = [];
+
+      const toItem = (d) => {
+        const m = d.data();
+        const totals = m.totals || {};
+        const payments = Array.isArray(m.payments) ? m.payments : [];
+        const totalPaid = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
+        return {
+          id: d.id,
+          fullName:         `${m.prenom || ''} ${m.nom || ''}`.trim(),
+          subscriptionName: m.subscriptionName || m.plan || '',
+          contractNumber:   m.contractNumber || null,
+          gymId:            m.gymId || null,
+          status:           m.status || 'pending',
+          totalPrice:       Number(totals.total || 0),
+          paid:             Number(totals.paid || totalPaid || 0),
+          reste:            Number(totals.reste || totals.balance || 0),
+          createdAt:        m.createdAt?._seconds
+                              ? new Date(m.createdAt._seconds * 1000).toISOString()
+                              : (m.createdAt?.toDate ? m.createdAt.toDate().toISOString() : null),
+        };
+      };
+
+      for (const d of directSnap.docs) {
+        seen.add(d.id);
+        inscriptions.push(toItem(d));
+      }
+
+      // ── Step 2: phone-based fallback — catch pending ones not yet linked ─
+      // Only run if member exists and has a phone number
+      if (directSnap.empty || directSnap.size < 3) {
+        try {
+          const memberDoc = await db.collection('members').doc(memberId).get();
+          const phone = memberDoc.exists ? (memberDoc.data().phone || '').replace(/\s/g, '') : '';
+          if (phone && phone.length >= 9) {
+            const phoneSnap = await db.collection('pending_members')
+              .where('telephone', '==', phone)
+              .orderBy('createdAt', 'desc')
+              .limit(10)
+              .get();
+            for (const d of phoneSnap.docs) {
+              if (!seen.has(d.id)) {
+                seen.add(d.id);
+                inscriptions.push(toItem(d));
+              }
+            }
+          }
+        } catch (phoneErr) {
+          // Non-blocking — phone lookup is a fallback only
+          console.warn('[member-inscriptions] Phone fallback failed:', phoneErr.message);
+        }
+      }
+
+      // Sort by date desc (most recent first)
+      inscriptions.sort((a, b) => {
+        if (!a.createdAt && !b.createdAt) return 0;
+        if (!a.createdAt) return 1;
+        if (!b.createdAt) return -1;
+        return b.createdAt.localeCompare(a.createdAt);
+      });
+
+      res.json(inscriptions);
+    } catch (err) {
+      console.error('[member-inscriptions] Error:', err);
+      res.status(500).json({ error: 'Failed to fetch inscriptions' });
+    }
+  });
+
   // ── POST /api/chat ────────────────────────────────────────────────────────
   router.post('/api/chat', verifyAzureToken, async (req, res) => {
     try {
