@@ -2,8 +2,9 @@
 // routes/inscriptions.public.js
 // Public tablet-facing routes — form submission & member search require NO auth
 // Financial routes:
-//   /public/debtors       → dual auth: X-Inject-Secret OR Azure Bearer token
-//   /public/settle-balance → full Azure token required (write operation)
+//   /public/debtors        → dual auth: X-Inject-Secret OR Azure Bearer token
+//   /public/settle-balance → dual auth: X-Inject-Secret OR Azure Bearer token
+//   (QR-code commercial staff have no Azure account — inject secret covers them)
 
 const { Router } = require('express');
 const { verifyAzureToken } = require('../middleware/auth');
@@ -130,9 +131,10 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
     }
   });
 
-  // ── POST /public/settle-balance ─────────────────────────────── 🔒 AUTH ──
-  // Requires Azure token — this endpoint modifies member financial records.
-  router.post('/public/settle-balance', verifyAzureToken, async (req, res) => {
+  // ── POST /public/settle-balance ─────────────────────────────── 🔒 DUAL-AUTH ──
+  // Accepts X-Inject-Secret (PWA QR-code commercials) OR Azure Bearer token (web dashboard).
+  // This covers both auth paths: staff tablets (no Azure) and dashboard admin users.
+  router.post('/public/settle-balance', requireDebtorAccess, async (req, res) => {
     try {
       const { memberId, gymId: rawGymId, amount, method, paymentsSplit, note,
               chequePhoto, chequePhotoBack, signatureClient, signatureCommercial, commercialName } = req.body;
