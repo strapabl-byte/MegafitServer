@@ -984,6 +984,53 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
     }
   });
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // POST /api/sales — add a commercial name to gym_commercials
+  // Body: { gymId, name }
+  // ─────────────────────────────────────────────────────────────────────────────
+  router.post('/', verifyAzureToken, async (req, res) => {
+    try {
+      const { gymId, name } = req.body;
+      if (!gymId || !name || !name.trim()) {
+        return res.status(400).json({ error: 'gymId and name are required' });
+      }
+      const normalizedName = name.trim().toUpperCase();
+      // Prevent duplicates
+      const existing = await db.collection('gym_commercials')
+        .where('gymId', '==', gymId)
+        .where('name', '==', normalizedName)
+        .get();
+      if (!existing.empty) {
+        // Return the existing doc — not an error
+        const doc = existing.docs[0];
+        return res.json({ ok: true, id: doc.id, commercial: { id: doc.id, ...doc.data() } });
+      }
+      const docRef = await db.collection('gym_commercials').add({
+        gymId,
+        name: normalizedName,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      res.json({ ok: true, id: docRef.id, commercial: { id: docRef.id, gymId, name: normalizedName } });
+    } catch (err) {
+      console.error('POST /api/sales error:', err);
+      res.status(500).json({ error: 'Failed to add commercial' });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // DELETE /api/sales/:id — remove a commercial from gym_commercials
+  // ─────────────────────────────────────────────────────────────────────────────
+  router.delete('/:id', verifyAzureToken, async (req, res) => {
+    try {
+      const { id } = req.params;
+      await db.collection('gym_commercials').doc(id).delete();
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('DELETE /api/sales/:id error:', err);
+      res.status(500).json({ error: 'Failed to delete commercial' });
+    }
+  });
+
   return router;
 
 };
