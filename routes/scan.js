@@ -16,7 +16,7 @@ const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 // ── Model config ──────────────────────────────────────────────────────────────
 const GROQ_VISION_URL      = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_CIN_MODEL       = 'meta-llama/llama-4-scout-17b-16e-instruct';    // CIN scanner
-const GROQ_CONTRACT_MODEL  = 'meta-llama/llama-4-maverick-17b-128e-instruct'; // Contract scanner (free tier)
+const GROQ_CONTRACT_MODEL  = 'meta-llama/llama-4-scout-17b-16e-instruct';    // Contract scanner (free tier)
 const OPENAI_URL           = 'https://api.openai.com/v1/chat/completions';
 const OPENAI_SMART         = 'gpt-5.5-2026-04-23'; // Deep scan only — confirmed on account
 const OPENAI_FAST          = 'gpt-4o-mini';         // kept for quick/legacy mode
@@ -396,12 +396,31 @@ function validateContract(data) {
     }
   }
 
-  // Overall confidence
+  // Overall confidence (average of critical fields + optional fields that are not null)
   const confidences = [];
-  function collectConfidences(obj) {
+  const CRITICAL_PATHS = [
+    'member.lastName',
+    'member.firstName',
+    'member.cin',
+    'member.phone',
+    'subscription.startDate',
+    'subscription.endDate',
+    'subscription.totalAmountDhs'
+  ];
+
+  function collectConfidences(obj, path = '') {
     if (!obj || typeof obj !== 'object') return;
-    if ('confidence' in obj) { confidences.push(obj.confidence); return; }
-    Object.values(obj).forEach(collectConfidences);
+    if ('confidence' in obj) {
+      const isCritical = CRITICAL_PATHS.includes(path);
+      const hasValue = obj.value !== null && obj.value !== '';
+      if (isCritical || hasValue) {
+        confidences.push(obj.confidence);
+      }
+      return;
+    }
+    Object.entries(obj).forEach(([k, v]) => {
+      collectConfidences(v, path ? `${path}.${k}` : k);
+    });
   }
   collectConfidences(data);
   const avg = confidences.length ? confidences.reduce((a, b) => a + b, 0) / confidences.length : 0;
@@ -758,15 +777,19 @@ function router(deps = {}) {
         }
       }
 
-      // ── Step 3: PASS 1 — Groq Llama 4 Maverick (FREE, 4 images, ~2-3s) ──────
+      // ── Step 3: PASS 1 — Groq Llama 4 Scout (FREE, 4 images, ~2-3s) ──────
       let parsed      = null;
       let pass1Model  = 'none';
       const GROQ_KEY  = process.env.GROQ_SCAN_API_KEY;
       const useOpenAI = !!process.env.OPENAI_API_KEY;
 
+      if (!GROQ_KEY) {
+        console.warn('[scan-contract] WARNING: GROQ_SCAN_API_KEY is not defined in environment variables! Groq Pass 1 will be skipped.');
+      }
+
       if (GROQ_KEY) {
         try {
-          console.log('[scan-contract] Pass 1: Groq Llama 4 Maverick (free)...');
+          console.log('[scan-contract] Pass 1: Groq Llama 4 Scout (free)...');
           const groqRes = await callGroqContractScan(crops, buildGroqPrompt(pastCorrections));
           if (groqRes.ok) {
             const groqData = await groqRes.json();
