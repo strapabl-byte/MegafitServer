@@ -752,7 +752,7 @@ function extractFirstName(fullName) {
   return parts[0];
 }
 
-async function logNotificationHistory({ title, body, subtitle, imageUrl, sent, failed, audience, gymId }) {
+async function logNotificationHistory({ title, body, subtitle, imageUrl, sent, failed, audience, gymId, recipients }) {
   try {
     const historyId = db.collection('push_notifications_history').doc().id;
     const timestamp = new Date().toISOString();
@@ -766,7 +766,8 @@ async function logNotificationHistory({ title, body, subtitle, imageUrl, sent, f
       sent: Number(sent) || 0,
       failed: Number(failed) || 0,
       audience: audience || 'single',
-      gymId: gymId || 'all'
+      gymId: gymId || 'all',
+      recipients: recipients || [],   // [{id, name}] for single/specific sends
     };
     
     // Save to Firestore (permanent cloud master)
@@ -775,7 +776,7 @@ async function logNotificationHistory({ title, body, subtitle, imageUrl, sent, f
     // Save to SQLite (local disk cache)
     lc.upsertPushHistory([entry]);
     
-    console.log(`✅ [push-history] Saved to Firestore & SQLite: ${historyId}`);
+    console.log(`✅ [push-history] Saved: ${historyId} | recipients: ${recipients?.map(r=>r.name).join(', ') || 'audience'}`);
     return entry;
   } catch (err) {
     console.error('⚠️ [push-history] Failed to save history entry:', err.message);
@@ -848,7 +849,8 @@ app.post('/api/send-notification', _vat, async (req, res) => {
         sent: 1,
         failed: 0,
         audience: 'single',
-        gymId: 'all'
+        gymId: 'all',
+        recipients: [{ id: memberId, name: memberName }],
       });
       return res.json({ ok: true, sent: 1, memberId, source: 'app-server', result: appJson });
     }
@@ -909,7 +911,8 @@ app.post('/api/send-notification', _vat, async (req, res) => {
         sent: 1,
         failed: 0,
         audience: 'single',
-        gymId: 'all'
+        gymId: 'all',
+        recipients: [{ id: memberId, name: memberName }],
       });
       return res.json({ ok: true, sent: 1, memberId, source: 'expo-direct', ticket });
     } else {
