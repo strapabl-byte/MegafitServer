@@ -233,6 +233,33 @@ db.exec(`
     synced_at   TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_recruitment_date ON recruitment_applications(createdAt);
+
+  CREATE TABLE IF NOT EXISTS courses_cache (
+    id          TEXT PRIMARY KEY,
+    title       TEXT,
+    coach       TEXT,
+    days        TEXT,   -- JSON array of days
+    time        TEXT,
+    reserved    INTEGER DEFAULT 0,
+    capacity    INTEGER DEFAULT 20,
+    gym_id      TEXT,
+    updated_at  TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_courses_gym ON courses_cache(gym_id);
+
+  CREATE TABLE IF NOT EXISTS push_notifications_history (
+    id          TEXT PRIMARY KEY,
+    timestamp   TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    subtitle    TEXT,
+    image_url   TEXT,
+    sent        INTEGER DEFAULT 0,
+    failed      INTEGER DEFAULT 0,
+    audience    TEXT,
+    gym_id      TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_push_history_timestamp ON push_notifications_history(timestamp);
 `);
 
 // ── Migrations ──────────────────────────────────────────────────────────────
@@ -991,6 +1018,33 @@ function setLastRecruitmentSync(ts) {
   setMeta('last_recruitment_sync', ts || new Date().toISOString());
 }
 
+// ── COURSES CACHE ─────────────────────────────────────────────────────────────
+function upsertCourses(coursesArr) {
+  const stmt = db.prepare(`
+    INSERT OR REPLACE INTO courses_cache (id, title, coach, days, time, reserved, capacity, gym_id, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const upsert = db.transaction((rows) => {
+    for (const c of rows) {
+      const uDate = c.updatedAt
+        ? (c.updatedAt.toDate ? c.updatedAt.toDate().toISOString() : new Date(c.updatedAt).toISOString())
+        : new Date().toISOString();
+      stmt.run(
+        c.id,
+        c.title || '',
+        c.coach || '',
+        c.days ? (Array.isArray(c.days) ? JSON.stringify(c.days) : String(c.days)) : '[]',
+        c.time || '',
+        Number(c.reserved) || 0,
+        Number(c.capacity) || 20,
+        c.gymId || '',
+        uDate
+      );
+    }
+  });
+  upsert(coursesArr);
+}
+
 // ── STATS ─────────────────────────────────────────────────────────────────────
 
 function getCacheStats() {
@@ -1001,6 +1055,34 @@ function getCacheStats() {
     stats:    db.prepare('SELECT COUNT(*) as n FROM daily_stats').get().n,
     recruitment: db.prepare('SELECT COUNT(*) as n FROM recruitment_applications').get().n,
   };
+}
+
+// ── PUSH NOTIFICATIONS HISTORY ────────────────────────────────────────────────
+const insertPushHistory = db.prepare(`
+  INSERT OR REPLACE INTO push_notifications_history (id, timestamp, title, body, subtitle, image_url, sent, failed, audience, gym_id)
+  VALUES (@id, @timestamp, @title, @body, @subtitle, @image_url, @sent, @failed, @audience, @gym_id)
+`);
+
+function upsertPushHistory(items) {
+  const upsert = db.transaction((rows) => {
+    for (const r of rows) insertPushHistory.run(r);
+  });
+  upsert(items.map(item => ({
+    id:        String(item.id),
+    timestamp: item.timestamp || new Date().toISOString(),
+    title:     item.title || '',
+    body:      item.body || '',
+    subtitle:  item.subtitle || null,
+    image_url: item.imageUrl || item.image_url || null,
+    sent:      Number(item.sent) || 0,
+    failed:    Number(item.failed) || 0,
+    audience:  item.audience || 'all',
+    gym_id:    item.gymId || item.gym_id || 'all',
+  })));
+}
+
+function getPushHistory(limit = 50) {
+  return db.prepare('SELECT * FROM push_notifications_history ORDER BY timestamp DESC LIMIT ?').all(limit);
 }
 
 module.exports = {
@@ -1028,6 +1110,10 @@ module.exports = {
   upsertKidsCourse, getKidsCourses, updateKidsCourse, deleteKidsCourse,
   // recruitment
   upsertRecruitmentApplications, getRecruitmentApplications, getLastRecruitmentSync, setLastRecruitmentSync,
+  // courses cache
+  upsertCourses,
+  // push notifications history
+  upsertPushHistory, getPushHistory,
   // info
   getCacheStats,
 };

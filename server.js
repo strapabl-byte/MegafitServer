@@ -710,7 +710,8 @@ app.use('/',                require('./routes/config')(deps));      // /public/p
 app.use('/',                require('./routes/activity')(deps));    // /api/activity/logs
 app.use('/',                require('./routes/recruitment')(deps)); // /api/recruitment/applications
 app.use('/',                require('./routes/scan')(deps));          // /public/scan-cin, /public/scan-contract, /public/save-contract-scan, /api/contracts
-app.use('/',                require('./routes/auralix')(deps));   // /api/auralix/* (Firebase token auth)
+app.use('/',                require('./routes/auralix')(deps));   // /api/auralix/*
+app.use('/',                require('./routes/ai-agent')(deps));   // /api/ai/* AURALIX 24/7 Agent (Firebase token auth)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUSH NOTIFICATIONS HELPERS
@@ -749,6 +750,37 @@ function extractFirstName(fullName) {
   }
   
   return parts[0];
+}
+
+async function logNotificationHistory({ title, body, subtitle, imageUrl, sent, failed, audience, gymId }) {
+  try {
+    const historyId = db.collection('push_notifications_history').doc().id;
+    const timestamp = new Date().toISOString();
+    const entry = {
+      id: historyId,
+      timestamp,
+      title: title || '',
+      body: body || '',
+      subtitle: subtitle || null,
+      imageUrl: imageUrl || null,
+      sent: Number(sent) || 0,
+      failed: Number(failed) || 0,
+      audience: audience || 'single',
+      gymId: gymId || 'all'
+    };
+    
+    // Save to Firestore (permanent cloud master)
+    await db.collection('push_notifications_history').doc(historyId).set(entry);
+    
+    // Save to SQLite (local disk cache)
+    lc.upsertPushHistory([entry]);
+    
+    console.log(`✅ [push-history] Saved to Firestore & SQLite: ${historyId}`);
+    return entry;
+  } catch (err) {
+    console.error('⚠️ [push-history] Failed to save history entry:', err.message);
+    return null;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -808,6 +840,16 @@ app.post('/api/send-notification', _vat, async (req, res) => {
     const appJson = await appRes.json();
     if (appRes.ok && appJson.ok) {
       console.log(`✅ [push] App Server successfully sent to member ${memberId}`);
+      await logNotificationHistory({
+        title: personalTitle,
+        body: personalBody,
+        subtitle,
+        imageUrl,
+        sent: 1,
+        failed: 0,
+        audience: 'single',
+        gymId: 'all'
+      });
       return res.json({ ok: true, sent: 1, memberId, source: 'app-server', result: appJson });
     }
     console.warn(`⚠️ [push] App Server failed (status ${appRes.status}):`, appJson);
@@ -859,6 +901,16 @@ app.post('/api/send-notification', _vat, async (req, res) => {
 
     if (ticket?.status === 'ok' || expoRes.ok) {
       console.log(`✅ [push] Direct Expo sent successfully to member ${memberId}`);
+      await logNotificationHistory({
+        title: personalTitle,
+        body: personalBody,
+        subtitle,
+        imageUrl,
+        sent: 1,
+        failed: 0,
+        audience: 'single',
+        gymId: 'all'
+      });
       return res.json({ ok: true, sent: 1, memberId, source: 'expo-direct', ticket });
     } else {
       console.warn(`⚠️ [push] Direct Expo error for ${memberId}:`, ticket);
@@ -894,6 +946,37 @@ app.get('/api/debug-push', async (req, res) => {
     samples: sampleTokens,
     nodeEnv: process.env.NODE_ENV,
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/push-history
+// Returns push notification history logs (from SQLite, fallback to Firestore).
+// Protected: requires valid Azure token.
+// ─────────────────────────────────────────────────────────────────────────────
+app.get('/api/push-history', _vat, async (req, res) => {
+  try {
+    let history = lc.getPushHistory(50);
+    
+    // Fallback: If SQLite cache is empty, pull from Firestore and seed cache
+    if (history.length === 0 && db) {
+      console.log('📡 SQLite push history empty. Seeding from Firestore...');
+      const snap = await db.collection('push_notifications_history')
+        .orderBy('timestamp', 'desc')
+        .limit(50)
+        .get();
+        
+      if (!snap.empty) {
+        const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        lc.upsertPushHistory(items);
+        history = lc.getPushHistory(50);
+      }
+    }
+    
+    res.json({ ok: true, history });
+  } catch (err) {
+    console.error('🔥 [push-history] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1019,6 +1102,18 @@ app.post('/api/send-notification-bulk', _vat, async (req, res) => {
     }
 
     console.log(`✅ [push-bulk] DONE audience=${audience} gym=${gymId||'all'} sent=${sent} failed=${failed} total=${deduped.length} (dupsRemoved=${dupsRemoved})`);
+    
+    await logNotificationHistory({
+      title,
+      body,
+      subtitle,
+      imageUrl,
+      sent,
+      failed,
+      audience,
+      gymId: gymId || 'all'
+    });
+
     return res.json({ ok: true, sent, failed, total: deduped.length, duplicatesRemoved: dupsRemoved, batches: totalBatches });
   } catch (err) {
     console.error('🔥 [push-bulk] Error:', err.message);
@@ -1249,38 +1344,56 @@ app.listen(PORT, '0.0.0.0', () => {
     }
   }
 
-  // ── Pending Cache Self-Heal: backfill phone/birthday/photo if missing ─────
-  // Runs once on Render after deploying the new schema. Detected by checking
-  // if telephone column is empty when we have pdf records with no phone.
+  // ── Pending Cache Self-Heal & Full Seed ────────────────────────────────────
   setTimeout(async () => {
     try {
       const metaKey = 'pending_cache_backfill_v2';
-      if (lc.getMeta(metaKey)) return; // already done
+      const totalPending = lc.db.prepare("SELECT COUNT(*) as cnt FROM pending_cache").get()?.cnt || 0;
       
       const missing = lc.db.prepare(
         `SELECT COUNT(*) as cnt FROM pending_cache WHERE telephone IS NULL AND pdf_url IS NOT NULL`
       ).get();
-      
-      if (!missing || missing.cnt === 0) {
+
+      if (totalPending < 100 || (missing && missing.cnt > 0 && !lc.getMeta(metaKey))) {
+        console.log(`🔄 [BACKFILL] Syncing pending members from Firestore... (SQLite has ${totalPending})`);
+        const snap = await db.collection('pending_members').get();
+        let count = 0;
+        snap.forEach(doc => {
+          const data = doc.data();
+          lc.setPending({ id: doc.id, ...data });
+          count++;
+        });
         lc.setMeta(metaKey, new Date().toISOString());
-        console.log('⏭️  Pending cache backfill skipped — all records already have phone data. ✅');
-        return;
+        console.log(`✅ [BACKFILL] Pending cache refreshed: ${count} records saved to SQLite.`);
+      } else {
+        console.log('⏭️  Pending cache sync skipped — SQLite is already populated. ✅');
       }
-      
-      console.log(`🔄 [BACKFILL] ${missing.cnt} pending records missing phone/birthday — syncing from Firebase...`);
-      const snap = await db.collection('pending_members').get();
-      let count = 0;
-      snap.forEach(doc => {
-        const data = doc.data();
-        lc.setPending({ id: doc.id, ...data });
-        count++;
-      });
-      lc.setMeta(metaKey, new Date().toISOString());
-      console.log(`✅ [BACKFILL] Pending cache fully refreshed: ${count} records updated with phone/birthday/photo!`);
     } catch (e) {
-      console.warn('[BACKFILL] pending_cache self-heal error:', e.message);
+      console.warn('[BACKFILL] pending_cache sync error:', e.message);
     }
   }, 20000); // 20s after startup
+
+  // ── Courses Cache Seeding ──────────────────────────────────────────────────
+  setTimeout(async () => {
+    try {
+      const alreadySynced = lc.getMeta('courses_cache_synced');
+      if (alreadySynced) {
+        console.log('⏭️  Courses cache sync skipped — already synchronized. ✅');
+        return;
+      }
+      if (isQuotaExceeded()) return;
+      console.log('🔄 Syncing all courses from Firestore to SQLite...');
+      const snap = await db.collection('courses').get();
+      if (!snap.empty) {
+        const courses = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        lc.upsertCourses(courses);
+        console.log(`✅ Synced ${courses.length} courses to SQLite.`);
+      }
+      lc.setMeta('courses_cache_synced', new Date().toISOString());
+    } catch (e) {
+      console.warn('[COURSES SYNC] startup error:', e.message);
+    }
+  }, 18000); // 18s after startup
 
 
 
@@ -1414,6 +1527,31 @@ app.listen(PORT, '0.0.0.0', () => {
       console.error('❌ [SMART-ID] Failed to load Odoo members:', err.message);
     }
   }, 5000);
+
+  // ── Seeding Push Notifications History from Firestore on boot ────────────
+  setTimeout(async () => {
+    if (isQuotaExceeded() || !db) return;
+    try {
+      const count = lc.db.prepare('SELECT COUNT(*) as n FROM push_notifications_history').get().n;
+      if (count > 0) {
+        console.log(`⚡ [push-history] SQLite history already warm: ${count} rows.`);
+        return;
+      }
+      console.log('📡 Seeding push notification history from Firestore (startup)...');
+      const snap = await db.collection('push_notifications_history')
+        .orderBy('timestamp', 'desc')
+        .limit(50)
+        .get();
+        
+      if (!snap.empty) {
+        const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        lc.upsertPushHistory(items);
+        console.log(`✅ [push-history] Seeded ${items.length} records into SQLite.`);
+      }
+    } catch (err) {
+      console.warn('⚠️ [push-history] Startup seeding skipped/failed:', err.message);
+    }
+  }, 7000);
 
   setInterval(async () => {
     if (lc.getDailyStats('dokarat', 30).length < 7 || lc.getDailyStats('marjane', 30).length < 7) {
