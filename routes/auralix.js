@@ -173,11 +173,19 @@ module.exports = function(deps) {
       }
 
       // Add payment method label
-      const txns = rows.filter(r => r.montant > 0).map(r => ({
-        ...r,
-        gymName: NAMES[r.gym_id] || r.gym_id,
-        method: r.tpe > 0 ? 'TPE' : r.espece > 0 ? 'ESPÈCE' : r.virement > 0 ? 'VIREMENT' : r.cheque > 0 ? 'CHÈQUE' : '?',
-      }));
+      const txns = rows.filter(r => r.montant > 0).map(r => {
+        const methods = [];
+        if (r.tpe > 0) methods.push('TPE');
+        if (r.espece > 0) methods.push('ESPÈCE');
+        if (r.virement > 0) methods.push('VIREMENT');
+        if (r.cheque > 0) methods.push('CHÈQUE');
+        const methodLabel = methods.length > 0 ? methods.join(' + ') : '?';
+        return {
+          ...r,
+          gymName: NAMES[r.gym_id] || r.gym_id,
+          method: methodLabel,
+        };
+      });
       res.json({ transactions: txns, count: txns.length });
     } catch(e) {
       console.error('[Auralix] transactions error:', e.message);
