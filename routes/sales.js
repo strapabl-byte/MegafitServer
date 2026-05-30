@@ -11,7 +11,7 @@ const {
   loadOdooCSV,
 } = require('../lib/resubEngine');
 
-
+let _bdayCache = null;
 
 module.exports = function commercialsRouter({ db, admin, lc }) {
   const router = Router();
