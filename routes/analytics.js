@@ -920,6 +920,59 @@ Reply ONLY with valid JSON (no markdown):
     }
   });
 
+  // -- GET /api/analytics/hourly-entries/:gymId ------------------------------
+  // Returns per-hour entry counts (06h�23h) aggregated over last `days` days.
+  router.get('/api/analytics/hourly-entries/:gymId', verifyAzureToken, async (req, res) => {
+    try {
+      let { gymId } = req.params;
+      const days = Math.min(parseInt(req.query.days) || 7, 60);
+
+      if (!req.isAdmin) {
+        const assigned = req.assignedGyms?.[0];
+        if (assigned && assigned !== 'all') gymId = assigned;
+        else gymId = 'none';
+      }
+
+      const GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
+      const GYM_LABELS = { dokarat: 'DOUKKARATE', marjane: 'FES SAISS', casa1: 'CASA ANFA', casa2: 'LADY ANFA' };
+      const GYM_COLORS = { dokarat: '#f59e0b', marjane: '#10b981', casa1: '#38bdf8', casa2: '#ec4899' };
+      const HOUR_SLOTS = Array.from({ length: 18 }, (_, i) => i + 6); // 6..23
+
+      const anchor = new Date(Date.now() + 3600000);
+      anchor.setUTCHours(0, 0, 0, 0);
+      const cutoff = new Date(anchor.getTime() - days * 86400000).toISOString().slice(0, 10);
+
+      const targetGyms = gymId === 'all' ? GYMS : gymId.split(',').filter(g => GYMS.includes(g));
+      const perGym = {};
+
+      for (const gid of targetGyms) {
+        const rows = lc.db ? lc.db.prepare(`
+          SELECT CAST(SUBSTR(REPLACE(timestamp,'T',' '), 12, 2) AS INTEGER) AS hr,
+                 COUNT(*) AS cnt
+          FROM entries
+          WHERE gym_id = ? AND date >= ?
+            AND timestamp IS NOT NULL AND timestamp != ''
+          GROUP BY hr ORDER BY hr
+        `).all(gid, cutoff) : [];
+
+        const hourMap = {};
+        rows.forEach(r => { if (r.hr >= 6 && r.hr <= 23) hourMap[r.hr] = r.cnt; });
+        perGym[gid] = HOUR_SLOTS.map(h => hourMap[h] || 0);
+      }
+
+      const average = HOUR_SLOTS.map((_, i) => {
+        const vals = Object.values(perGym).map(arr => arr[i]).filter(v => v > 0);
+        return vals.length ? Math.round(vals.reduce((s, v) => s + v, 0) / vals.length) : 0;
+      });
+
+      res.json({ hours: HOUR_SLOTS.map(h => `${String(h).padStart(2,'0')}h`), perGym, average, gymLabels: GYM_LABELS, gymColors: GYM_COLORS, days, cutoff });
+    } catch (err) {
+      console.error('[HOURLY-ENTRIES] error:', err);
+      res.status(500).json({ error: 'Failed to compute hourly entries' });
+    }
+  });
+
+
   // ?????? GET /api/analytics/kpis/:gymId ???????????????????????????????????????????????????????????????????????????????????????
   router.get('/api/analytics/kpis/:gymId', verifyAzureToken, async (req, res) => {
     try {
@@ -1215,164 +1268,399 @@ Rules:
   // ?????? POST /api/analytics/auralix-chat ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
   // Interactive Groq chat: accepts a user question + context, returns AI answer
   router.post('/api/analytics/auralix-chat', verifyAzureToken, requireAdmin, async (req, res) => {
-    const { question, sector, kpis, dailyStats, liveEntries } = req.body;
+    const { question, sector, kpis, dailyStats, liveEntries, decaisData, compData, multiMonthStats } = req.body;
     if (!question) return res.status(400).json({ error: 'question required' });
 
     const GROQ_KEY          = process.env.GROQ_API_KEY;
     const GROQ_KEY_FALLBACK = process.env.GROQ_API_KEY_FALLBACK;
 
     if (!GROQ_KEY && !GROQ_KEY_FALLBACK) {
-      return res.json({ answer: '?????? No GROQ_API_KEY configured on server.' });
+      return res.json({ answer: 'No GROQ_API_KEY configured on server.' });
     }
 
-    // Helper: call Groq ??? models confirmed active via /openai/v1/models (April 2026)
-    const GROQ_MODEL          = 'llama-3.3-70b-versatile'; // primary
-    const GROQ_MODEL_FALLBACK = 'llama-3.1-8b-instant';    // fallback
+    const GROQ_MODEL          = 'llama-3.3-70b-versatile';
+    const GROQ_MODEL_FALLBACK = 'llama-3.1-8b-instant';
     const callGroq = async (key, messages, model = GROQ_MODEL) => {
       const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, messages, max_tokens: 1200, temperature: 0.5 })
+        body: JSON.stringify({ model, messages, max_tokens: 1400, temperature: 0.45 })
       });
-      if (!r.ok) {
-        const errBody = await r.text();
-        console.error(`[Groq] HTTP ${r.status}:`, errBody.slice(0, 300));
-        throw new Error(`Groq HTTP ${r.status}`);
-      }
+      if (!r.ok) { const e = await r.text(); throw new Error(`Groq HTTP ${r.status}: ${e.slice(0,200)}`); }
       return r.json();
     };
 
-    try {
-      // ?????? Gym name mapping ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
-      const GYM_NAMES = { all: 'ALL EMPIRE (Dokarat + Marjane)', dokarat: 'Dokarat (Fès)', marjane: 'Marjane Saiss (Fès)' };
-      const sectorName = GYM_NAMES[sector] || sector || 'ALL EMPIRE';
+    // ── Shared context builder ──────────────────────────────────────────────
+    const buildContext = (sectorName) => {
+      const parts = [];
 
-      // ?????? KPI context ???????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
-      const kpiContext = kpis ? [
-        `GYM / SECTOR: ${sectorName}`,
-        `Revenue  ??? Today: ${(kpis?.income?.day||0).toLocaleString()} DH | This week: ${(kpis?.income?.week||0).toLocaleString()} DH | This month: ${(kpis?.income?.month||0).toLocaleString()} DH | This year: ${(kpis?.income?.year||0).toLocaleString()} DH`,
-        `New memberships ??? Today: ${kpis?.newMembers?.day||0} | This week: ${kpis?.newMembers?.week||0} | This month: ${kpis?.newMembers?.month||0}`,
-        `Total active members: ${kpis?.totalActive || 'N/A'}`,
-      ].join('\n') : `GYM / SECTOR: ${sectorName}\nNo KPI data available.`;
+      // 1. KPIs
+      if (kpis) {
+        parts.push([
+          `=== KPIs (${sectorName}) ===`,
+          `Revenus: Auj ${(kpis?.income?.day||0).toLocaleString()} DH | Sem ${(kpis?.income?.week||0).toLocaleString()} DH | Mois ${(kpis?.income?.month||0).toLocaleString()} DH | An ${(kpis?.income?.year||0).toLocaleString()} DH`,
+          `Inscriptions: Auj ${kpis?.newMembers?.day||0} | Sem ${kpis?.newMembers?.week||0} | Mois ${kpis?.newMembers?.month||0}`,
+          `Membres actifs total: ${kpis?.totalActive || 'N/A'}`,
+        ].join('\n'));
+      }
 
-      // ?????? 30-day door traffic from SQLite ???????????????????????????????????????????????????????????????????????????????????????????????????????????????
-      let trafficContext = '';
+      // 2. Multi-gym revenue breakdown (from compData sent by frontend)
+      if (compData?.performance?.length > 0) {
+        const perf = compData.performance;
+        parts.push(
+          `=== PERFORMANCE PAR CLUB (${compData.month || 'ce mois'}) ===\n` +
+          perf.map(p => `  ${p.gym?.toUpperCase()}: CA ${(p.revenue||0).toLocaleString()} DH | Inscriptions ${p.registrations||0} | Trafic auj ${p.traffic||0}`).join('\n')
+        );
+      }
+
+      // 3. Multi-month commercial matrix
+      if (multiMonthStats?.commercials?.length > 0) {
+        const { commercials, months } = multiMonthStats;
+        const summary = commercials.map(c => {
+          const total = months.reduce((s, m) => s + (c.perMonth[m]?.inscriptions || 0), 0);
+          const rev   = months.reduce((s, m) => s + (c.perMonth[m]?.revenue || 0), 0);
+          return `  ${c.name}: ${total} inscriptions | CA ${rev.toLocaleString()} DH`;
+        });
+        parts.push(`=== PERFORMANCE COMMERCIAUX (${months.join(', ')}) ===\n` + summary.join('\n'));
+      }
+
+      // 4. 30-day door traffic
       if (Array.isArray(dailyStats) && dailyStats.length > 0) {
         const total30 = dailyStats.reduce((s, d) => s + (d.count || 0), 0);
         const avg30   = Math.round(total30 / dailyStats.length);
         const maxDay  = dailyStats.reduce((m, d) => (d.count||0) > (m.count||0) ? d : m, dailyStats[0]);
         const today   = dailyStats[dailyStats.length - 1];
         const last7   = dailyStats.slice(-7).reduce((s, d) => s + (d.count||0), 0);
-        trafficContext = [
-          `\n--- 30-DAY DOOR TRAFFIC (${sectorName}) ---`,
-          `Today (${today?.date}): ${today?.count||0} check-ins`,
-          `Last 7 days: ${last7} check-ins | 30-day avg: ${avg30}/day | 30-day total: ${total30}`,
-          `Busiest day: ${maxDay?.date} with ${maxDay?.count} check-ins`,
-          `Daily (last 10 days): ${dailyStats.slice(-10).map(d=>`${d.date.slice(5)}:${d.count||0}`).join(' | ')}`,
-        ].join('\n');
-      }
-      // ?????? Live door entries ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
-      let liveContext = '';
-      if (Array.isArray(liveEntries) && liveEntries.length > 0) {
-        liveContext = `\n--- LIVE ENTRIES TODAY (${sectorName}) ---\n` +
-          liveEntries.map(e => `  ${e.name||'?'} @ ${e.time ? new Date(e.time).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}) : '??:??'} (${e.source||'scan'})`).join('\n');
+        parts.push([
+          `=== TRAFIC PORTE 30 JOURS (${sectorName}) ===`,
+          `Aujourd'hui (${today?.date}): ${today?.count||0} entrées`,
+          `7 derniers jours: ${last7} | Moy/jour: ${avg30} | Total 30j: ${total30}`,
+          `Jour record: ${maxDay?.date} avec ${maxDay?.count} entrées`,
+          `Derniers 10j: ${dailyStats.slice(-10).map(d=>`${d.date.slice(5)}:${d.count||0}`).join(' | ')}`,
+        ].join('\n'));
       }
 
-      // 🔒 DISK-ONLY: Course context read from SQLite courses_cache (no Firebase).
-      let courseContext = '';
+      // 5. Live entries
+      if (Array.isArray(liveEntries) && liveEntries.length > 0) {
+        parts.push(
+          `=== ENTRÉES EN DIRECT (${sectorName}) ===\n` +
+          liveEntries.slice(0, 20).map(e => `  ${e.name||'?'} @ ${e.time ? new Date(e.time).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}) : '??:??'}`).join('\n')
+        );
+      }
+
+      // 6. Décaissements (cash outflows)
+      if (decaisData?.total > 0) {
+        const byGym = Object.entries(decaisData.byGym || {}).map(([g, a]) => `${g}: ${a.toLocaleString()} DH`).join(' | ');
+        parts.push([
+          `=== DÉCAISSEMENTS (SORTIES ESPÈCES) ===`,
+          `Total période: ${(decaisData.total||0).toLocaleString()} DH | Nb opérations: ${decaisData.entries?.length||0}`,
+          byGym ? `Par gym: ${byGym}` : '',
+          decaisData.entries?.slice(0,10).map(d => `  ${d.date} | ${d.gymId} | ${(d.montant||0).toLocaleString()} DH | ${d.raison||'?'} | ${d.status||'approved'}`).join('\n'),
+        ].filter(Boolean).join('\n'));
+      }
+
+      // 7. Incidents from SQLite
+      try {
+        const incidentRows = lc.db ? lc.db.prepare(
+          `SELECT gym_id, title, cause, emergency, status, date FROM incidents_cache ORDER BY created_at DESC LIMIT 20`
+        ).all() : [];
+        if (incidentRows.length > 0) {
+          const open = incidentRows.filter(r => r.status !== 'Resolved');
+          parts.push(
+            `=== INCIDENTS (${open.length} non-résolus / ${incidentRows.length} total) ===\n` +
+            incidentRows.map(r => `  [${r.status||'?'}] ${r.gym_id} | ${r.title} | ${r.emergency} urgence | ${r.date}`).join('\n')
+          );
+        }
+      } catch(e) { /* silent */ }
+
+      // 8. Members with debt (reste > 0)
+      try {
+        const debtRows = lc.db ? lc.db.prepare(
+          `SELECT gym_id, nom, reste, note_reste, date FROM register_cache WHERE reste > 0 ORDER BY reste DESC LIMIT 15`
+        ).all() : [];
+        if (debtRows.length > 0) {
+          const totalDebt = debtRows.reduce((s, r) => s + (r.reste||0), 0);
+          parts.push(
+            `=== CRÉANCES MEMBRES (reste à payer) ===\n` +
+            `Total: ${totalDebt.toLocaleString()} DH sur ${debtRows.length} membres\n` +
+            debtRows.slice(0,8).map(r => `  ${r.gym_id} | ${r.nom} | ${r.reste} DH | ${r.note_reste||''}`).join('\n')
+          );
+        }
+      } catch(e) { /* silent */ }
+
+      // 9. Courses/schedule
       try {
         const courseRows = lc.db ? lc.db.prepare(
-          `SELECT title, coach, days, time, reserved, capacity FROM courses_cache LIMIT 50`
+          `SELECT title, coach, days, time, reserved, capacity FROM courses_cache LIMIT 30`
         ).all() : [];
         if (courseRows.length > 0) {
-          courseContext = `\n--- CURRENT SCHEDULE & RESERVATIONS ---\n`;
-          courseRows.forEach(d => {
-            let daysList = '';
-            try { daysList = (JSON.parse(d.days || '[]')).join(','); } catch { daysList = d.days || ''; }
-            courseContext += `- ${d.title || '?'} (${d.coach || '?'}) | Days: ${daysList} | Time: ${d.time || '?'} | Booked: ${d.reserved||0}/${d.capacity||'?'}\n`;
-          });
+          parts.push(
+            `=== PLANNING COURS ===\n` +
+            courseRows.map(d => {
+              let days = ''; try { days = JSON.parse(d.days||'[]').join(','); } catch { days = d.days||''; }
+              return `  ${d.title} (${d.coach}) | ${days} | ${d.time} | ${d.reserved||0}/${d.capacity||'?'} réservations`;
+            }).join('\n')
+          );
         }
-      } catch (err) {
-        console.error("Megaeye course context error:", err);
-      }
+      } catch(e) { /* silent */ }
 
-      // ?????? Subscriptions Context ??????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
-      let subsContext = '';
+      // 10. Subscriptions
       try {
-         const { DEFAULT_SUBSCRIPTION_GROUPS } = require('./config');
-         if (DEFAULT_SUBSCRIPTION_GROUPS) {
-            subsContext = `=== AVAILABLE SUBSCRIPTION FORMULAS (DHS) ===\n` + 
-              DEFAULT_SUBSCRIPTION_GROUPS.map(g => `TYPE: ${g.label}\n` + g.options.map(o => ` - ${o.name}: ${o.price > 0 ? o.price + ' DHS' : 'Tarif Inclus/Variable'}`).join('\n')).join('\n');
-         }
-      } catch (e) {
-         console.error("Megaeye subs context error:", e);
-      }
+        const { DEFAULT_SUBSCRIPTION_GROUPS } = require('./config');
+        if (DEFAULT_SUBSCRIPTION_GROUPS) {
+          parts.push(
+            `=== FORMULES ABONNEMENTS ===\n` +
+            DEFAULT_SUBSCRIPTION_GROUPS.map(g => `${g.label}: ` + g.options.map(o => `${o.name}=${o.price>0?o.price+'DH':'inclus'}`).join(', ')).join('\n')
+          );
+        }
+      } catch(e) { /* silent */ }
 
-      // 📈 Sales Context (Last 20 register entries from SQLite)
-      let salesContext = '';
+      // 11. Recent sales
       try {
-        const salesRows = lc.db.prepare(`
-          SELECT date, nom, prix, tpe, espece, virement, cheque, reste, note_reste, abonnement, source 
-          FROM register_cache 
+        const salesRows = lc.db ? lc.db.prepare(`
+          SELECT date, gym_id, nom, prix, reste, abonnement, source
+          FROM register_cache
           WHERE gym_id = ? OR ? = 'all'
-          ORDER BY date DESC, created_at DESC 
-          LIMIT 20
-        `).all(sector, sector);
+          ORDER BY date DESC, created_at DESC
+          LIMIT 25
+        `).all(sector, sector) : [];
         if (salesRows.length > 0) {
-          salesContext = `\n--- RECENT SALES & REGISTER ENTRIES ---\n` +
-            salesRows.map(s => `  ${s.date} | ${s.nom} | ${s.prix}DH | ${s.abonnement} | Note: ${s.note_reste||'none'} | Source: ${s.source||'register'}`).join('\n');
+          parts.push(
+            `=== VENTES RÉCENTES ===\n` +
+            salesRows.map(s => `  ${s.date} | ${s.gym_id} | ${s.nom} | ${s.prix}DH | ${s.abonnement} | reste:${s.reste||0}`).join('\n')
+          );
         }
-      } catch (err) {
-        console.error("Auralix sales context error:", err);
-      }
+      } catch(e) { /* silent */ }
 
-      const fullContext = [kpiContext, trafficContext, liveContext, courseContext, subsContext, salesContext].filter(Boolean).join('\n\n');
+      // 12. Historical monthly revenue (last 24 months from SQLite)
+      try {
+        const histRows = lc.db ? lc.db.prepare(`
+          SELECT gym_id,
+                 strftime('%Y-%m', date) AS ym,
+                 ROUND(SUM(COALESCE(CAST(tpe AS REAL),0)+COALESCE(CAST(espece AS REAL),0)+COALESCE(CAST(virement AS REAL),0)+COALESCE(CAST(cheque AS REAL),0)), 0) AS total,
+                 COUNT(*) AS inscriptions
+          FROM register_cache
+          WHERE date >= date('now','-24 months')
+          GROUP BY gym_id, ym
+          ORDER BY ym ASC
+        `).all() : [];
+        if (histRows.length > 0) {
+          // Aggregate by month across all gyms, then per gym
+          const monthMap = {};
+          histRows.forEach(r => {
+            if (!monthMap[r.ym]) monthMap[r.ym] = { total: 0, inscriptions: 0, byGym: {} };
+            monthMap[r.ym].total += r.total || 0;
+            monthMap[r.ym].inscriptions += r.inscriptions || 0;
+            monthMap[r.ym].byGym[r.gym_id] = { revenue: Math.round(r.total || 0), inscriptions: r.inscriptions || 0 };
+          });
+          const histLines = Object.entries(monthMap).map(([ym, d]) => {
+            const gymBreakdown = Object.entries(d.byGym).map(([g, v]) => `${g}:${v.revenue.toLocaleString()}DH`).join(' | ');
+            return `  ${ym}: ${Math.round(d.total).toLocaleString()} DH | ${d.inscriptions} inscriptions [${gymBreakdown}]`;
+          });
+          parts.push(
+            `=== HISTORIQUE CA MENSUEL (24 derniers mois) ===\n` + histLines.join('\n')
+          );
+        }
+      } catch(e) { /* silent */ }
 
+      return parts.join('\n\n');
+    };
+
+    try {
+      const GYM_NAMES = {
+        all: 'ALL EMPIRE (Dokarat + Saiss + Casa Anfa + Lady Anfa)',
+        dokarat: 'Fès Doukkarate', marjane: 'Fès Saiss',
+        casa1: 'Casa Anfa', casa2: 'Lady Anfa'
+      };
+      const sectorName = GYM_NAMES[sector] || sector || 'ALL EMPIRE';
+      const fullContext = buildContext(sectorName);
       const globalInstructions = lc.getMeta('auralix_global_instructions') || '';
 
       const messages = [
         {
           role: 'system',
-          content: `You are AURALIX, an elite, hyper-intelligent tactical AI assistant for the MegaFit gym empire.
+          content: `Tu es AURALIX, l'IA tactique de commandement du groupe MegaFit — 4 clubs (Fès Doukkarate, Fès Saiss, Casa Anfa, Lady Anfa).
 
-USER-DEFINED TACTICAL RULES & LEARNED BEHAVIORS:
-${globalInstructions || 'No specific custom rules provided.'}
+RÈGLES ABSOLUES:
+1. Réponse UNIQUEMENT en français professionnel et percutant.
+2. Format: bullet points ultra-concis. Zéro bavardage. Précision chirurgicale.
+3. Cite les chiffres exacts du contexte. Jamais de vague généralité.
+4. Si tu détectes anomalie, dette, incident non résolu, sous-performance: signale immédiatement avec ⚠️.
+5. Termine par [+] si confiant, [-] si incertain ou données manquantes.
+6. Tu as accès à: KPIs en temps réel, trafic porte 30j, entrées live, décaissements, incidents, créances membres, planning cours, ventes récentes, performance par club et par commercial.
+7. Tu connais l'historique CA mensuel des 24 derniers mois par club (inclus dans les donnees).
+8. CALENDRIER BUSINESS ANNUEL MAROC � ANALYSE COMME UN DIRECTEUR OPERATIONNEL:
 
-IMPORTANT RULES FOR YOUR ANALYSIS:
-1. DELIVER ULTRA-CONDENSED, HIGH-DENSITY TACTICAL INTEL. Do not write long narrative paragraphs. Use extremely concise military/corporate logic. Get straight to the point.
-2. Directly answer the feasibility of goals mathematically. If we need exactly 58 members, say "TARGET: 58 CONVERSIONS REQUIRED". Do not over-explain basic math.
-3. Provide ONLY actionable, high-leverage operational directives. No generic "Marketing" fluff. Give exact mathematical targets and leverage specific pricing tiers.
-4. Format your output sharply using bullet points. Never exceed significantly long word counts. Be brutal, sharp, and accurate.
-5. Answer ONLY in French, using professional, high-impact tactical corporate terminology.
-6. End response with [+] if confident or [-] if uncertain.
+=== RELIGIEUX ISLAMIQUE (calendrier lunaire, avance ~11j/an) ===
+RAMADAN (jeune 30j): Baisse inscriptions -40% a -60%. Membres absents. Horaires decales (ouverture tard).
+  2024: 11 mars - 9 avr | 2025: 1 mars - 29 mars | 2026: 18 fev - 18 mars | 2027: ~7 fev
+EID AL-FITR (Eid Sghir, fin Ramadan): Fermeture 3-5j + semaine de retour lente.
+  2024: 10 avr | 2025: 31 mars | 2026: 20 mars | 2027: ~9 mars
+EID AL-ADHA (Eid Kbir): IMPACT MAXIMAL � fermeture 5-7j + exodus 10-15j. Pire periode de l'annee.
+  2024: 16 juin | 2025: 7 juin | 2026: 27 mai | 2027: ~17 mai
+  NOTE: Eid Kbir 2026 = 27 mai ? mai 2026 fin de mois tres creuse. Impact sur juin aussi.
+AID AL-MAWLID (naissance prophete): Ferie 1 jour. Impact mineur.
+  2024: 16 sept | 2025: 5 sept | 2026: 25 aout
 
-=== CURRENT DATA (${sectorName}) ===
+=== FERIES NATIONALES MAROCAINES (fixes) ===
+1 janvier: Nouvel An � fermeture 1j, pic inscriptions "resolutions" les premiers jours.
+11 janvier: Manifeste de l'independance � ferie.
+1 mai: Fete du Travail � ferie.
+23 mai: Fete nationale � ferie.
+30 juillet: Fete du Trone � ferie + ambiance estivale ? baisse trafic.
+14 aout: Recuperation de Oued Eddahab � ferie.
+20 aout: Revolution du Roi et du Peuple � ferie.
+21 aout: Fete de la Jeunesse � ferie.
+6 novembre: Marche Verte � ferie.
+18 novembre: Fete de l'independance � ferie.
+
+=== CALENDRIER SCOLAIRE MAROC (impact MAJEUR sur frequentation gym) ===
+RENTREE: Debut septembre. PIC FORT inscriptions. Meilleur moment pour offres promotionnelles.
+VACANCES TOUSSAINT: Fin octobre ~1 semaine. Trafic +15% (etudiants disponibles).
+VACANCES NOEL/HIVER: ~25 dec - 5 jan. Trafic mixte (familles + resolutions jan).
+VACANCES PRINTEMPS: Mi-mars ~1 semaine (si pas pendant Ramadan). Trafic +10%.
+VACANCES ETE: Juillet-Aout. IMPACT MAXIMUM:
+  - Etudiants et lyceans libres = trafic HAUSSE si pas Eid/chaleur
+  - Familles partent en vacances = BAISSE adultes actifs
+  - Chaleur estivale a Fes = baisse motivation
+  - Juillet = bilan mixte | Aout = creux sauf nouveaux inscrits
+EXAMENS BAC: Juin (session normale) + Juillet (session rattrapage). Lyceans absents.
+
+=== CYCLES BUSINESS GYM � CLASSIFICATION STRATEGIQUE ===
+JANVIER: ????? Pic absolu. Resolutions + reprise apres fetes. Ouvrir promotions agressives.
+FEVRIER: ???? Fort. Momentum resolutions. Si Ramadan debut fev = impact negatif progressif.
+MARS: ??? Variable. Si Ramadan = tres faible. Si pas Ramadan = bon mois.
+AVRIL: ??? Variable. Post-Eid-Fitr = reprise progressive. Printemps motivant.
+MAI: ???? Bon. Pas de contrainte sauf Eid Kbir fin mai certaines annees (2026).
+JUIN: ?? Risque Eid Kbir. Exams BAC. Chaleur commence.
+JUILLET: ?? Creux estival. Chaleur + vacances familles. Etudiants compensent partiellement.
+AOUT: ?? Creux. Point bas estival. Relance de pre-rentree fin aout.
+SEPTEMBRE: ????? Deuxieme meilleur mois. Rentree scolaire. Forte demande inscriptions.
+OCTOBRE: ???? Bon. Vacances Toussaint. Temps plus frais = motivation sport.
+NOVEMBRE: ???? Fort. Pas de contrainte majeure. Campagnes fid�lisation.
+DECEMBRE: ??? Correct. Fetes de fin d'annee. Pre-pic janvier.
+
+=== REGLES D'INTERPRETATION INTELLIGENTE ===
+AVANT de qualifier une baisse comme sous-performance:
+  1. Verifier si Ramadan/Eid etait actif ce mois-la
+  2. Comparer au MEME mois l'annee precedente (pas le mois precedent)
+  3. Identifier les feries nationales du mois
+  4. Evaluer periode scolaire (exams? vacances?)
+  5. Seulement si aucun facteur calendaire n'explique ? c'est une vraie anomalie
+
+SIGNAUX D'ALERTE REELS (pas calendaires):
+  - CA inferieur de >20% vs meme mois N-1 SANS facteur calendaire = ALERTE
+  - Trafic porte tres bas un jour normal (hors ferie) = probleme operationnel
+  - CA mai 2026 faible sur fin du mois ? ATTENDU (Eid Kbir 27 mai)
+  - Docarat mars 2025 (354k DH) vs mars 2026 (1.11M DH) ? ecart explique par Ramadan mars 2025
+
+COMPORTEMENT INSTRUCTEUR DÉFINI PAR L'UTILISATEUR:
+${globalInstructions || 'Aucune règle personnalisée.'}
+
+=== DONNÉES TEMPS RÉEL — ${sectorName} ===
 ${fullContext}`
         },
         { role: 'user', content: question }
       ];
 
-      // Try primary key, fall back to secondary on any error
       let data;
       try {
         data = await callGroq(GROQ_KEY, messages, GROQ_MODEL);
       } catch (primaryErr) {
-        console.warn(`[Groq] Primary key/model failed (${primaryErr.message}), trying fallback...`);
-        const fallbackKey = GROQ_KEY_FALLBACK || GROQ_KEY;
-        data = await callGroq(fallbackKey, messages, GROQ_MODEL_FALLBACK);
+        console.warn(`[Groq] Primary failed (${primaryErr.message}), using fallback...`);
+        data = await callGroq(GROQ_KEY_FALLBACK || GROQ_KEY, messages, GROQ_MODEL_FALLBACK);
       }
 
-      let raw = data?.choices?.[0]?.message?.content || 'No response from Groq.';
-      // Parse and strip the sentiment tag
+      let raw = data?.choices?.[0]?.message?.content || 'Pas de réponse de Groq.';
       let sentiment = 'positive';
-      if (raw.endsWith('[-]')) { sentiment = 'negative'; raw = raw.slice(0, -3).trim(); }
-      else if (raw.endsWith('[+]')) { sentiment = 'positive'; raw = raw.slice(0, -3).trim(); }
+      if (raw.endsWith('[-]')) { sentiment = 'negative'; raw = raw.slice(0,-3).trim(); }
+      else if (raw.endsWith('[+]')) { sentiment = 'positive'; raw = raw.slice(0,-3).trim(); }
       res.json({ answer: raw, sentiment });
     } catch (err) {
       console.error('Groq chat error:', err);
-      res.status(500).json({ error: 'Groq service unavailable', answer: '?????? Neural core offline.' });
+      res.status(500).json({ error: 'Groq service unavailable', answer: '⚠️ Neural core offline.' });
     }
   });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // POST /api/analytics/auralix-scan  — Proactive anomaly detection (no user question needed)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  router.post('/api/analytics/auralix-scan', verifyAzureToken, requireAdmin, async (req, res) => {
+    const { kpis, dailyStats, liveEntries, decaisData, compData, multiMonthStats } = req.body;
+    const GROQ_KEY = process.env.GROQ_API_KEY;
+    const GROQ_KEY_FALLBACK = process.env.GROQ_API_KEY_FALLBACK;
+    if (!GROQ_KEY && !GROQ_KEY_FALLBACK) return res.json({ answer: 'GROQ_API_KEY manquant.' });
+
+    // Pull fresh data directly from SQLite for the scan
+    let incidentSummary = '', debtSummary = '', perfSummary = '';
+    try {
+      const openIncidents = lc.db ? lc.db.prepare(
+        `SELECT gym_id, title, emergency, status, date FROM incidents_cache WHERE status != 'Resolved' ORDER BY created_at DESC LIMIT 10`
+      ).all() : [];
+      if (openIncidents.length > 0) {
+        incidentSummary = `INCIDENTS NON-RÉSOLUS (${openIncidents.length}):\n` +
+          openIncidents.map(r => `  ⚠️ [${r.emergency}] ${r.gym_id} — ${r.title} (${r.date})`).join('\n');
+      }
+    } catch(e) {}
+
+    try {
+      const debtRows = lc.db ? lc.db.prepare(
+        `SELECT gym_id, nom, reste FROM register_cache WHERE reste > 0 ORDER BY reste DESC LIMIT 10`
+      ).all() : [];
+      if (debtRows.length > 0) {
+        const totalDebt = debtRows.reduce((s, r) => s + (r.reste||0), 0);
+        debtSummary = `CRÉANCES MEMBRES: ${totalDebt.toLocaleString()} DH | Top: ` +
+          debtRows.slice(0,5).map(r => `${r.nom}(${r.gym_id}):${r.reste}DH`).join(', ');
+      }
+    } catch(e) {}
+
+    if (compData?.performance?.length > 0) {
+      perfSummary = `PERFORMANCE CLUBS (${compData.month}):\n` +
+        compData.performance.map(p => `  ${p.gym}: CA ${(p.revenue||0).toLocaleString()} DH | ${p.registrations||0} inscrits | ${p.traffic||0} entrées auj`).join('\n');
+    }
+
+    const kpiLine = kpis ? `KPIs Empire: CA mois ${(kpis?.income?.month||0).toLocaleString()} DH | Inscrits mois ${kpis?.newMembers?.month||0} | Actifs ${kpis?.totalActive||'?'}` : '';
+
+    const prompt = `Effectue un SCAN TACTIQUE COMPLET de l'empire MegaFit. Analyse toutes les données disponibles et produis un rapport structuré:
+
+${kpiLine}
+${perfSummary}
+${incidentSummary}
+${debtSummary}
+
+STRUCTURE DU RAPPORT (obligatoire):
+🔴 ALERTES CRITIQUES — anomalies, incidents, dettes, sous-performances graves
+🟡 POINTS D'ATTENTION — tendances à surveiller, risques potentiels
+🟢 OPPORTUNITÉS — leviers de croissance identifiés, clubs performants à capitaliser
+📊 DIRECTIVE PRIORITAIRE — 1 action immédiate recommandée
+
+Sois brutal, précis, data-driven. Zéro généralité. Chaque point cité avec chiffre exact.`;
+
+    try {
+      const messages = [
+        { role: 'system', content: `Tu es AURALIX, directeur operationnel IA du groupe MegaFit (4 clubs: Dokarat, Saiss, Casa Anfa, Lady Anfa). Reponse UNIQUEMENT en francais professionnel. Bullet points ultra-concis. Chiffres exacts. Signale anomalies avec WARNING. IMPORTANT: avant de qualifier une baisse comme anomalie, verifie toujours le calendrier: Ramadan 2026=18fev-18mars, Eid Fitr 2026=20mars, Eid Kbir 2026=27mai, Juillet-Aout=creux estival, Juin=exams BAC+risque Eid Kbir, Septembre=pic rentree, Janvier=pic resolutions. Correle les baisses avec ces facteurs avant de conclure a une sous-performance reelle.` },
+        { role: 'user', content: prompt }
+      ];
+      const callGroq = async (key, model) => {
+        const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model, messages, max_tokens: 1600, temperature: 0.4 })
+        });
+        if (!r.ok) throw new Error(`Groq ${r.status}`);
+        return r.json();
+      };
+      let data;
+      try { data = await callGroq(GROQ_KEY, 'llama-3.3-70b-versatile'); }
+      catch { data = await callGroq(GROQ_KEY_FALLBACK || GROQ_KEY, 'llama-3.1-8b-instant'); }
+      const raw = data?.choices?.[0]?.message?.content || 'Scan incomplet.';
+      res.json({ answer: raw, sentiment: raw.includes('🔴') ? 'negative' : 'positive' });
+    } catch(err) {
+      console.error('[AURALIX SCAN] error:', err);
+      res.status(500).json({ answer: '⚠️ Scan failed — neural core offline.' });
+    }
+  });
+
 
 
   // â”€â”€ INCIDENTS (SQLite-backed, Firestore-write-through) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

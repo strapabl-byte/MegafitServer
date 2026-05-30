@@ -66,7 +66,19 @@ module.exports = function coursesRouter({ db, admin }) {
         createdBy: req.user?.preferred_username || 'Admin'
       });
       const snap = await docRef.get();
-      res.json({ id: docRef.id, ...snap.data(), reserved: 0 });
+      const courseData = { id: docRef.id, ...snap.data(), reserved: 0 };
+      
+      // Update SQLite courses_cache
+      try {
+        const lc = require('../localCache');
+        if (lc && typeof lc.upsertCourses === 'function') {
+          lc.upsertCourses([courseData]);
+        }
+      } catch (cErr) {
+        console.warn('[COURSES CACHE] upsert failed on creation:', cErr.message);
+      }
+
+      res.json(courseData);
     } catch (err) { res.status(500).json({ error: 'Failed to create course' }); }
   });
 
@@ -78,13 +90,38 @@ module.exports = function coursesRouter({ db, admin }) {
       const ref = db.collection('courses').doc(req.params.id);
       await ref.update(update);
       const snap = await ref.get();
-      res.json({ id: snap.id, ...snap.data() });
+      const updatedData = { id: snap.id, ...snap.data() };
+
+      // Update SQLite courses_cache
+      try {
+        const lc = require('../localCache');
+        if (lc && typeof lc.upsertCourses === 'function') {
+          lc.upsertCourses([updatedData]);
+        }
+      } catch (cErr) {
+        console.warn('[COURSES CACHE] upsert failed on update:', cErr.message);
+      }
+
+      res.json(updatedData);
     } catch (err) { res.status(500).json({ error: 'Failed to update course' }); }
   });
 
   router.delete('/api/courses/:id', verifyAzureToken, async (req, res) => {
-    try { await db.collection('courses').doc(req.params.id).delete(); res.json({ ok: true }); }
-    catch (err) { res.status(500).json({ error: 'Failed to delete course' }); }
+    try {
+      await db.collection('courses').doc(req.params.id).delete();
+
+      // Delete from SQLite courses_cache
+      try {
+        const lc = require('../localCache');
+        if (lc && lc.db) {
+          lc.db.prepare('DELETE FROM courses_cache WHERE id=?').run(req.params.id);
+        }
+      } catch (cErr) {
+        console.warn('[COURSES CACHE] delete failed:', cErr.message);
+      }
+
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: 'Failed to delete course' }); }
   });
 
   router.get('/api/courses/:id/reservations', verifyAzureToken, async (req, res) => {
@@ -99,10 +136,23 @@ module.exports = function coursesRouter({ db, admin }) {
     try {
       const weekday = req.query.weekday !== undefined ? parseInt(req.query.weekday) : new Date().getDay();
       const snap = await db.collection('courses').get();
+      const courses = [];
       for (const doc of snap.docs) {
         const resSnap = await db.collection('reservations').where('sessionId', '==', doc.id).where('weekday', '==', weekday).where('status', '==', 'reserved').get();
         await doc.ref.update({ reserved: resSnap.size, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+        courses.push({ id: doc.id, ...doc.data(), reserved: resSnap.size });
       }
+
+      // Sync with SQLite courses_cache
+      try {
+        const lc = require('../localCache');
+        if (lc && typeof lc.upsertCourses === 'function') {
+          lc.upsertCourses(courses);
+        }
+      } catch (cErr) {
+        console.warn('[COURSES CACHE] sync-all failed:', cErr.message);
+      }
+
       res.json({ ok: true, message: `Synced ${snap.size} courses.` });
     } catch (err) { res.status(500).json({ error: 'Sync failed' }); }
   });
