@@ -447,7 +447,7 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
             return acc;
           }, {}),
           members: [],
-          csvIndexSize: _csvCache?.members?.length || 0,
+          csvIndexSize: loadOdooCSV()?.members?.length || 0,
           cacheStats: { hits: 0, misses: 0, total: 0 },
         });
       }
@@ -667,7 +667,7 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
         summary: { total: classified.length, newCount: totalNew, resubCount: totalResub, possible: totalPoss },
         perGym,
         members: classified,
-        csvIndexSize: _csvCache?.members?.length || 0,
+        csvIndexSize: loadOdooCSV()?.members?.length || 0,
         cacheStats: {
           hits:   cacheMap.size,
           misses: classified.length - cacheMap.size,
