@@ -309,6 +309,7 @@ try { db.exec(`
 try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN status TEXT DEFAULT 'approved';"); } catch (e) {}
 try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN requested_by TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN approved_by TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE push_notifications_history ADD COLUMN recipients_json TEXT;"); } catch (e) {}
 
 // ── ReSubIntelligence Cache — persists AI+fuzzy verdicts to avoid re-running Groq ──
 try { db.exec(`
@@ -1059,8 +1060,10 @@ function getCacheStats() {
 
 // ── PUSH NOTIFICATIONS HISTORY ────────────────────────────────────────────────
 const insertPushHistory = db.prepare(`
-  INSERT OR REPLACE INTO push_notifications_history (id, timestamp, title, body, subtitle, image_url, sent, failed, audience, gym_id)
-  VALUES (@id, @timestamp, @title, @body, @subtitle, @image_url, @sent, @failed, @audience, @gym_id)
+  INSERT OR REPLACE INTO push_notifications_history
+    (id, timestamp, title, body, subtitle, image_url, sent, failed, audience, gym_id, recipients_json)
+  VALUES
+    (@id, @timestamp, @title, @body, @subtitle, @image_url, @sent, @failed, @audience, @gym_id, @recipients_json)
 `);
 
 function upsertPushHistory(items) {
@@ -1068,21 +1071,28 @@ function upsertPushHistory(items) {
     for (const r of rows) insertPushHistory.run(r);
   });
   upsert(items.map(item => ({
-    id:        String(item.id),
-    timestamp: item.timestamp || new Date().toISOString(),
-    title:     item.title || '',
-    body:      item.body || '',
-    subtitle:  item.subtitle || null,
-    image_url: item.imageUrl || item.image_url || null,
-    sent:      Number(item.sent) || 0,
-    failed:    Number(item.failed) || 0,
-    audience:  item.audience || 'all',
-    gym_id:    item.gymId || item.gym_id || 'all',
+    id:              String(item.id),
+    timestamp:       item.timestamp || new Date().toISOString(),
+    title:           item.title || '',
+    body:            item.body || '',
+    subtitle:        item.subtitle || null,
+    image_url:       item.imageUrl || item.image_url || null,
+    sent:            Number(item.sent) || 0,
+    failed:          Number(item.failed) || 0,
+    audience:        item.audience || 'all',
+    gym_id:          item.gymId || item.gym_id || 'all',
+    recipients_json: item.recipients
+      ? JSON.stringify(item.recipients)
+      : (item.recipients_json || null),
   })));
 }
 
 function getPushHistory(limit = 50) {
-  return db.prepare('SELECT * FROM push_notifications_history ORDER BY timestamp DESC LIMIT ?').all(limit);
+  const rows = db.prepare('SELECT * FROM push_notifications_history ORDER BY timestamp DESC LIMIT ?').all(limit);
+  return rows.map(r => ({
+    ...r,
+    recipients: r.recipients_json ? JSON.parse(r.recipients_json) : [],
+  }));
 }
 
 module.exports = {
