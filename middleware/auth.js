@@ -23,6 +23,16 @@ const MANAGER_MAPPING = {
   'megafitlady@outlook.com':     'casa2',
 };
 
+// 🔒 RH — read-only access to all gyms register + decaissements
+const RH_EMAILS = [
+  'megafitrh@outlook.com',
+];
+
+// 🔒 Performance Manager — read-only commercial stats + register (7 days)
+const PERF_MANAGER_EMAILS = [
+  'performancemanager@outlook.com',
+];
+
 function getKey(header, cb) {
   jwks.getSigningKey(header.kid, (err, key) => {
     if (err) return cb(err, null);
@@ -75,13 +85,22 @@ function verifyAzureToken(req, res, next) {
     const email = (decoded.preferred_username || decoded.upn || decoded.email || '').toLowerCase();
     console.log(`🔐 Auth: Verifying token for ${email}`);
     
-    // 🔒 STRICT RBAC: Determine if user is Admin or Manager
+    // 🔒 STRICT RBAC: Determine role
     const adminEmails = (process.env.ADMIN_EMAILS || '').toLowerCase().split(',');
     const isExplicitAdmin = adminEmails.includes(email) || (decoded.roles && decoded.roles.includes('Admin')) || decoded.extension_Role === 'admin';
     
-    const assignedGym = MANAGER_MAPPING[email];
+    const assignedGym   = MANAGER_MAPPING[email];
+    const isRH          = RH_EMAILS.includes(email);
+    const isPerfManager = PERF_MANAGER_EMAILS.includes(email);
     
-    if (assignedGym) {
+    if (isRH || isPerfManager) {
+      // Read-only restricted roles: can access register (all gyms) but not admin routes
+      req.isAdmin        = false;
+      req.isManager      = true;   // lets existing read-only register routes pass
+      req.isRH           = isRH;
+      req.isPerfManager  = isPerfManager;
+      req.assignedGyms   = ['all'];
+    } else if (assignedGym) {
       req.isAdmin   = false;
       req.isManager = true;
       req.assignedGyms = [assignedGym];
