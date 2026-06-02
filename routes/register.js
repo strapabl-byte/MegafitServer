@@ -16,10 +16,11 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
       if (!req.isAdmin) {
           const assigned = req.assignedGyms?.[0];
           if (assigned && assigned !== 'all') {
-              gymId = assigned;
-          } else {
-              gymId = 'none';
+              gymId = assigned; // gym managers: lock to their gym
           }
+          // if assigned === 'all' (RH / Performance Manager): respect the requested gymId as-is
+          // if no assigned gym at all: block access
+          if (!assigned) gymId = 'none';
           forceRefresh = false; // non-admins cannot bust cache
       }
       if (!date) return res.status(400).json({ error: 'date required (YYYY-MM-DD)' });

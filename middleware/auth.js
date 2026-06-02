@@ -8,7 +8,9 @@ const jwksClient = require('jwks-rsa');
 const tenantId = process.env.TENANT_ID;
 
 const jwks = jwksClient({
-  jwksUri: `https://login.microsoftonline.com/${tenantId}/discovery/v2.0/keys`,
+  // Use 'common' when TENANT_ID is not set (local dev without .env) so JWT
+  // signature verification still works against Azure's public keys.
+  jwksUri: `https://login.microsoftonline.com/${tenantId || 'common'}/discovery/v2.0/keys`,
   cache: true,
   cacheMaxEntries: 5,
   cacheMaxAge: 10 * 60 * 60 * 1000, // 10 hours
@@ -63,7 +65,7 @@ function verifyAzureToken(req, res, next) {
 
   jwt.verify(token, getKey, { algorithms: ['RS256'] }, (err, decoded) => {
     if (err) return res.status(401).json({ error: 'Invalid token' });
-    if (decoded.tid && decoded.tid !== tenantId)
+    if (decoded.tid && tenantId && decoded.tid !== tenantId)
       return res.status(401).json({ error: 'Invalid tenant' });
 
     // Accept any token from the right tenant:
