@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 // routes/analytics.js ??? Daily stats, KPIs, live door entries, entry logging
 
 const { Router } = require('express');
@@ -1033,8 +1033,13 @@ Reply ONLY with valid JSON (no markdown):
           if (assigned && assigned !== 'all') gymId = assigned;
           // RH/PM: pass gymId through
       }
-      const cached = apiCache.kpis[gymId];
-      if (cached && Date.now() - cached.ts < 5 * 1000) return res.json(cached.data); // 5s TTL — near-real-time
+
+      const customStart = req.query.startDate;
+      const customEnd = req.query.endDate;
+      if (!customStart || !customEnd) {
+        const cached = apiCache.kpis[gymId];
+        if (cached && Date.now() - cached.ts < 5 * 1000) return res.json(cached.data); // 5s TTL — near-real-time
+      }
 
       const parseLocalDate = (dateStr) => {
         const [y, m, d] = dateStr.split('-').map(Number);
@@ -1159,14 +1164,43 @@ Reply ONLY with valid JSON (no markdown):
         `SELECT COUNT(*) as c FROM members_cache WHERE gym_id IN (${phAct}) AND expires_on >= ?`
       ).get(...gymIds, todayStr)?.c || 0;
 
+      let incomeCustom = { total: 0, espece: 0, tpe: 0, virement: 0, cheque: 0 };
+      let regsCustom = 0;
+      if (customStart && customEnd) {
+        const cStart = parseLocalDate(customStart);
+        const cEnd = parseLocalDate(customEnd);
+        cEnd.setHours(23, 59, 59); // include full day
+        incomeCustom = getRevenueAndBreakdown(cStart, cEnd);
+        regsCustom = countRegisterInRange(cStart, cEnd);
+      }
+
       const kpis = {
         currentMonthLabel,   // e.g. "MAI 2026"
         odooTotal,           // Real total from Odoo (e.g. 7429 for Dokarat)
         detectedMonth,       // Unique people detected at door scanner this month
         activeSubscriptions, // Members with non-expired subscription (from members_cache)
-        newMembers: { day: countRegisterInRange(todayStart), yesterday: countRegisterInRange(yesterdayStart, yesterdayEnd), week: countRegisterInRange(weekStart), month: countRegisterInRange(monthStart), year: countRegisterInRange(yearStart) },
-        income:     { day: incomeDay.total, yesterday: incomeYesterday.total, week: incomeWeek.total, month: incomeMonth.total, year: incomeYear.total },
-        paymentMethods: { espece: incomeMonth.espece, tpe: incomeMonth.tpe, virement: incomeMonth.virement, cheque: incomeMonth.cheque },
+        newMembers: { 
+          day: countRegisterInRange(todayStart), 
+          yesterday: countRegisterInRange(yesterdayStart, yesterdayEnd), 
+          week: countRegisterInRange(weekStart), 
+          month: countRegisterInRange(monthStart), 
+          year: countRegisterInRange(yearStart),
+          custom: regsCustom
+        },
+        income: { 
+          day: incomeDay.total, 
+          yesterday: incomeYesterday.total, 
+          week: incomeWeek.total, 
+          month: incomeMonth.total, 
+          year: incomeYear.total,
+          custom: incomeCustom.total
+        },
+        paymentMethods: { 
+          espece: customStart && customEnd ? incomeCustom.espece : incomeMonth.espece, 
+          tpe: customStart && customEnd ? incomeCustom.tpe : incomeMonth.tpe, 
+          virement: customStart && customEnd ? incomeCustom.virement : incomeMonth.virement, 
+          cheque: customStart && customEnd ? incomeCustom.cheque : incomeMonth.cheque 
+        },
         paymentMethodsByPeriod: {
           day:   { espece: incomeDay.espece,   tpe: incomeDay.tpe,   virement: incomeDay.virement,   cheque: incomeDay.cheque   },
           week:  { espece: incomeWeek.espece,  tpe: incomeWeek.tpe,  virement: incomeWeek.virement,  cheque: incomeWeek.cheque  },
