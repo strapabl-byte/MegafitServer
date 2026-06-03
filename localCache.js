@@ -84,7 +84,8 @@ const migrations = [
   'ALTER TABLE members_cache ADD COLUMN ville TEXT',
   'ALTER TABLE members_cache ADD COLUMN is_archive INTEGER DEFAULT 0',
   'ALTER TABLE members_cache ADD COLUMN bonus_3months INTEGER DEFAULT 0',
-  'ALTER TABLE members_cache ADD COLUMN inscription_id TEXT'
+  'ALTER TABLE members_cache ADD COLUMN inscription_id TEXT',
+  'ALTER TABLE members_cache ADD COLUMN multiclub INTEGER DEFAULT 0',
 ];
 
 for (const m of migrations) {

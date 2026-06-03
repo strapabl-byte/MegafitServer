@@ -421,23 +421,26 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
 
   // ── GET /public/members/search ────────────────────────────────────────────
   // ✅ SQLite-first: reads from local cache — zero Firestore cost during typing
-  // Deleted/inactive members are excluded from results.
+  // Supports allGyms=true for Multiclub search (searches all gyms)
   router.get('/public/members/search', async (req, res) => {
     try {
       const q = (req.query.q || '').trim().toLowerCase();
       if (q.length < 2) return res.json([]);
+      const allGyms = req.query.allGyms === 'true';
 
       const searchTerm = `%${q}%`;
       const rows = lc.db.prepare(`
-        SELECT id, full_name, phone, cin, birthday, gym_id, photo, expires_on, bonus_3months, 
-               email, adresse, ville
+        SELECT id, full_name, phone, cin, birthday, gym_id, photo, expires_on, bonus_3months,
+               email, adresse, ville, COALESCE(multiclub, 0) as multiclub
         FROM members_cache
         WHERE (LOWER(full_name) LIKE ? OR LOWER(cin) LIKE ? OR phone LIKE ?)
           AND (status IS NULL OR status = ''
                OR (LOWER(status) NOT LIKE '%delet%'
                AND LOWER(status) NOT LIKE '%supprim%'))
-        LIMIT 5
+        LIMIT ${allGyms ? 10 : 5}
       `).all(searchTerm, searchTerm, searchTerm);
+
+      const GYM_NAMES = { dokarat: 'Fès Doukkarate', marjane: 'Fès Saïss', casa1: 'Casa Anfa', casa2: 'Casa Lady Anfa' };
 
       res.json(rows.map(m => ({
         id: m.id,
@@ -448,9 +451,11 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         phone:   m.phone   || '',
         birthday: m.birthday || '',
         gymId:   m.gym_id  || '',
+        gymName: GYM_NAMES[m.gym_id] || m.gym_id || '',
         photo:   m.photo   || '',
         expiresOn: m.expires_on || null,
         bonus3Months: m.bonus_3months === 1,
+        multiclub: m.multiclub === 1,
         email:   m.email   || '',
         adresse: m.adresse || '',
         ville:   m.ville   || '',
@@ -458,6 +463,113 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
     } catch (err) {
       console.error('Public Member Search Error:', err);
       res.status(500).json({ error: 'Failed to search members' });
+    }
+  });
+
+  // ── POST /public/multiclub ────────────────────────────────────────────────
+  // Enable Multiclub access for an existing member.
+  // No gym restriction: commercial can process from any gym.
+  router.post('/public/multiclub', async (req, res) => {
+    try {
+      const {
+        memberId, gymId: rawGymId,
+        amount, method,
+        paymentsSplit,
+        chequePhoto, chequePhotoBack,
+        checkNumber, bank,
+        memberSignature, commercialSignature,
+        commercialName, note
+      } = req.body;
+
+      const VALID_GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
+      const gymId = (rawGymId || '').toLowerCase().trim();
+      if (!VALID_GYMS.includes(gymId)) return res.status(400).json({ error: 'Invalid gymId' });
+      if (!memberId) return res.status(400).json({ error: 'memberId required' });
+      if (!amount || Number(amount) <= 0) return res.status(400).json({ error: 'Invalid amount' });
+
+      const memberRef = db.collection('members').doc(memberId);
+      const memberSnap = await memberRef.get();
+      if (!memberSnap.exists) return res.status(404).json({ error: 'Member not found' });
+      const member = memberSnap.data();
+
+      const payAmount = Number(amount);
+      const today = new Date().toISOString().slice(0, 10);
+      const split = paymentsSplit || {};
+      const esp = Number(split.espece || 0);
+      const tpe = Number(split.carte  || split.tpe || 0);
+      const vir = Number(split.virement || 0);
+      const chq = Number(split.cheque  || 0);
+
+      // Upload images
+      let chequeUrl = null, chequeUrlBack = null, sigClientUrl = null, sigCommUrl = null;
+      if (chequePhoto)       chequeUrl     = await uploadBase64ToStorage(chequePhoto,       `multiclub/${memberId}/${Date.now()}_cheque_recto.jpg`);
+      if (chequePhotoBack)   chequeUrlBack = await uploadBase64ToStorage(chequePhotoBack,   `multiclub/${memberId}/${Date.now()}_cheque_verso.jpg`);
+      if (memberSignature)   sigClientUrl  = await uploadBase64ToStorage(memberSignature,   `multiclub/${memberId}/${Date.now()}_sig_client.png`);
+      if (commercialSignature) sigCommUrl  = await uploadBase64ToStorage(commercialSignature, `multiclub/${memberId}/${Date.now()}_sig_comm.png`);
+
+      // 1. 🔥 Mark member as multiclub in Firestore
+      await memberRef.update({
+        multiclub: true,
+        multiclubActivatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        multiclubGymId: gymId,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      // 2. 🔥 Payment record
+      const payRef = await db.collection('payments').add({
+        memberId,
+        gymId,
+        amount: payAmount,
+        method: method || 'Espèces',
+        paymentsSplit: { espece: esp, carte: tpe, virement: vir, cheque: chq },
+        checkNumber: checkNumber || null,
+        bank: bank || null,
+        chequePhoto: chequeUrl, chequePhotoBack: chequeUrlBack,
+        signatureClient: sigClientUrl, signatureCommercial: sigCommUrl,
+        commercialName: (commercialName || 'COMMERCIAL').toUpperCase(),
+        type: 'multiclub',
+        date: new Date().toISOString(),
+        note: note || `Activation Multiclub — ${member.fullName}`,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        source: 'inscription_form',
+      });
+
+      // 3. 📒 Daily Register entry
+      try {
+        const docId = `${gymId}_${today}`;
+        const addedDoc = await db.collection('megafit_daily_register').doc(docId).collection('entries').add({
+          nom: member.fullName || '', tel: member.phone || '',
+          contrat: member.contractNumber || '',
+          commercial: (commercialName || 'COMMERCIAL').toUpperCase(),
+          cin: member.cin || '',
+          prix: payAmount, espece: esp, tpe, virement: vir, cheque: chq,
+          abonnement: 'MULTICLUB',
+          reste: 0, note_reste: '',
+          source: 'multiclub',
+          chequePhoto: chequeUrl, chequePhotoBack: chequeUrlBack,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        await db.collection('megafit_daily_register').doc(docId).set(
+          { gymId, date: today, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
+          { merge: true }
+        );
+        const newSnap = await addedDoc.get();
+        lc.upsertRegister(gymId, today, [{ id: addedDoc.id, ...newSnap.data() }]);
+      } catch (regErr) {
+        console.warn('[Multiclub] Register update failed (non-blocking):', regErr.message);
+      }
+
+      // 4. 💾 SQLite: Update member multiclub flag
+      try {
+        lc.db.prepare(`UPDATE members_cache SET multiclub=1 WHERE id=?`).run(memberId);
+      } catch (_) {}
+
+      console.log(`✅ [Multiclub] ${member.fullName} — ${payAmount} DH — Payment: ${payRef.id}`);
+      res.json({ ok: true, memberId, paymentId: payRef.id, multiclub: true });
+
+    } catch (err) {
+      console.error('[Multiclub] Error:', err);
+      res.status(500).json({ error: 'Failed to activate multiclub', detail: err.message });
     }
   });
 
