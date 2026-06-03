@@ -94,5 +94,65 @@ module.exports = function(deps) {
     }
   });
 
+  // ── PATCH: update status and/or comment ──────────────────────────────────────
+  router.patch('/api/recruitment/applications/:id', verifyAzureToken, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status, comment } = req.body;
+
+      const VALID_STATUSES = ['new', 'pending', 'traite'];
+      if (status !== undefined && !VALID_STATUSES.includes(status)) {
+        return res.status(400).json({ ok: false, error: `Invalid status. Must be one of: ${VALID_STATUSES.join(', ')}` });
+      }
+
+      // Update in SQLite immediately (always)
+      lc.updateRecruitmentApplication(id, { status, comment });
+
+      // Optionally sync to Firestore too
+      if (dbRecrute) {
+        try {
+          const updateData = {};
+          if (status !== undefined) updateData.status = status;
+          if (comment !== undefined) updateData.comment = comment;
+          await dbRecrute.collection('recruitment_applications').doc(id).update(updateData);
+          console.log(`✅ [RECRUITMENT] Updated application ${id} in Firestore.`);
+        } catch (fsErr) {
+          console.warn(`⚠️ [RECRUITMENT] Firestore update failed for ${id}: ${fsErr.message}`);
+        }
+      }
+
+      res.json({ ok: true, id, status, comment });
+    } catch (err) {
+      console.error('❌ [RECRUITMENT] PATCH error:', err.message);
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // ── DELETE: remove a candidate (super admin only) ─────────────────────────
+  router.delete('/api/recruitment/applications/:id', verifyAzureToken, async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      // Delete from SQLite
+      lc.db.prepare('DELETE FROM recruitment_applications WHERE id = ?').run(id);
+
+      // Delete from Firestore if available
+      if (dbRecrute) {
+        try {
+          await dbRecrute.collection('recruitment_applications').doc(id).delete();
+          console.log(`🗑️ [RECRUITMENT] Deleted application ${id} from Firestore.`);
+        } catch (fsErr) {
+          console.warn(`⚠️ [RECRUITMENT] Firestore delete failed for ${id}: ${fsErr.message}`);
+        }
+      }
+
+      res.json({ ok: true, id, deleted: true });
+    } catch (err) {
+      console.error('❌ [RECRUITMENT] DELETE error:', err.message);
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
   return router;
 };
+

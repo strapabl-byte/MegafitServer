@@ -1019,6 +1019,24 @@ function setLastRecruitmentSync(ts) {
   setMeta('last_recruitment_sync', ts || new Date().toISOString());
 }
 
+// Migration: add comment column if missing (safe no-op if already exists)
+try { db.exec('ALTER TABLE recruitment_applications ADD COLUMN comment TEXT'); } catch(_) {}
+
+function updateRecruitmentApplication(id, { status, comment }) {
+  if (!id) return;
+  try {
+    const updates = [];
+    const params = [];
+    if (status !== undefined) { updates.push('status = ?'); params.push(status); }
+    if (comment !== undefined) { updates.push('comment = ?'); params.push(comment); }
+    if (!updates.length) return;
+    params.push(id);
+    db.prepare(`UPDATE recruitment_applications SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+  } catch (err) {
+    console.error('SQLite updateRecruitmentApplication error:', err.message);
+  }
+}
+
 // ── COURSES CACHE ─────────────────────────────────────────────────────────────
 function upsertCourses(coursesArr) {
   const stmt = db.prepare(`
@@ -1119,7 +1137,7 @@ module.exports = {
   // kids courses
   upsertKidsCourse, getKidsCourses, updateKidsCourse, deleteKidsCourse,
   // recruitment
-  upsertRecruitmentApplications, getRecruitmentApplications, getLastRecruitmentSync, setLastRecruitmentSync,
+  upsertRecruitmentApplications, getRecruitmentApplications, getLastRecruitmentSync, setLastRecruitmentSync, updateRecruitmentApplication,
   // courses cache
   upsertCourses,
   // push notifications history
