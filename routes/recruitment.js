@@ -41,7 +41,7 @@ try {
 
 module.exports = function(deps) {
   const router = express.Router();
-  const { verifyAzureToken } = require('../middleware/auth');
+  const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 
   router.get('/api/recruitment/applications', verifyAzureToken, async (req, res) => {
     try {
@@ -129,7 +129,7 @@ module.exports = function(deps) {
   });
 
   // ── DELETE: remove a candidate (super admin only) ─────────────────────────
-  router.delete('/api/recruitment/applications/:id', verifyAzureToken, async (req, res) => {
+  router.delete('/api/recruitment/applications/:id', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
       const { id } = req.params;
 
