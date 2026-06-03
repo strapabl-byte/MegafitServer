@@ -1,4 +1,4 @@
-'use strict';
+ï»¿'use strict';
 // routes/analytics.js ??? Daily stats, KPIs, live door entries, entry logging
 
 const { Router } = require('express');
@@ -765,11 +765,8 @@ Reply ONLY with valid JSON (no markdown):
       // ðŸ”’ SECURITY: Restrict non-admins to their assigned gym
       if (!req.isAdmin) {
           const assigned = req.assignedGyms?.[0];
-          if (assigned && assigned !== 'all') {
-              gymId = assigned;
-          } else {
-              gymId = 'none';
-          }
+          if (assigned && assigned !== 'all') gymId = assigned;
+          // RH/PM have assignedGyms=['all'] â€” pass gymId through
       }
       const today = getMoroccanDateStr();
       const cacheKey = `live_count_${gymId}`;
@@ -794,6 +791,61 @@ Reply ONLY with valid JSON (no markdown):
     }
   });
 
+
+  // GET /api/door-history -- lightweight door entry list for RH/PM
+  // Supports: gymId (comma-sep or 'all'), startDate, endDate, date, name, limit
+  router.get('/api/door-history', verifyAzureToken, async (req, res) => {
+    try {
+      let { gymId, startDate, endDate, date, name, limit: limitParam } = req.query;
+      if (!gymId) return res.status(400).json({ error: 'gymId required' });
+
+      // Security: restrict non-admins without 'all' access
+      if (!req.isAdmin) {
+        const assigned = req.assignedGyms?.[0];
+        if (assigned && assigned !== 'all') gymId = assigned;
+        // RH/PM with assignedGyms=['all'] pass gymId through
+      }
+
+      const limitCount = Math.min(parseInt(limitParam) || 300, 500);
+      const today = getMoroccanDateStr();
+      const GYM_NAMES = { marjane: 'Fes Saiss', dokarat: 'Doukkarate', casa1: 'Casa Anfa', casa2: 'Lady Anfa' };
+      const gymIds = gymId === 'all' ? ['marjane', 'dokarat', 'casa1', 'casa2'] : gymId.split(',');
+
+      const options = { limit: limitCount };
+      if (date) {
+        options.date = date;
+      } else {
+        options.startDate = startDate || today;
+        options.endDate   = endDate   || today;
+      }
+      if (name && name.trim()) options.name = name.trim();
+
+      const allEntries = [];
+      for (const gid of gymIds) {
+        const entries = lc.getEntries(gid, options);
+        for (const e of entries) {
+          allEntries.push({
+            id:        e.id,
+            gymId:     gid,
+            gymName:   GYM_NAMES[gid] || gid,
+            timestamp: e.timestamp,
+            date:      e.date,
+            name:      e.name || '',
+            method:    e.is_face ? 'Visage ID' : (e.method || 'NFC'),
+            status:    e.status || 'Entree',
+          });
+        }
+      }
+
+      allEntries.sort((a, b) => (b.timestamp > a.timestamp ? 1 : -1));
+      const sliced = allEntries.slice(0, limitCount);
+      res.json({ ok: true, entries: sliced, total: allEntries.length });
+    } catch (err) {
+      console.error('[door-history]', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // ?????? GET /api/analytics/daily-stats/:gymId ????????????????????????????????????????????????????????????????????????
   router.get('/api/analytics/daily-stats/:gymId', verifyAzureToken, async (req, res) => {
     try {
@@ -802,11 +854,8 @@ Reply ONLY with valid JSON (no markdown):
       // ðŸ”’ SECURITY: Restrict non-admins to their assigned gym
       if (!req.isAdmin) {
           const assigned = req.assignedGyms?.[0];
-          if (assigned && assigned !== 'all') {
-              gymId = assigned;
-          } else {
-              gymId = 'none';
-          }
+          if (assigned && assigned !== 'all') gymId = assigned;
+          // RH/PM: pass gymId through
       }
       const includeToday = req.query.includeToday === 'true';
       const gymIds = gymId === 'all' ? ['marjane', 'dokarat', 'casa1', 'casa2'] : gymId.split(',');
@@ -921,7 +970,7 @@ Reply ONLY with valid JSON (no markdown):
   });
 
   // -- GET /api/analytics/hourly-entries/:gymId ------------------------------
-  // Returns per-hour entry counts (06h–23h) aggregated over last `days` days.
+  // Returns per-hour entry counts (06hï¿½23h) aggregated over last `days` days.
   router.get('/api/analytics/hourly-entries/:gymId', verifyAzureToken, async (req, res) => {
     try {
       let { gymId } = req.params;
@@ -930,7 +979,7 @@ Reply ONLY with valid JSON (no markdown):
       if (!req.isAdmin) {
         const assigned = req.assignedGyms?.[0];
         if (assigned && assigned !== 'all') gymId = assigned;
-        else gymId = 'none';
+        // else: RH/PM pass gymId through
       }
 
       const GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
@@ -981,11 +1030,8 @@ Reply ONLY with valid JSON (no markdown):
       // ðŸ”’ SECURITY: Restrict non-admins to their assigned gym
       if (!req.isAdmin) {
           const assigned = req.assignedGyms?.[0];
-          if (assigned && assigned !== 'all') {
-              gymId = assigned;
-          } else {
-              gymId = 'none';
-          }
+          if (assigned && assigned !== 'all') gymId = assigned;
+          // RH/PM: pass gymId through
       }
       const cached = apiCache.kpis[gymId];
       if (cached && Date.now() - cached.ts < 5 * 1000) return res.json(cached.data); // 5s TTL â€” near-real-time
@@ -1489,30 +1535,30 @@ RÃˆGLES ABSOLUES:
 5. Termine par [+] si confiant, [-] si incertain ou donnÃ©es manquantes.
 6. Tu as accÃ¨s Ã : KPIs en temps rÃ©el, trafic porte 30j, entrÃ©es live, dÃ©caissements, incidents, crÃ©ances membres, planning cours, ventes rÃ©centes, performance par club et par commercial.
 7. Tu connais l'historique CA mensuel des 24 derniers mois par club (inclus dans les donnees).
-8. CALENDRIER BUSINESS ANNUEL MAROC — ANALYSE COMME UN DIRECTEUR OPERATIONNEL:
+8. CALENDRIER BUSINESS ANNUEL MAROC ï¿½ ANALYSE COMME UN DIRECTEUR OPERATIONNEL:
 
 === RELIGIEUX ISLAMIQUE (calendrier lunaire, avance ~11j/an) ===
 RAMADAN (jeune 30j): Baisse inscriptions -40% a -60%. Membres absents. Horaires decales (ouverture tard).
   2024: 11 mars - 9 avr | 2025: 1 mars - 29 mars | 2026: 18 fev - 18 mars | 2027: ~7 fev
 EID AL-FITR (Eid Sghir, fin Ramadan): Fermeture 3-5j + semaine de retour lente.
   2024: 10 avr | 2025: 31 mars | 2026: 20 mars | 2027: ~9 mars
-EID AL-ADHA (Eid Kbir): IMPACT MAXIMAL — fermeture 5-7j + exodus 10-15j. Pire periode de l'annee.
+EID AL-ADHA (Eid Kbir): IMPACT MAXIMAL ï¿½ fermeture 5-7j + exodus 10-15j. Pire periode de l'annee.
   2024: 16 juin | 2025: 7 juin | 2026: 27 mai | 2027: ~17 mai
   NOTE: Eid Kbir 2026 = 27 mai ? mai 2026 fin de mois tres creuse. Impact sur juin aussi.
 AID AL-MAWLID (naissance prophete): Ferie 1 jour. Impact mineur.
   2024: 16 sept | 2025: 5 sept | 2026: 25 aout
 
 === FERIES NATIONALES MAROCAINES (fixes) ===
-1 janvier: Nouvel An — fermeture 1j, pic inscriptions "resolutions" les premiers jours.
-11 janvier: Manifeste de l'independance — ferie.
-1 mai: Fete du Travail — ferie.
-23 mai: Fete nationale — ferie.
-30 juillet: Fete du Trone — ferie + ambiance estivale ? baisse trafic.
-14 aout: Recuperation de Oued Eddahab — ferie.
-20 aout: Revolution du Roi et du Peuple — ferie.
-21 aout: Fete de la Jeunesse — ferie.
-6 novembre: Marche Verte — ferie.
-18 novembre: Fete de l'independance — ferie.
+1 janvier: Nouvel An ï¿½ fermeture 1j, pic inscriptions "resolutions" les premiers jours.
+11 janvier: Manifeste de l'independance ï¿½ ferie.
+1 mai: Fete du Travail ï¿½ ferie.
+23 mai: Fete nationale ï¿½ ferie.
+30 juillet: Fete du Trone ï¿½ ferie + ambiance estivale ? baisse trafic.
+14 aout: Recuperation de Oued Eddahab ï¿½ ferie.
+20 aout: Revolution du Roi et du Peuple ï¿½ ferie.
+21 aout: Fete de la Jeunesse ï¿½ ferie.
+6 novembre: Marche Verte ï¿½ ferie.
+18 novembre: Fete de l'independance ï¿½ ferie.
 
 === CALENDRIER SCOLAIRE MAROC (impact MAJEUR sur frequentation gym) ===
 RENTREE: Debut septembre. PIC FORT inscriptions. Meilleur moment pour offres promotionnelles.
@@ -1526,7 +1572,7 @@ VACANCES ETE: Juillet-Aout. IMPACT MAXIMUM:
   - Juillet = bilan mixte | Aout = creux sauf nouveaux inscrits
 EXAMENS BAC: Juin (session normale) + Juillet (session rattrapage). Lyceans absents.
 
-=== CYCLES BUSINESS GYM — CLASSIFICATION STRATEGIQUE ===
+=== CYCLES BUSINESS GYM ï¿½ CLASSIFICATION STRATEGIQUE ===
 JANVIER: ????? Pic absolu. Resolutions + reprise apres fetes. Ouvrir promotions agressives.
 FEVRIER: ???? Fort. Momentum resolutions. Si Ramadan debut fev = impact negatif progressif.
 MARS: ??? Variable. Si Ramadan = tres faible. Si pas Ramadan = bon mois.
@@ -1537,7 +1583,7 @@ JUILLET: ?? Creux estival. Chaleur + vacances familles. Etudiants compensent par
 AOUT: ?? Creux. Point bas estival. Relance de pre-rentree fin aout.
 SEPTEMBRE: ????? Deuxieme meilleur mois. Rentree scolaire. Forte demande inscriptions.
 OCTOBRE: ???? Bon. Vacances Toussaint. Temps plus frais = motivation sport.
-NOVEMBRE: ???? Fort. Pas de contrainte majeure. Campagnes fidélisation.
+NOVEMBRE: ???? Fort. Pas de contrainte majeure. Campagnes fidï¿½lisation.
 DECEMBRE: ??? Correct. Fetes de fin d'annee. Pre-pic janvier.
 
 === REGLES D'INTERPRETATION INTELLIGENTE ===
