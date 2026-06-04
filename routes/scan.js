@@ -304,7 +304,8 @@ async function callGroqContractScan(crops, prompt) {
       messages: [{ role: 'user', content: [
         { type: 'text',      text: prompt },
         { type: 'image_url', image_url: { url: crops.full     } }, // full page (overview)
-        { type: 'image_url', image_url: { url: crops.topLeft  } }, // identity zone (nom, CIN...)
+        { type: 'image_url', image_url: { url: crops.topLeft  } }, // identity zone (nom, CIN, naissance)
+        { type: 'image_url', image_url: { url: crops.topRight } }, // phone, adresse, email, urgence ← NEW
         { type: 'image_url', image_url: { url: crops.midLeft  } }, // subscription (dates, montant)
         { type: 'image_url', image_url: { url: crops.midRight } }, // payment (options, mode)
       ]}],
@@ -510,10 +511,17 @@ function normaliseExtracted(raw) {
   ['startDate','endDate'].forEach(k => { if (out.subscription[k]?.value) out.subscription[k].value = nd(out.subscription[k].value); });
   if (out.signature.date?.value) out.signature.date.value = nd(out.signature.date.value);
 
-  // Normalise phone (10 digits)
+  // Normalise phone (10 digits, strip spaces/dots/dashes)
   if (out.member.phone?.value) {
-    const p = String(out.member.phone.value).replace(/[\s.\-]/g, '');
-    if (/^[0-9]{10}$/.test(p)) out.member.phone.value = p;
+    const p = String(out.member.phone.value).replace(/[\s.\-/]/g, '');
+    // Accept 10-digit Moroccan numbers (06x / 07x / 05x)
+    if (/^0[5-7]\d{8}$/.test(p)) {
+      out.member.phone.value = p;
+      out.member.phone.confidence = Math.max(out.member.phone.confidence, 0.85);
+    } else if (/^\d{10}$/.test(p)) {
+      out.member.phone.value = p; // Accept any 10-digit number
+    }
+    // else leave as-is for human review
   }
 
   // Title-case names
@@ -564,13 +572,16 @@ function flattenToLegacy(rich) {
 // Kept compact to minimise tokens. Same correction injection as GPT-5.5 prompt.
 function buildGroqPrompt(corrections = []) {
   const base = `You are an expert OCR engine for Moroccan gym membership contracts (French).
-You receive 4 images: full contract + 3 key crops (identity, subscription, payment zones).
-Use ALL 4 images together — crops are high-resolution sections of the full page.
+You receive 5 images: full contract + 4 key crops (identity-left, identity-right/phone, subscription, payment zones).
+Use ALL 5 images together — crops are high-resolution sections of the full page.
 
 RULES:
 - NEVER invent data. Blank/illegible → value:null, confidence:0.2, needsReview:false
 - Uncertain reading → confidence<0.7, needsReview:true
-- Dates → YYYY-MM-DD. Phone → 10 digits (0XXXXXXXXX). Amounts → numbers (MAD).
+- Dates → YYYY-MM-DD. Amounts → numbers (MAD).
+- PHONE: look in the top-right crop (image 3) for a 10-digit Moroccan number starting with 06 or 07.
+  Example: "0662878718" or written as "06 62 87 87 18" or "06.62.87.87.18" → output "0662878718" (digits only, no spaces).
+  The label is usually "Tél:", "Téléphone:", or "N° Tel:".
 - Checked boxes (tick, X, ink mark) → true. Empty box → false.
 - commercial field: leave null unless clearly visible.
 

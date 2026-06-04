@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 // routes/inscriptions.js — public form submissions + admin dashboard management
 
 const { Router } = require('express');

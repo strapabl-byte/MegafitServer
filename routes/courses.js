@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 // routes/courses.js — Courses, Coaches, Reservations, Bilans
 
 const { Router } = require('express');

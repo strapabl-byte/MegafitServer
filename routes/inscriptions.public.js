@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 // routes/inscriptions.public.js
 // Public tablet-facing routes — form submission & member search require NO auth
 // Financial routes:

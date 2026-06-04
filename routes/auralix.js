@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 // routes/auralix.js — Auralix PWA API (Firebase token auth)
 const express = require('express');
 

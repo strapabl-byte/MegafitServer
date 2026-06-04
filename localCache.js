@@ -1,4 +1,4 @@
-// localCache.js — SQLite-backed local cache for Megafit
+﻿// localCache.js — SQLite-backed local cache for Megafit
 // Stores entries, members, payments, daily stats per gym_id
 // Eliminates Firestore reads for all display data → protects Firebase quota
 'use strict';

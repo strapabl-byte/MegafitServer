@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 // middleware/auth.js — Azure Entra ID token verification + role helpers
 // Shared by all route files. Never duplicate this logic elsewhere.
 

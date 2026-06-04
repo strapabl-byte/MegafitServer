@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 // routes/ai-agent.js — AURALIX 24/7 AI Business Intelligence Agent
 // Full Snapshot Builder + Rules Engine + Actions + Memory + Alerts
 

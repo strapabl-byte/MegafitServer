@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 const express = require('express');
 const admin = require('firebase-admin');
 const { getFirestore } = require('firebase-admin/firestore');
