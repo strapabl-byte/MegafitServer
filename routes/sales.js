@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 // routes/sales.js — Commercial Performance, Goals, Multi-Stats & Re-Sub Intelligence
 // Re-Sub engine is extracted to lib/resubEngine.js (singleton) and imported here.
 

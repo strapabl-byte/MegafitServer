@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 // routes/config.js — Public pass/status + Inscription form config + Chat
 
 const { Router } = require('express');

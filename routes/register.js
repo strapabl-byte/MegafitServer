@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 // routes/register.js — Daily Register (Registre Journalier) + Calendar
 
 const { Router } = require('express');
