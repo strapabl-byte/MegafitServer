@@ -795,10 +795,36 @@ Rules:
     }
   });
 
+  // ── GET /api/register/active-commercials?gymId=X&days=10 ─────────────────
+  // Returns unique commercial names active in the last N days (SQLite only).
+  router.get('/active-commercials', verifyAzureToken, async (req, res) => {
+    try {
+      let { gymId = 'dokarat', days = 10 } = req.query;
+      if (!req.isAdmin) {
+        const assigned = req.assignedGyms?.[0];
+        if (assigned && assigned !== 'all') gymId = assigned;
+      }
+      const gymIds = gymId === 'all' ? ['dokarat','marjane','casa1','casa2'] : [gymId];
+      const ph = gymIds.map(() => '?').join(',');
+      const rows = lc.db.prepare(`
+        SELECT DISTINCT commercial FROM register_cache
+        WHERE gym_id IN (${ph})
+          AND commercial IS NOT NULL AND commercial != ''
+          AND date >= date('now', '-' || ? || ' days')
+        ORDER BY commercial ASC
+      `).all(...gymIds, Number(days));
+      res.json({ ok: true, commercials: rows.map(r => r.commercial) });
+    } catch (err) {
+      console.error('GET /api/register/active-commercials error:', err);
+      res.status(500).json({ ok: false, commercials: [] });
+    }
+  });
+
   // ── GET /api/register/search?gymId=dokarat&name=Boulaghnoud ─────────────
   // Returns all register entries matching a member name across all dates.
   // Used by the "Pay Rest" modal to show full payment history.
   router.get('/search', verifyAzureToken, async (req, res) => {
+
     try {
       const { gymId = 'dokarat', name = '' } = req.query;
       if (!name.trim()) return res.json({ ok: true, entries: [] });
