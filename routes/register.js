@@ -965,5 +965,87 @@ Rules:
     }
   });
 
+
+  // ── POST /api/register/backfill-cin (admin) ──────────────────────────────
+  // Scans all register entries missing a CIN, looks them up in pending_members
+  // by contractNumber, and backfills both SQLite and Firestore.
+  router.post('/backfill-cin', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const rows = lc.db.prepare(
+        "SELECT * FROM register_cache WHERE (cin IS NULL OR cin = '') AND contrat != '' AND contrat IS NOT NULL ORDER BY date DESC"
+      ).all();
+
+      let fixed = 0, skipped = 0, notFound = 0;
+
+      for (const row of rows) {
+        const snap = await db.collection('pending_members')
+          .where('contractNumber', '==', row.contrat).limit(1).get();
+        if (snap.empty) { notFound++; continue; }
+
+        const ins = snap.docs[0].data();
+        const cin = (ins.cin || '').trim();
+        if (!cin) { skipped++; continue; }
+
+        try {
+          lc.db.prepare('UPDATE register_cache SET cin = ? WHERE id = ? AND gym_id = ?')
+            .run(cin, row.id, row.gym_id);
+        } catch (e) { console.error(`SQLite CIN update failed for ${row.contrat}:`, e.message); continue; }
+
+        try {
+          await db.collection('megafit_daily_register')
+            .doc(`${row.gym_id}_${row.date}`)
+            .collection('entries').doc(row.id)
+            .update({ cin });
+        } catch (e) { console.warn(`Firestore CIN update failed for ${row.contrat}:`, e.message); }
+
+        fixed++;
+      }
+
+      console.log(`[BACKFILL-CIN] fixed=${fixed} skipped=${skipped} notFound=${notFound}`);
+      res.json({ ok: true, fixed, skipped, notFound, total: rows.length });
+    } catch (err) {
+      console.error('POST /api/register/backfill-cin error:', err);
+      res.status(500).json({ error: 'Backfill failed' });
+    }
+  });
+
+  // ── GET /api/register/manager-pin/:gymId (admin) ─────────────────────────
+  router.get('/manager-pin/:gymId', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const snap = await db.collection('megafit_config').doc('manager_pins').get();
+      const data = snap.exists ? snap.data() : {};
+      res.json({ ok: true, pin: data[req.params.gymId] || '' });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to get PIN' });
+    }
+  });
+
+  // ── POST /api/register/manager-pin (admin) ───────────────────────────────
+  router.post('/manager-pin', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const { gymId, pin } = req.body;
+      if (!gymId || !pin) return res.status(400).json({ error: 'gymId and pin required' });
+      await db.collection('megafit_config').doc('manager_pins')
+        .set({ [gymId]: String(pin) }, { merge: true });
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to set PIN' });
+    }
+  });
+
+  // ── POST /api/register/verify-manager-pin ────────────────────────────────
+  router.post('/verify-manager-pin', verifyAzureToken, async (req, res) => {
+    try {
+      const { gymId, pin } = req.body;
+      if (!gymId || !pin) return res.status(400).json({ ok: false });
+      const snap = await db.collection('megafit_config').doc('manager_pins').get();
+      const data = snap.exists ? snap.data() : {};
+      const stored = String(data[gymId] || '');
+      res.json({ ok: stored !== '' && stored === String(pin) });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: 'Verification failed' });
+    }
+  });
+
   return router;
 };
