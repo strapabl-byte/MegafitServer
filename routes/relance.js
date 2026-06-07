@@ -276,9 +276,42 @@ module.exports = function createRelanceRouter(deps) {
   // ── GET /api/relance/commercials?gym=XXX ────────────────────────────────
   // Returns the list of assigned commercials for a gym.
   router.get('/commercials', (req, res) => {
-    const gymId = req.query.gym;
-    if (!gymId) return res.status(400).json({ error: 'gym param required' });
-    res.json({ commercials: COMMERCIALS[gymId] || [] });
+    try {
+      const gymId = req.query.gym;
+      if (!gymId) return res.status(400).json({ error: 'gym param required' });
+      
+      const defaults = COMMERCIALS[gymId] || [];
+      const loggedRows = lc.db.prepare(
+        `SELECT DISTINCT commercial FROM relance_calls WHERE gym_id = ?`
+      ).all(gymId);
+      const loggedNames = loggedRows.map(r => r.commercial);
+      
+      const seen = new Set();
+      const merged = [];
+      
+      // Keep order of defaults first
+      for (const name of defaults) {
+        const clean = (name || '').trim().toUpperCase();
+        if (clean && !seen.has(clean)) {
+          seen.add(clean);
+          merged.push(name);
+        }
+      }
+      
+      // Append logged commercials
+      for (const name of loggedNames) {
+        const clean = (name || '').trim().toUpperCase();
+        if (clean && !seen.has(clean)) {
+          seen.add(clean);
+          merged.push(name);
+        }
+      }
+      
+      res.json({ commercials: merged });
+    } catch (err) {
+      console.error('[relance/commercials]', err);
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // ── GET /api/relance/logs?gym=XXX&limit=200 ─────────────────────────────
