@@ -39,7 +39,7 @@ function emailHtml(firstName, memberName, gymName, contractNumber) {
         <!-- Header -->
         <tr>
           <td style="background:#000;padding:28px 32px;text-align:center;">
-            <h1 style="color:#a3ff12;margin:0;font-size:30px;letter-spacing:4px;font-weight:900;">MEGA FIT</h1>
+            <h1 style="color:#a3ff12;margin:0;font-size:30px;letter-spacing:4px;font-weight:900;">MegaFit</h1>
             <p style="color:#94a3b8;margin:6px 0 0;font-size:13px;letter-spacing:1px;">${gymName}</p>
           </td>
         </tr>
