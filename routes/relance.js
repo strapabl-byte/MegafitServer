@@ -383,5 +383,44 @@ module.exports = function createRelanceRouter(deps) {
     }
   });
 
+  // ── PATCH /api/relance/call/:id ─────────────────────────────────────────
+  // Reassign or update any field on an existing call log entry.
+  // Body: { commercial?, called?, feedback?, comment? }
+  router.patch('/call/:id', (req, res) => {
+    try {
+      const { id } = req.params;
+      if (!id) return res.status(400).json({ error: 'id param required' });
+
+      const row = lc.db.prepare(`SELECT id FROM relance_calls WHERE id=?`).get(id);
+      if (!row) return res.status(404).json({ error: 'Call log not found' });
+
+      const { commercial, called, feedback, comment } = req.body;
+      const now = new Date().toISOString();
+
+      const updates = [];
+      const params  = [];
+
+      if (commercial !== undefined) { updates.push('commercial=?');  params.push(commercial); }
+      if (called     !== undefined) { updates.push('called=?');      params.push(called ? 1 : 0); }
+      if (feedback   !== undefined) { updates.push('feedback=?');    params.push(feedback || null); }
+      if (comment    !== undefined) { updates.push('comment=?');     params.push(comment  || null); }
+
+      if (updates.length === 0) return res.status(400).json({ error: 'Nothing to update' });
+
+      updates.push('updated_at=?');
+      params.push(now);
+      params.push(id);
+
+      lc.db.prepare(`UPDATE relance_calls SET ${updates.join(', ')} WHERE id=?`).run(...params);
+
+      res.json({ ok: true, id, updated: Object.fromEntries(
+        updates.slice(0, -1).map((u, i) => [u.split('=')[0].trim(), params[i]])
+      )});
+    } catch (err) {
+      console.error('[relance/call PATCH]', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   return router;
 };
