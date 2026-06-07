@@ -713,46 +713,122 @@ function router(deps = {}) {
   const admin  = deps.admin  || null;
 
   // ── POST /public/scan-cin ─────────────────────────────────────────────────
-  // CIN scanner — uses Groq Vision (fast + cheap for flat text IDs)
+  // CIN scanner — upgraded to OpenAI GPT-4o Vision (better OCR than Groq)
   r.post('/public/scan-cin', express.json({ limit: '10mb' }), async (req, res) => {
     const { image, side = 'recto' } = req.body;
     if (!image || !image.startsWith('data:image')) {
       return res.status(400).json({ error: 'image base64 requis (data:image/...)' });
     }
-    if (!process.env.GROQ_SCAN_API_KEY) {
-      return res.status(500).json({ error: 'GROQ_SCAN_API_KEY non configurée' });
+    const OPENAI_KEY = process.env.OPENAI_API_KEY;
+    if (!OPENAI_KEY) {
+      return res.status(500).json({ error: 'OPENAI_API_KEY non configurée' });
     }
 
-    const rectoPrompt = `You are a form-filling assistant at a gym. Read this Moroccan ID card (CIN) recto and return ONLY valid JSON — no explanation, no markdown:\n{"cin":"ID number (letters+digits, e.g. CD123456)","nom":"family name","prenom":"first name","dateNaissance":"YYYY-MM-DD","lieuNaissance":"place of birth","ville":null,"adresse":null}\nUse null for fields you cannot read.`;
-    const versoPrompt = `You are a form-filling assistant at a gym. Read the back of this Moroccan ID card and return ONLY valid JSON — no explanation, no markdown:\n{"cin":null,"nom":null,"prenom":null,"dateNaissance":null,"lieuNaissance":null,"ville":"city of residence","adresse":"full street address"}\nUse null for fields you cannot read.`;
-
     try {
-      const groqRes = await callGroqVision(image, side === 'recto' ? rectoPrompt : versoPrompt);
-      if (!groqRes.ok) {
-        const errText = await groqRes.text();
-        console.error('[scan-cin] Groq error:', errText);
-        return res.status(502).json({ error: 'Erreur Groq Vision', detail: errText });
+      // Preprocess: auto-rotate + sharpen for best OCR quality
+      const match = image.match(/^data:(image\/\w+);base64,(.+)$/);
+      let processedImage = image;
+      if (match) {
+        try {
+          const inputBuf = Buffer.from(match[2], 'base64');
+          const outBuf = await sharp(inputBuf)
+            .rotate()                        // EXIF auto-rotate
+            .resize(1200, null, { fit: 'inside', withoutEnlargement: true })
+            .normalise()                     // auto-levels
+            .sharpen({ sigma: 1.2, m1: 0.6, m2: 2.5 })
+            .jpeg({ quality: 90 })
+            .toBuffer();
+          processedImage = `data:image/jpeg;base64,${outBuf.toString('base64')}`;
+        } catch (_) { /* fallback to original */ }
       }
-      const data  = await groqRes.json();
+
+      const rectoPrompt = `You are an expert OCR engine for Moroccan national ID cards (CIN — Carte d'Identité Nationale).
+Look at the FRONT (recto) of this Moroccan CIN and extract the data precisely.
+
+Moroccan CIN recto typically contains:
+- CIN number: 1-2 letters + 5-8 digits (e.g. CD123456, BE502892, A123456, T123456)
+- Last name (NOM / الاسم العائلي)
+- First name (PRÉNOM / الاسم الشخصي)
+- Date of birth (DATE DE NAISSANCE / تاريخ الازدياد) in DD/MM/YYYY format
+- Place of birth (LIEU DE NAISSANCE / مكان الازدياد)
+
+Rules:
+- Read BOTH French and Arabic text if one side is unclear
+- CIN number format: 1-2 uppercase letters then digits — correct common OCR errors (0↔O, 1↔l↔I, 5↔S, 8↔B)
+- Names: Title-case (e.g. "El Mansouri", "Ben Ali")
+- Date: output as YYYY-MM-DD
+- If a field is unreadable, return null
+
+Return ONLY this exact JSON, no markdown, no explanation:
+{"cin":"string or null","nom":"family name or null","prenom":"first name or null","dateNaissance":"YYYY-MM-DD or null","lieuNaissance":"string or null","ville":null,"adresse":null}`;
+
+      const versoPrompt = `You are an expert OCR engine for Moroccan national ID cards (CIN).
+Look at the BACK (verso) of this Moroccan CIN and extract the address information.
+
+Moroccan CIN verso typically contains:
+- Address / Adresse (ADRESSE / العنوان)
+- City / Ville (VILLE / المدينة)
+
+Rules:
+- Extract the complete street address including number, street name, neighbourhood
+- Extract the city name (Title-case)
+- If a field is unreadable, return null
+
+Return ONLY this exact JSON, no markdown, no explanation:
+{"cin":null,"nom":null,"prenom":null,"dateNaissance":null,"lieuNaissance":null,"ville":"city or null","adresse":"full address or null"}`;
+
+      const prompt = side === 'recto' ? rectoPrompt : versoPrompt;
+
+      const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${OPENAI_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'gpt-4o',
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: processedImage, detail: 'high' } },
+            ],
+          }],
+          max_tokens: 300,
+          temperature: 0.0,
+        }),
+      });
+
+      if (!openaiRes.ok) {
+        const errText = await openaiRes.text();
+        console.error('[scan-cin] OpenAI error:', errText.slice(0, 300));
+        return res.status(502).json({ error: 'Erreur OpenAI Vision', detail: errText.slice(0, 200) });
+      }
+
+      const data  = await openaiRes.json();
       const text  = data.choices?.[0]?.message?.content || '{}';
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) return res.json({ cin:null, nom:null, prenom:null, dateNaissance:null, lieuNaissance:null, ville:null, adresse:null });
+
       const fields = JSON.parse(jsonMatch[0]);
-      // Normalize date
+      // Normalize date DD/MM/YYYY → YYYY-MM-DD
       if (fields.dateNaissance && !/^\d{4}-\d{2}-\d{2}$/.test(fields.dateNaissance)) {
-        const dm = fields.dateNaissance.match(/(\d{2})[/.\-\\](\d{2})[/.\-\\](\d{4})/);
+        const dm = fields.dateNaissance.match(/(\d{2})[/\.\-\\](\d{2})[/\.\-\\](\d{4})/);
         if (dm) fields.dateNaissance = `${dm[3]}-${dm[2]}-${dm[1]}`;
         else    fields.dateNaissance = null;
       }
+      // Normalize CIN — strip spaces, uppercase
+      if (fields.cin) fields.cin = String(fields.cin).replace(/\s/g, '').toUpperCase();
+      // Title-case names
       const tc = s => s ? s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : null;
-      fields.nom = tc(fields.nom); fields.prenom = tc(fields.prenom); fields.ville = tc(fields.ville);
-      console.log(`[scan-cin] ${side} → ${JSON.stringify(fields)}`);
+      fields.nom    = tc(fields.nom);
+      fields.prenom = tc(fields.prenom);
+      fields.ville  = tc(fields.ville);
+      console.log(`[scan-cin] OpenAI gpt-4o ${side} → ${JSON.stringify(fields)}`);
       return res.json(fields);
     } catch (err) {
       console.error('[scan-cin] Exception:', err);
       return res.status(500).json({ error: err.message });
     }
   });
+
 
   // ── POST /public/scan-contract ─────────────────────────────────────────────
   // Smart multi-crop GPT-4o contract scanner
