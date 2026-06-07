@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 // server.js — Entry point. Mounts routers. Nothing more.
 require('dotenv').config();
 const express   = require('express');
@@ -710,6 +710,8 @@ app.use('/',                require('./routes/config')(deps));      // /public/p
 app.use('/',                require('./routes/activity')(deps));    // /api/activity/logs
 app.use('/',                require('./routes/recruitment')(deps)); // /api/recruitment/applications
 app.use('/',                require('./routes/scan')(deps));          // /public/scan-cin, /public/scan-contract, /public/save-contract-scan, /api/contracts
+app.use('/',                require('./routes/email')(deps));         // /api/send-contract-email, /api/save-member-email
+
 app.use('/',                require('./routes/auralix')(deps));   // /api/auralix/*
 app.use('/',                require('./routes/ai-agent')(deps));   // /api/ai/* AURALIX 24/7 Agent (Firebase token auth)
 
