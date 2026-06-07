@@ -713,7 +713,8 @@ function router(deps = {}) {
   const admin  = deps.admin  || null;
 
   // ── POST /public/scan-cin ─────────────────────────────────────────────────
-  // CIN scanner — upgraded to OpenAI GPT-4o Vision (better OCR than Groq)
+  // CIN scanner — gpt-4o-mini (10× cheaper, great for printed Moroccan CIN)
+  // Token budget per call: ~170 img tokens (800px) + ~50 prompt + ~80 output ≈ 300 total
   r.post('/public/scan-cin', express.json({ limit: '10mb' }), async (req, res) => {
     const { image, side = 'recto' } = req.body;
     if (!image || !image.startsWith('data:image')) {
@@ -725,73 +726,42 @@ function router(deps = {}) {
     }
 
     try {
-      // Preprocess: auto-rotate + sharpen for best OCR quality
-      const match = image.match(/^data:(image\/\w+);base64,(.+)$/);
+      // Resize to 800px max — keeps image to 1-2 vision tiles, EXIF auto-rotate
+      const m = image.match(/^data:(image\/\w+);base64,(.+)$/);
       let processedImage = image;
-      if (match) {
+      if (m) {
         try {
-          const inputBuf = Buffer.from(match[2], 'base64');
-          const outBuf = await sharp(inputBuf)
-            .rotate()                        // EXIF auto-rotate
-            .resize(1200, null, { fit: 'inside', withoutEnlargement: true })
-            .normalise()                     // auto-levels
-            .sharpen({ sigma: 1.2, m1: 0.6, m2: 2.5 })
-            .jpeg({ quality: 90 })
+          const buf = await sharp(Buffer.from(m[2], 'base64'))
+            .rotate()
+            .resize(800, null, { fit: 'inside', withoutEnlargement: true })
+            .jpeg({ quality: 82 })
             .toBuffer();
-          processedImage = `data:image/jpeg;base64,${outBuf.toString('base64')}`;
-        } catch (_) { /* fallback to original */ }
+          processedImage = 'data:image/jpeg;base64,' + buf.toString('base64');
+        } catch (_) { /* use original on error */ }
       }
 
-      const rectoPrompt = `You are an expert OCR engine for Moroccan national ID cards (CIN — Carte d'Identité Nationale).
-Look at the FRONT (recto) of this Moroccan CIN and extract the data precisely.
+      // Recto: CIN number, nom, prénom, date naissance (4 fields only)
+      const rectoPrompt =
+        'Moroccan CIN card front. Return ONLY this JSON (no text, no markdown):\n' +
+        '{"cin":"CD608153","nom":"BELLALA","prenom":"OMAR","dateNaissance":"YYYY-MM-DD","lieuNaissance":"BIR TALEB SIDI KACEM","ville":null,"adresse":null}\n' +
+        'CIN=top-left letters+digits. NOM=family name. PRENOM=first name. Date as YYYY-MM-DD. null if unreadable.';
 
-Moroccan CIN recto typically contains:
-- CIN number: 1-2 letters + 5-8 digits (e.g. CD123456, BE502892, A123456, T123456)
-- Last name (NOM / الاسم العائلي)
-- First name (PRÉNOM / الاسم الشخصي)
-- Date of birth (DATE DE NAISSANCE / تاريخ الازدياد) in DD/MM/YYYY format
-- Place of birth (LIEU DE NAISSANCE / مكان الازدياد)
-
-Rules:
-- Read BOTH French and Arabic text if one side is unclear
-- CIN number format: 1-2 uppercase letters then digits — correct common OCR errors (0↔O, 1↔l↔I, 5↔S, 8↔B)
-- Names: Title-case (e.g. "El Mansouri", "Ben Ali")
-- Date: output as YYYY-MM-DD
-- If a field is unreadable, return null
-
-Return ONLY this exact JSON, no markdown, no explanation:
-{"cin":"string or null","nom":"family name or null","prenom":"first name or null","dateNaissance":"YYYY-MM-DD or null","lieuNaissance":"string or null","ville":null,"adresse":null}`;
-
-      const versoPrompt = `You are an expert OCR engine for Moroccan national ID cards (CIN).
-Look at the BACK (verso) of this Moroccan CIN and extract the address information.
-
-Moroccan CIN verso typically contains:
-- Address / Adresse (ADRESSE / العنوان)
-- City / Ville (VILLE / المدينة)
-
-Rules:
-- Extract the complete street address including number, street name, neighbourhood
-- Extract the city name (Title-case)
-- If a field is unreadable, return null
-
-Return ONLY this exact JSON, no markdown, no explanation:
-{"cin":null,"nom":null,"prenom":null,"dateNaissance":null,"lieuNaissance":null,"ville":"city or null","adresse":"full address or null"}`;
-
-      const prompt = side === 'recto' ? rectoPrompt : versoPrompt;
+      // Verso: address line starting with "Adresse" label + extract city
+      const versoPrompt =
+        'Moroccan CIN card back. Find label "Adresse" then read the full address. Return ONLY this JSON:\n' +
+        '{"cin":null,"nom":null,"prenom":null,"dateNaissance":null,"lieuNaissance":null,"ville":"Barcelone","adresse":"C PI 192 CANOVELLES BARCELONE ESPAGNE"}\n' +
+        'ville=city extracted from address. null if unreadable.';
 
       const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${OPENAI_KEY}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: 'Bearer ' + OPENAI_KEY, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'gpt-4o',
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'text', text: prompt },
-              { type: 'image_url', image_url: { url: processedImage, detail: 'high' } },
-            ],
-          }],
-          max_tokens: 300,
+          model: 'gpt-4o-mini',
+          messages: [{ role: 'user', content: [
+            { type: 'text',      text: side === 'recto' ? rectoPrompt : versoPrompt },
+            { type: 'image_url', image_url: { url: processedImage, detail: 'high' } },
+          ]}],
+          max_tokens:  120,
           temperature: 0.0,
         }),
       });
@@ -802,33 +772,31 @@ Return ONLY this exact JSON, no markdown, no explanation:
         return res.status(502).json({ error: 'Erreur OpenAI Vision', detail: errText.slice(0, 200) });
       }
 
-      const data  = await openaiRes.json();
-      const text  = data.choices?.[0]?.message?.content || '{}';
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) return res.json({ cin:null, nom:null, prenom:null, dateNaissance:null, lieuNaissance:null, ville:null, adresse:null });
+      const apiData  = await openaiRes.json();
+      const rawText  = apiData.choices?.[0]?.message?.content || '{}';
+      const jsonHit  = rawText.match(/\{[\s\S]*\}/);
+      if (!jsonHit) return res.json({ cin:null, nom:null, prenom:null, dateNaissance:null, lieuNaissance:null, ville:null, adresse:null });
 
-      const fields = JSON.parse(jsonMatch[0]);
-      // Normalize date DD/MM/YYYY → YYYY-MM-DD
+      const fields = JSON.parse(jsonHit[0]);
+
+      // Date: DD/MM/YYYY or DD.MM.YYYY → YYYY-MM-DD
       if (fields.dateNaissance && !/^\d{4}-\d{2}-\d{2}$/.test(fields.dateNaissance)) {
-        const dm = fields.dateNaissance.match(/(\d{2})[/\.\-\\](\d{2})[/\.\-\\](\d{4})/);
-        if (dm) fields.dateNaissance = `${dm[3]}-${dm[2]}-${dm[1]}`;
-        else    fields.dateNaissance = null;
+        const d = fields.dateNaissance.match(/(\d{2})[/.\-](\d{2})[/.\-](\d{4})/);
+        fields.dateNaissance = d ? d[3] + '-' + d[2] + '-' + d[1] : null;
       }
-      // Normalize CIN — strip spaces, uppercase
-      if (fields.cin) fields.cin = String(fields.cin).replace(/\s/g, '').toUpperCase();
-      // Title-case names
+      if (fields.cin)    fields.cin    = String(fields.cin).replace(/\s/g, '').toUpperCase();
       const tc = s => s ? s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : null;
       fields.nom    = tc(fields.nom);
       fields.prenom = tc(fields.prenom);
       fields.ville  = tc(fields.ville);
-      console.log(`[scan-cin] OpenAI gpt-4o ${side} → ${JSON.stringify(fields)}`);
+
+      console.log('[scan-cin] gpt-4o-mini', side, JSON.stringify(fields), '| tokens:', apiData.usage?.total_tokens ?? '?');
       return res.json(fields);
     } catch (err) {
       console.error('[scan-cin] Exception:', err);
       return res.status(500).json({ error: err.message });
     }
   });
-
 
   // ── POST /public/scan-contract ─────────────────────────────────────────────
   // Smart multi-crop GPT-4o contract scanner
