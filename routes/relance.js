@@ -168,7 +168,7 @@ module.exports = function createRelanceRouter(deps) {
 
   // ── POST /api/relance/call ───────────────────────────────────────────────
   // Log or update a call record. Upsert by (gymId, listType, memberId/birthdayId).
-  // Body: { gymId, listType, memberId?, birthdayId?, memberName, memberPhone?, commercial, called, feedback?, comment? }
+  // Body: { gymId, listType, memberId?, birthdayId?, memberName, memberPhone?, commercial?, called, feedback?, comment? }
   router.post('/call', (req, res) => {
     try {
       const {
@@ -176,10 +176,13 @@ module.exports = function createRelanceRouter(deps) {
         commercial, called, feedback, comment,
       } = req.body;
 
-      if (!gymId || !listType || !memberName || !commercial) {
-        return res.status(400).json({ error: 'gymId, listType, memberName, commercial required' });
+      // Only gymId and listType are strictly required — commercial & memberName have safe defaults
+      if (!gymId || !listType) {
+        return res.status(400).json({ error: 'gymId and listType required' });
       }
 
+      const effectiveCommercial = commercial || 'Responsable';
+      const effectiveName       = memberName  || 'Inconnu';
       const now = new Date().toISOString();
 
       // Try to find existing record
@@ -199,7 +202,7 @@ module.exports = function createRelanceRouter(deps) {
           `UPDATE relance_calls
            SET called=?, feedback=?, comment=?, call_date=?, commercial=?, updated_at=?
            WHERE id=?`
-        ).run(called ? 1 : 0, feedback || null, comment || null, called ? now.slice(0,10) : null, commercial, now, existing.id);
+        ).run(called ? 1 : 0, feedback || null, comment || null, called ? now.slice(0,10) : null, effectiveCommercial, now, existing.id);
         return res.json({ ok: true, id: existing.id, action: 'updated' });
       }
 
@@ -211,7 +214,7 @@ module.exports = function createRelanceRouter(deps) {
       ).run(
         id, gymId, listType,
         memberId || null, birthdayId || null,
-        memberName, memberPhone || null, commercial,
+        effectiveName, memberPhone || null, effectiveCommercial,
         called ? 1 : 0,
         feedback || null, comment || null,
         called ? now.slice(0,10) : null,
