@@ -123,13 +123,13 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
       if (gymIdsToFetch === null) {
         const snap = await db.collection('pending_members')
           .where('source', '==', 'web')
-          .where('status', 'in', ['pending', 'awaiting_payment'])
+          .where('status', 'in', ['pending', 'awaiting_payment', 'locked'])
           .get();
         allDocs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       } else if (gymIdsToFetch.length === 1) {
         const snap = await db.collection('pending_members')
           .where('source', '==', 'web')
-          .where('status', 'in', ['pending', 'awaiting_payment'])
+          .where('status', 'in', ['pending', 'awaiting_payment', 'locked'])
           .where('gymId', '==', gymIdsToFetch[0])
           .get();
         allDocs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -138,7 +138,7 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
           gymIdsToFetch.map(gid =>
             db.collection('pending_members')
               .where('source', '==', 'web')
-              .where('status', 'in', ['pending', 'awaiting_payment'])
+              .where('status', 'in', ['pending', 'awaiting_payment', 'locked'])
               .where('gymId', '==', gid)
               .get()
           )
@@ -263,6 +263,7 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
         const ins = insDoc.data();
 
         if (ins.status === 'converted') throw new Error('Cette inscription est déjà confirmée.');
+        if (ins.status === 'locked') throw new Error('Cette inscription est suspendue par la direction. Débloquez-la avant de confirmer.');
         if (ins.memberId) throw new Error('Un membre est déjà associé à cette inscription.');
 
         const gymId = ins.gymId || 'dokarat';
@@ -432,8 +433,33 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
     }
   });
 
-  // ── DELETE /api/inscriptions/:id ─────────────────────────────────────────
+  // ── POST /api/inscriptions/:id/lock ──────────────────────────────────────
   const { requireAdmin } = require('../middleware/auth');
+  router.post('/api/inscriptions/:id/lock', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const insRef = db.collection('pending_members').doc(req.params.id);
+      const insDoc = await insRef.get();
+      if (!insDoc.exists) return res.status(404).json({ error: 'Inscription introuvable' });
+
+      const current = insDoc.data();
+      const newStatus = current.status === 'locked' ? 'pending' : 'locked';
+      await insRef.update({
+        status: newStatus,
+        lockedBy: newStatus === 'locked' ? (req.user?.preferred_username || 'Admin') : null,
+        lockedAt: newStatus === 'locked' ? admin.firestore.FieldValue.serverTimestamp() : null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      invalidateCache(apiCache.inscriptions);
+      console.log(`[Lock] Inscription ${req.params.id} → ${newStatus} by ${req.user?.preferred_username || 'Admin'}`);
+      res.json({ ok: true, status: newStatus });
+    } catch (err) {
+      console.error('Lock inscription error:', err);
+      res.status(500).json({ error: 'Failed to lock/unlock inscription' });
+    }
+  });
+
+  // ── DELETE /api/inscriptions/:id ─────────────────────────────────────────
   router.delete('/api/inscriptions/:id', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
       await db.collection('pending_members').doc(req.params.id).delete();
