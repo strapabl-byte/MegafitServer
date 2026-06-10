@@ -657,13 +657,13 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         // Admin, no filter
         const snap = await db.collection('pending_members')
           .where('source', '==', 'web')
-          .where('status', 'in', ['pending', 'awaiting_payment'])
+          .where('status', 'in', ['pending', 'awaiting_payment', 'locked'])
           .get();
         allDocs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       } else if (gymIdsToFetch.length === 1) {
         const snap = await db.collection('pending_members')
           .where('source', '==', 'web')
-          .where('status', 'in', ['pending', 'awaiting_payment'])
+          .where('status', 'in', ['pending', 'awaiting_payment', 'locked'])
           .where('gymId', '==', gymIdsToFetch[0])
           .get();
         allDocs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -673,7 +673,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
           gymIdsToFetch.map(gid =>
             db.collection('pending_members')
               .where('source', '==', 'web')
-              .where('status', 'in', ['pending', 'awaiting_payment'])
+              .where('status', 'in', ['pending', 'awaiting_payment', 'locked'])
               .where('gymId', '==', gid)
               .get()
           )
