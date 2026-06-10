@@ -36,6 +36,58 @@ function uuid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2);
 }
 
+// ── Normalize name for fuzzy comparison ───────────────────────────────────────
+function normName(s) {
+  return (s || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+// ── Active subscriber detection ──────────────────────────────────────────────
+// Cross-references a list of relance entries against members_cache to detect
+// who has already renewed. Matches by BOTH full_name (fuzzy) AND phone.
+// A family can share the same phone number, so phone-only is not enough.
+function enrichWithActiveStatus(db, gymId, entries) {
+  // Load all active members for this gym (non-archived, non-expired)
+  const activeMembers = db.prepare(
+    `SELECT full_name, phone, expires_on FROM members_cache
+     WHERE gym_id = ?
+       AND (is_archive IS NULL OR is_archive = 0)
+       AND expires_on IS NOT NULL AND expires_on >= date('now')`
+  ).all(gymId);
+
+  // Pre-normalize for fast comparison
+  const activeSet = activeMembers.map(m => ({
+    name: normName(m.full_name),
+    phone: (m.phone || '').replace(/\s+/g, '').replace(/^\+212/, '0'),
+    expiresOn: m.expires_on,
+  }));
+
+  return entries.map(e => {
+    const eName = normName(e.full_name || e.member_name || '');
+    const ePhone = (e.phone || e.member_phone || '').replace(/\s+/g, '').replace(/^\+212/, '0');
+
+    // Match: name must match (substring/startsWith) AND phone must match
+    const match = activeSet.find(a => {
+      const nameMatch = eName && a.name && (
+        a.name === eName ||
+        a.name.startsWith(eName) || eName.startsWith(a.name) ||
+        a.name.includes(eName) || eName.includes(a.name)
+      );
+      const phoneMatch = ePhone && a.phone && (
+        a.phone === ePhone ||
+        a.phone.endsWith(ePhone.slice(-8)) && ePhone.length >= 8
+      );
+      // Require BOTH name AND phone to match (families share phone)
+      return nameMatch && phoneMatch;
+    });
+
+    return {
+      ...e,
+      isActiveSubscriber: !!match,
+      activeExpiresOn: match ? match.expiresOn : null,
+    };
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 module.exports = function createRelanceRouter(deps) {
   const { lc } = deps;
@@ -81,7 +133,9 @@ module.exports = function createRelanceRouter(deps) {
         return { ...b, isToday, commercial, script };
       });
 
-      res.json({ birthdays: result, total: result.length });
+      // Enrich with active subscriber detection
+      const enriched = enrichWithActiveStatus(lc.db, gymId, result);
+      res.json({ birthdays: enriched, total: enriched.length });
     } catch (err) {
       console.error('[relance/birthdays]', err);
       res.status(500).json({ error: err.message });
@@ -118,7 +172,9 @@ module.exports = function createRelanceRouter(deps) {
         daysLeft:   Math.ceil((new Date(m.expires_on) - new Date(today)) / 86400000),
       }));
 
-      res.json({ members: result, total: result.length });
+      // Enrich with active subscriber detection
+      const enriched = enrichWithActiveStatus(lc.db, gymId, result);
+      res.json({ members: enriched, total: enriched.length });
     } catch (err) {
       console.error('[relance/expiring]', err);
       res.status(500).json({ error: err.message });
@@ -159,9 +215,55 @@ module.exports = function createRelanceRouter(deps) {
         commercial: m.assigned_commercial || assignCommercial(gymId, m.id),
       }));
 
-      res.json({ members: result, total: result.length });
+      // Enrich with active subscriber detection
+      const enriched = enrichWithActiveStatus(lc.db, gymId, result);
+      res.json({ members: enriched, total: enriched.length });
     } catch (err) {
       console.error('[relance/inactive]', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── GET /api/relance/expired?gym=XXX&days=90 ──────────────────────────────
+  // Members whose subscription has expired within the last N days (default 90).
+  router.get('/expired', (req, res) => {
+    try {
+      const gymId = req.query.gym;
+      const days  = parseInt(req.query.days, 10) || 90;
+
+      if (!gymId) return res.status(400).json({ error: 'gym param required' });
+
+      const today  = new Date().toISOString().slice(0, 10);
+      const cutoff = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+
+      const members = lc.db.prepare(
+        `SELECT mc.*, rc.id as call_id, rc.called, rc.feedback, rc.comment, rc.call_date, rc.commercial as assigned_commercial
+         FROM members_cache mc
+         LEFT JOIN relance_calls rc
+           ON rc.member_id = mc.id AND rc.gym_id = mc.gym_id AND rc.list_type = 'expired'
+         WHERE mc.gym_id = ?
+           AND mc.expires_on IS NOT NULL
+           AND mc.expires_on < ?
+           AND mc.expires_on >= ?
+           AND (mc.is_archive IS NULL OR mc.is_archive = 0)
+         ORDER BY mc.expires_on DESC
+         LIMIT 300`
+      ).all(gymId, today, cutoff);
+
+      const result = members.map(m => {
+        const daysSince = Math.ceil((new Date(today) - new Date(m.expires_on)) / 86400000);
+        return {
+          ...m,
+          commercial: m.assigned_commercial || assignCommercial(gymId, m.id),
+          daysSinceExpiry: daysSince,
+        };
+      });
+
+      // Enrich with active subscriber detection (in case they re-subscribed)
+      const enriched = enrichWithActiveStatus(lc.db, gymId, result);
+      res.json({ members: enriched, total: enriched.length });
+    } catch (err) {
+      console.error('[relance/expired]', err);
       res.status(500).json({ error: err.message });
     }
   });
@@ -337,6 +439,35 @@ module.exports = function createRelanceRouter(deps) {
       res.json({ logs, total: logs.length });
     } catch (err) {
       console.error('[relance/logs]', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── GET /api/relance/history?gym=XXX&limit=200&offset=0 ─────────────────
+  // Completed calls with feedback/comment — for commercial history view.
+  router.get('/history', (req, res) => {
+    try {
+      const gymId  = req.query.gym;
+      const limit  = parseInt(req.query.limit,  10) || 200;
+      const offset = parseInt(req.query.offset, 10) || 0;
+      if (!gymId) return res.status(400).json({ error: 'gym param required' });
+
+      const rows = lc.db.prepare(
+        `SELECT id, gym_id, list_type, member_id, birthday_id, member_name, member_phone,
+                commercial, called, feedback, comment, call_date, created_at, updated_at
+         FROM relance_calls
+         WHERE gym_id = ? AND called = 1
+         ORDER BY updated_at DESC
+         LIMIT ? OFFSET ?`
+      ).all(gymId, limit, offset);
+
+      const totalRow = lc.db.prepare(
+        `SELECT COUNT(*) as n FROM relance_calls WHERE gym_id = ? AND called = 1`
+      ).get(gymId);
+
+      res.json({ history: rows, total: totalRow?.n || 0, limit, offset });
+    } catch (err) {
+      console.error('[relance/history]', err);
       res.status(500).json({ error: err.message });
     }
   });
