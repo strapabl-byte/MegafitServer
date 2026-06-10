@@ -226,29 +226,35 @@ module.exports = function createRelanceRouter(deps) {
 
   // ── GET /api/relance/expired?gym=XXX&days=90 ──────────────────────────────
   // Members whose subscription has expired within the last N days (default 90).
+  // Pass days=0 for ALL expired members (no time limit).
   router.get('/expired', (req, res) => {
     try {
       const gymId = req.query.gym;
-      const days  = parseInt(req.query.days, 10) || 90;
+      const days  = parseInt(req.query.days, 10);
+      const effectiveDays = isNaN(days) ? 90 : days;
 
       if (!gymId) return res.status(400).json({ error: 'gym param required' });
 
       const today  = new Date().toISOString().slice(0, 10);
-      const cutoff = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
 
-      const members = lc.db.prepare(
-        `SELECT mc.*, rc.id as call_id, rc.called, rc.feedback, rc.comment, rc.call_date, rc.commercial as assigned_commercial
+      // Build cutoff: if days=0, show ALL expired (no cutoff filter)
+      const hasCutoff = effectiveDays > 0;
+      const cutoff = hasCutoff ? new Date(Date.now() - effectiveDays * 86400000).toISOString().slice(0, 10) : null;
+
+      const sql = `SELECT mc.*, rc.id as call_id, rc.called, rc.feedback, rc.comment, rc.call_date, rc.commercial as assigned_commercial
          FROM members_cache mc
          LEFT JOIN relance_calls rc
            ON rc.member_id = mc.id AND rc.gym_id = mc.gym_id AND rc.list_type = 'expired'
          WHERE mc.gym_id = ?
            AND mc.expires_on IS NOT NULL
            AND mc.expires_on < ?
-           AND mc.expires_on >= ?
+           ${hasCutoff ? 'AND mc.expires_on >= ?' : ''}
            AND (mc.is_archive IS NULL OR mc.is_archive = 0)
          ORDER BY mc.expires_on DESC
-         LIMIT 300`
-      ).all(gymId, today, cutoff);
+         LIMIT 500`;
+
+      const params = hasCutoff ? [gymId, today, cutoff] : [gymId, today];
+      const members = lc.db.prepare(sql).all(...params);
 
       const result = members.map(m => {
         const daysSince = Math.ceil((new Date(today) - new Date(m.expires_on)) / 86400000);
