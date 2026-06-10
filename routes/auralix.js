@@ -296,7 +296,9 @@ module.exports = function(deps) {
   });
 
   // ── POST /api/auralix/inscriptions/:id/approve ──────────────────────────
-  router.post('/api/auralix/inscriptions/:id/approve', auth, async (req, res) => {
+  // 🔒 SECURED: Azure AD + Admin only — API key is NOT sufficient for write operations
+  const { requireAdmin } = require('../middleware/auth');
+  router.post('/api/auralix/inscriptions/:id/approve', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
       const { action } = req.body; // 'approve' or 'reject'
       const insRef = fsDb.collection('pending_members').doc(req.params.id);
@@ -305,7 +307,7 @@ module.exports = function(deps) {
 
       if (action === 'reject') {
         await insRef.delete();
-        console.log(`[Auralix] ❌ Inscription ${req.params.id} REJECTED by ${req.au?.email}`);
+        console.log(`[Auralix] ❌ Inscription ${req.params.id} REJECTED by ${req.user?.preferred_username}`);
         return res.json({ ok: true, action: 'rejected' });
       }
 
@@ -314,12 +316,12 @@ module.exports = function(deps) {
         status: 'pending',
         lockedBy: null,
         lockedAt: null,
-        approvedBy: req.au?.email || 'Direction',
+        approvedBy: req.user?.preferred_username || 'Direction',
         approvedAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      console.log(`[Auralix] ✅ Inscription ${req.params.id} APPROVED by ${req.au?.email}`);
+      console.log(`[Auralix] ✅ Inscription ${req.params.id} APPROVED by ${req.user?.preferred_username}`);
       res.json({ ok: true, action: 'approved' });
     } catch (e) {
       console.error('[Auralix] Approve error:', e);
