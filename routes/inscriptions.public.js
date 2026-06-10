@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 // routes/inscriptions.public.js
 // Public tablet-facing routes — form submission & member search require NO auth
 // Financial routes:
@@ -308,13 +308,22 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
         const finalNum = nextNum.toString().padStart(6, '0');
         const newDocRef = db.collection('pending_members').doc();
 
+        // 🔒 Auto-lock: 0 DH / free offers require direction approval
+        const totalPaid = Number(safeData.totals?.paid || 0);
+        const totalDue  = Number(safeData.totals?.total || 0);
+        const subName   = (safeData.subscriptionName || '').toLowerCase();
+        const isOffreOrFree = totalDue === 0 || (totalPaid === 0 && totalDue === 0) || subName.includes('offre') || subName.includes('gratuit') || subName.includes('offer');
+        const autoStatus = isOffreOrFree ? 'locked' : 'pending';
+
         // safeData already stripped at top of handler (profilePicture, memberSignature etc. removed)
         t.set(newDocRef, {
           ...safeData,
           contractNumber: finalNum,
           gymId: normalizedGymId,
           source: 'web',
-          status: 'pending',
+          status: autoStatus,
+          lockedBy: isOffreOrFree ? 'AUTO — Offre/0 DH' : null,
+          lockedAt: isOffreOrFree ? admin.firestore.FieldValue.serverTimestamp() : null,
           hasPhoto: !!(profilePicture || data.photoUrl),
           createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
