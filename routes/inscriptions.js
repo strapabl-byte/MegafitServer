@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 // routes/inscriptions.js — public form submissions + admin dashboard management
 
 const { Router } = require('express');
@@ -365,12 +365,21 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         // These are stored safely in SQLite instead (no size limit).
         const { profilePicture, memberSignature, chequePhoto, chequePhotoVerso, ...safeData } = data;
         
+        // 🔒 Auto-lock: 0 DH / free offers require direction approval
+        const totalPaid = Number(safeData.totals?.paid || 0);
+        const totalDue  = Number(safeData.totals?.total || 0);
+        const subName   = (safeData.subscriptionName || '').toLowerCase();
+        const isOffreOrFree = totalDue === 0 || (totalPaid === 0 && totalDue === 0) || subName.includes('offre') || subName.includes('gratuit') || subName.includes('offer');
+        const autoStatus = isOffreOrFree ? 'locked' : 'pending';
+
         t.set(newDocRef, { 
           ...safeData,
           contractNumber: finalNum, 
           gymId: normalizedGymId, 
           source: 'web', 
-          status: 'pending',
+          status: autoStatus,
+          lockedBy: isOffreOrFree ? 'AUTO — Offre/0 DH' : null,
+          lockedAt: isOffreOrFree ? admin.firestore.FieldValue.serverTimestamp() : null,
           hasPhoto: !!(profilePicture || data.photoUrl),
           createdAt: admin.firestore.FieldValue.serverTimestamp() 
         });

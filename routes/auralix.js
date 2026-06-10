@@ -259,13 +259,72 @@ module.exports = function(deps) {
       res.json({ ok: true, id, status: 'rejected' });
     } catch(e) { res.status(500).json({ error: e.message }); }
   });
-
-  // Ping
-  router.get('/api/auralix/ping', (req, res) => {
+  // ── GET /api/auralix/locked-inscriptions ──────────────────────────────────
+  router.get('/api/auralix/locked-inscriptions', auth, async (req, res) => {
     try {
-      const rc = lc.db.prepare('SELECT COUNT(*) as c FROM register_cache').get().c;
-      res.json({ ok: true, register_cache_rows: rc, ts: Date.now() });
-    } catch(e) { res.json({ ok: true, ts: Date.now() }); }
+      const snap = await fsDb.collection('pending_members')
+        .where('source', '==', 'web')
+        .where('status', '==', 'locked')
+        .get();
+
+      const GYM_NAMES = { dokarat: 'Fès Doukkarate', marjane: 'Fès Saïss', casa1: 'Casa Anfa', casa2: 'Casa Lady' };
+
+      const items = snap.docs.map(d => {
+        const data = d.data();
+        return {
+          id: d.id,
+          prenom: data.prenom || '',
+          nom: data.nom || '',
+          telephone: data.telephone || '',
+          gymId: data.gymId || '',
+          gymName: GYM_NAMES[data.gymId] || data.gymId || '',
+          subscriptionName: data.subscriptionName || '',
+          totalDue: data.totals?.total || 0,
+          totalPaid: data.totals?.paid || 0,
+          lockedBy: data.lockedBy || '',
+          contractNumber: data.contractNumber || '',
+          createdAt: data.createdAt?._seconds || 0,
+          pdfUrl: data.pdfUrl || null,
+        };
+      }).sort((a, b) => b.createdAt - a.createdAt);
+
+      res.json(items);
+    } catch (e) {
+      console.error('[Auralix] Locked inscriptions error:', e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── POST /api/auralix/inscriptions/:id/approve ──────────────────────────
+  router.post('/api/auralix/inscriptions/:id/approve', auth, async (req, res) => {
+    try {
+      const { action } = req.body; // 'approve' or 'reject'
+      const insRef = fsDb.collection('pending_members').doc(req.params.id);
+      const insDoc = await insRef.get();
+      if (!insDoc.exists) return res.status(404).json({ error: 'Inscription introuvable' });
+
+      if (action === 'reject') {
+        await insRef.delete();
+        console.log(`[Auralix] ❌ Inscription ${req.params.id} REJECTED by ${req.au?.email}`);
+        return res.json({ ok: true, action: 'rejected' });
+      }
+
+      // Approve = unlock back to pending
+      await insRef.update({
+        status: 'pending',
+        lockedBy: null,
+        lockedAt: null,
+        approvedBy: req.au?.email || 'Direction',
+        approvedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      console.log(`[Auralix] ✅ Inscription ${req.params.id} APPROVED by ${req.au?.email}`);
+      res.json({ ok: true, action: 'approved' });
+    } catch (e) {
+      console.error('[Auralix] Approve error:', e);
+      res.status(500).json({ error: e.message });
+    }
   });
 
   return router;
