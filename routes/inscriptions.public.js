@@ -560,5 +560,152 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
     }
   });
 
+  // ── POST /public/decaissement ─────────────────────────────────────────────
+  // Tablet-facing: Manager scans QR → submits a décaissement request.
+  // Token validated against Firestore `managerTokens` collection.
+  // Photo proof is REQUIRED for non-salary types.
+  // All décaissements created as 'pending' → Direction approves in Auralix.
+  router.post('/public/decaissement', async (req, res) => {
+    try {
+      const {
+        managerToken, gymId: rawGymId,
+        montant, raison, categorie, beneficiaire,
+        proofPhoto, managerSignature, managerName: clientManagerName
+      } = req.body;
+
+      // ── 1. Validate inputs ────────────────────────────────────────────────
+      const gymId = (rawGymId || '').toLowerCase().trim();
+      if (!VALID_GYMS.includes(gymId)) {
+        return res.status(400).json({ error: 'Identifiant de salle invalide', received: rawGymId });
+      }
+      if (!managerToken) return res.status(401).json({ error: 'Token manager requis' });
+      if (!montant || Number(montant) <= 0) return res.status(400).json({ error: 'Montant invalide' });
+      if (!raison || !raison.trim()) return res.status(400).json({ error: 'Raison requise' });
+      if (!categorie) return res.status(400).json({ error: 'Catégorie requise' });
+      if (!beneficiaire || !beneficiaire.trim()) return res.status(400).json({ error: 'Bénéficiaire requis' });
+
+      // Photo proof required for non-salary types
+      const SALARY_TYPES = ['salaire'];
+      const requiresProof = !SALARY_TYPES.includes((categorie || '').toLowerCase());
+      if (requiresProof && !proofPhoto) {
+        return res.status(400).json({ error: 'Photo justificative requise pour ce type de décaissement' });
+      }
+
+      // ── 2. Validate manager token against Firestore ───────────────────────
+      // managerTokens lives in the 'door' Firebase project (megadoor-b3ccb)
+      // but our server uses the main Firebase project. We store managerTokens
+      // in the main project's Firestore for simplicity.
+      const tokenDoc = await db.collection('managerTokens').doc(managerToken).get();
+      if (!tokenDoc.exists) {
+        console.warn(`[Décaissement] ❌ Invalid manager token: ${managerToken}`);
+        return res.status(401).json({ error: 'Token manager invalide ou expiré' });
+      }
+
+      const tokenData = tokenDoc.data();
+      if (tokenData.isActive === false) {
+        return res.status(401).json({ error: 'Token manager révoqué' });
+      }
+      if (tokenData.expiresAt) {
+        const expiryDate = tokenData.expiresAt.toDate ? tokenData.expiresAt.toDate() : new Date(tokenData.expiresAt);
+        if (expiryDate < new Date()) {
+          return res.status(401).json({ error: 'Token manager expiré' });
+        }
+      }
+      if (tokenData.gymId && tokenData.gymId !== gymId) {
+        return res.status(403).json({ error: 'Ce token n\'est pas autorisé pour cette salle' });
+      }
+
+      const verifiedManagerName = tokenData.managerName || clientManagerName || 'Manager';
+
+      // Update lastUsedAt on the token
+      try {
+        await db.collection('managerTokens').doc(managerToken).update({
+          lastUsedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+      } catch (_) {}
+
+      // ── 3. Upload proof photo & signature to Storage ──────────────────────
+      const ts = Date.now();
+      let proofUrl = null, signatureUrl = null;
+      if (proofPhoto) {
+        proofUrl = await uploadBase64ToStorage(
+          proofPhoto, `decaissements/${gymId}/${ts}_proof.jpg`
+        );
+      }
+      if (managerSignature) {
+        signatureUrl = await uploadBase64ToStorage(
+          managerSignature, `decaissements/${gymId}/${ts}_signature.png`
+        );
+      }
+
+      // ── 4. Create décaissement in Firestore + SQLite ──────────────────────
+      const today = new Date().toISOString().slice(0, 10);
+      const docId = `${gymId}_${today}`;
+      const payload = {
+        montant: Number(montant),
+        raison: raison.trim(),
+        categorie: categorie,
+        beneficiaire: beneficiaire.trim(),
+        proofPhoto: proofUrl,
+        signature: signatureUrl,
+        location: gymId,
+        status: 'pending',
+        source: 'tablet_qr',
+        requestedBy: verifiedManagerName,
+        managerTokenId: managerToken,
+        approvedBy: null,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdBy: verifiedManagerName,
+      };
+
+      const ref = await db.collection('megafit_daily_register').doc(docId)
+        .collection('decaissements').add(payload);
+      await db.collection('megafit_daily_register').doc(docId).set(
+        { gymId, date: today, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
+        { merge: true }
+      );
+
+      // Cache in SQLite
+      const newDoc = await ref.get();
+      lc.upsertDecaissements(gymId, today, [{ id: ref.id, ...newDoc.data() }]);
+
+      console.log(`✅ [Décaissement/Tablet] ${verifiedManagerName} | ${Number(montant)} DH | ${categorie} | ${raison.trim()} | ${gymId}`);
+      res.json({ ok: true, id: ref.id, status: 'pending' });
+
+    } catch (err) {
+      console.error('❌ [PUBLIC DECAISSEMENT ERROR]:', err);
+      res.status(500).json({ error: 'Échec de la soumission du décaissement', detail: err.message });
+    }
+  });
+
+  // ── POST /public/validate-manager-token ───────────────────────────────────
+  // Quick validation: tablet checks if token is valid before showing the form
+  router.post('/public/validate-manager-token', async (req, res) => {
+    try {
+      const { token } = req.body;
+      if (!token) return res.json({ valid: false });
+
+      const doc = await db.collection('managerTokens').doc(token).get();
+      if (!doc.exists) return res.json({ valid: false });
+
+      const data = doc.data();
+      if (data.isActive === false) return res.json({ valid: false, reason: 'revoked' });
+
+      if (data.expiresAt) {
+        const exp = data.expiresAt.toDate ? data.expiresAt.toDate() : new Date(data.expiresAt);
+        if (exp < new Date()) return res.json({ valid: false, reason: 'expired' });
+      }
+
+      res.json({
+        valid: true,
+        managerName: data.managerName || 'Manager',
+        gymId: data.gymId || null,
+      });
+    } catch (err) {
+      console.error('[Validate Manager Token] Error:', err);
+      res.json({ valid: false });
+    }
+  });
+
   return router;
 };

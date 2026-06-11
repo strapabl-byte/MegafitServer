@@ -468,5 +468,32 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
     } catch (err) { res.status(500).json({ error: 'Failed to delete inscription' }); }
   });
 
+
+  // ── POST /api/manager-tokens ────────────────────────────────────────────
+  // Sync manager token from dashboard (Door Firestore) to main Firestore
+  // so the server can validate manager QR codes on the inscription tablet.
+  router.post('/api/manager-tokens', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const { id, managerName, gymId, isActive, expiresAt, role, createdBy } = req.body;
+      if (!id || !managerName || !gymId) {
+        return res.status(400).json({ error: 'id, managerName, gymId required' });
+      }
+      await db.collection('managerTokens').doc(id).set({
+        managerName,
+        gymId,
+        isActive: isActive !== false,
+        expiresAt: expiresAt ? new Date(expiresAt) : null,
+        role: role || 'manager',
+        createdBy: createdBy || req.user?.preferred_username || 'admin',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      console.log(`[ManagerToken] ✅ Synced: ${managerName} → ${gymId} (${id})`);
+      res.json({ ok: true, id });
+    } catch (err) {
+      console.error('[ManagerToken] Error:', err);
+      res.status(500).json({ error: 'Failed to sync manager token' });
+    }
+  });
+
   return router;
 };
