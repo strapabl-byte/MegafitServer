@@ -1,4 +1,4 @@
-﻿// localCache.js — SQLite-backed local cache for Megafit
+// localCache.js — SQLite-backed local cache for Megafit
 // Stores entries, members, payments, daily stats per gym_id
 // Eliminates Firestore reads for all display data → protects Firebase quota
 'use strict';
@@ -310,6 +310,11 @@ try { db.exec(`
 try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN status TEXT DEFAULT 'approved';"); } catch (e) {}
 try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN requested_by TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN approved_by TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN proof_photo TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN source TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN categorie TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN beneficiaire TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE decaissements_cache ADD COLUMN created_by TEXT;"); } catch (e) {}
 try { db.exec("ALTER TABLE push_notifications_history ADD COLUMN recipients_json TEXT;"); } catch (e) {}
 
 // ── ReSubIntelligence Cache — persists AI+fuzzy verdicts to avoid re-running Groq ──
@@ -704,9 +709,9 @@ function deleteRegisterEntry(gymId, date, entryId) {
 
 const insertDecaissement = db.prepare(`
   INSERT OR REPLACE INTO decaissements_cache 
-    (id, gym_id, date, montant, raison, commercial, signature, status, requested_by, approved_by, created_at, synced_at)
+    (id, gym_id, date, montant, raison, commercial, signature, status, requested_by, approved_by, proof_photo, source, categorie, beneficiaire, created_by, created_at, synced_at)
   VALUES 
-    (@id, @gym_id, @date, @montant, @raison, @commercial, @signature, @status, @requested_by, @approved_by, @created_at, @synced_at)
+    (@id, @gym_id, @date, @montant, @raison, @commercial, @signature, @status, @requested_by, @approved_by, @proof_photo, @source, @categorie, @beneficiaire, @created_by, @created_at, @synced_at)
 `);
 
 function upsertDecaissements(gymId, date, decsArr) {
@@ -723,8 +728,13 @@ function upsertDecaissements(gymId, date, decsArr) {
     commercial:   d.commercial || '',
     signature:    d.signature || '',
     status:       d.status || 'approved',
-    requested_by: d.requestedBy || null,
-    approved_by:  d.approvedBy || null,
+    requested_by: d.requestedBy || d.requested_by || null,
+    approved_by:  d.approvedBy || d.approved_by || null,
+    proof_photo:  d.proofPhoto || d.proof_photo || null,
+    source:       d.source || null,
+    categorie:    d.categorie || null,
+    beneficiaire: d.beneficiaire || null,
+    created_by:   d.createdBy || d.created_by || null,
     created_at: typeof d.createdAt === 'string' ? d.createdAt : 
                typeof d.created_at === 'string' ? d.created_at :
                (d.createdAt && typeof d.createdAt.toDate === 'function') ? d.createdAt.toDate().toISOString() :
