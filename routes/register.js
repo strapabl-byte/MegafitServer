@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 // routes/register.js — Daily Register (Registre Journalier) + Calendar
 
 const { Router } = require('express');
@@ -49,7 +49,7 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
 
         console.log(`⚡ [SQLITE HIT] ${cached.length} register entries for ${date}`);
         entries = cached.map(e => ({ ...e, createdAt: e.created_at }));
-        decaissements = cachedDec.map(d => ({ ...d, createdAt: d.created_at }));
+        decaissements = cachedDec.map(d => ({ ...d, createdAt: d.created_at, requestedBy: d.requested_by, approvedBy: d.approved_by, proofPhoto: d.proof_photo, createdBy: d.created_by }));
       } else {
         if (isCorrupt) console.warn(`🩹 [SELF-HEAL] Detected missing names in SQLite for ${date}. Re-syncing from Firestore...`);
         
