@@ -591,33 +591,37 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
         return res.status(400).json({ error: 'Photo justificative requise pour ce type de décaissement' });
       }
 
-      // ── 2. Validate manager token against Firestore ───────────────────────
-      // managerTokens lives in the 'door' Firebase project (megadoor-b3ccb)
-      // but our server uses the main Firebase project. We store managerTokens
-      // in the main project's Firestore for simplicity.
-      const tokenDoc = await db.collection('managerTokens').doc(managerToken).get();
-      if (!tokenDoc.exists) {
+      // ── 2. Validate manager token against Door Firestore (megadoor-b3ccb) ──
+      const DOOR_PROJECT = 'megadoor-b3ccb';
+      const tokenUrl = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT}/databases/(default)/documents/managerTokens/${managerToken}`;
+      const tokenResp = await fetch(tokenUrl);
+      if (!tokenResp.ok) {
         console.warn(`[Décaissement] ❌ Invalid manager token: ${managerToken}`);
         return res.status(401).json({ error: 'Token manager invalide ou expiré' });
       }
+      const tokenJson = await tokenResp.json();
+      if (!tokenJson.fields) {
+        return res.status(401).json({ error: 'Token manager invalide' });
+      }
 
-      const tokenData = tokenDoc.data();
-      if (tokenData.isActive === false) {
+      const tokenFields = tokenJson.fields;
+      if (tokenFields.isActive?.booleanValue === false) {
         return res.status(401).json({ error: 'Token manager révoqué' });
       }
-      if (tokenData.expiresAt) {
-        const expiryDate = tokenData.expiresAt.toDate ? tokenData.expiresAt.toDate() : new Date(tokenData.expiresAt);
+      if (tokenFields.expiresAt?.timestampValue) {
+        const expiryDate = new Date(tokenFields.expiresAt.timestampValue);
         if (expiryDate < new Date()) {
           return res.status(401).json({ error: 'Token manager expiré' });
         }
       }
-      if (tokenData.gymId && tokenData.gymId !== gymId) {
+      const tokenGymId = tokenFields.gymId?.stringValue;
+      if (tokenGymId && tokenGymId !== gymId) {
         return res.status(403).json({ error: 'Ce token n\'est pas autorisé pour cette salle' });
       }
 
-      const verifiedManagerName = tokenData.managerName || clientManagerName || 'Manager';
+      const verifiedManagerName = tokenFields.managerName?.stringValue || clientManagerName || 'Manager';
 
-      // Update lastUsedAt on the token
+      // Update lastUsedAt on the token (best effort, non-blocking)
       try {
         await db.collection('managerTokens').doc(managerToken).update({
           lastUsedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -679,27 +683,38 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
   });
 
   // ── POST /public/validate-manager-token ───────────────────────────────────
-  // Quick validation: tablet checks if token is valid before showing the form
+  // Quick validation: tablet checks if token is valid before showing the form.
+  // Reads from Door Firestore (megadoor-b3ccb) where the dashboard writes tokens.
+  // Door Firestore has public read rules, so no service account needed.
   router.post('/public/validate-manager-token', async (req, res) => {
     try {
       const { token } = req.body;
       if (!token) return res.json({ valid: false });
 
-      const doc = await db.collection('managerTokens').doc(token).get();
-      if (!doc.exists) return res.json({ valid: false });
+      // Read from Door Firestore via REST API (public read)
+      const DOOR_PROJECT = 'megadoor-b3ccb';
+      const url = `https://firestore.googleapis.com/v1/projects/${DOOR_PROJECT}/databases/(default)/documents/managerTokens/${token}`;
+      const resp = await fetch(url);
 
-      const data = doc.data();
-      if (data.isActive === false) return res.json({ valid: false, reason: 'revoked' });
+      if (!resp.ok) return res.json({ valid: false });
 
-      if (data.expiresAt) {
-        const exp = data.expiresAt.toDate ? data.expiresAt.toDate() : new Date(data.expiresAt);
+      const doc = await resp.json();
+      if (!doc.fields) return res.json({ valid: false });
+
+      const fields = doc.fields;
+      const isActive = fields.isActive?.booleanValue;
+      if (isActive === false) return res.json({ valid: false, reason: 'revoked' });
+
+      // Check expiry
+      if (fields.expiresAt?.timestampValue) {
+        const exp = new Date(fields.expiresAt.timestampValue);
         if (exp < new Date()) return res.json({ valid: false, reason: 'expired' });
       }
 
       res.json({
         valid: true,
-        managerName: data.managerName || 'Manager',
-        gymId: data.gymId || null,
+        managerName: fields.managerName?.stringValue || 'Manager',
+        gymId: fields.gymId?.stringValue || null,
       });
     } catch (err) {
       console.error('[Validate Manager Token] Error:', err);
