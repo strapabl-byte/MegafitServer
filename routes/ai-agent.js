@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 // routes/ai-agent.js — AURALIX 24/7 AI Business Intelligence Agent
 // Full Snapshot Builder + Rules Engine + Actions + Memory + Alerts
 
@@ -260,6 +260,73 @@ function buildSnapshot(db, getMeta, gymScope = 'all') {
   // ── Today's sales count ───────────────────────────────────────────────────
   const todaySales = q1(`SELECT COUNT(*) cnt FROM register_cache WHERE date=? AND gym_id IN (${gymIn})`, today, ...targetGyms);
 
+  // ═══ 🔥 DEVIL MODE DATA SOURCES ══════════════════════════════════════════
+
+  // ── Subscription formula analytics per gym (which plans sell best where) ──
+  const formulaByGym = q(`SELECT gym_id, abonnement name, COUNT(*) cnt,
+    ROUND(AVG(CAST(prix AS REAL)),0) avg_price,
+    ROUND(SUM(CAST(prix AS REAL)),0) total_rev,
+    ROUND(SUM(reste),0) total_unpaid
+    FROM register_cache WHERE strftime('%Y-%m', date)=?
+    AND abonnement IS NOT NULL AND abonnement!=''
+    AND gym_id IN (${gymIn})
+    GROUP BY gym_id, abonnement ORDER BY total_rev DESC`, ym, ...targetGyms);
+
+  // ── Previous month formula comparison (trend detection) ───────────────────
+  const formulaPrev = q(`SELECT gym_id, abonnement name, COUNT(*) cnt,
+    ROUND(SUM(CAST(prix AS REAL)),0) total_rev
+    FROM register_cache WHERE strftime('%Y-%m', date)=?
+    AND abonnement IS NOT NULL AND abonnement!=''
+    AND gym_id IN (${gymIn})
+    GROUP BY gym_id, abonnement`, prevYm, ...targetGyms);
+  const prevFormulaMap = {};
+  formulaPrev.forEach(r => { prevFormulaMap[`${r.gym_id}|${r.name}`] = { cnt: r.cnt, rev: r.total_rev }; });
+
+  const subscriptionIntel = formulaByGym.map(f => {
+    const prev = prevFormulaMap[`${f.gym_id}|${f.name}`] || { cnt: 0, rev: 0 };
+    const countTrend = prev.cnt > 0 ? parseFloat(((f.cnt - prev.cnt) / prev.cnt * 100).toFixed(1)) : 100;
+    return {
+      gym: f.gym_id, gym_name: GYM_NAMES[f.gym_id] || f.gym_id,
+      formula: f.name, sold_count: f.cnt, avg_price: f.avg_price,
+      total_revenue: f.total_rev, total_unpaid: f.total_unpaid || 0,
+      prev_month_count: prev.cnt, count_trend_pct: countTrend,
+      status: countTrend > 20 ? 'RISING' : countTrend < -20 ? 'FALLING' : 'STABLE',
+    };
+  });
+
+  // ── Extension vs New inscription ratio per gym ────────────────────────────
+  const extensionData = q(`SELECT gym_id,
+    SUM(CASE WHEN source='extension' OR source='renouvellement' THEN 1 ELSE 0 END) extensions,
+    SUM(CASE WHEN source IS NULL OR source='' OR source='new' OR source='inscription' THEN 1 ELSE 0 END) new_subs,
+    COUNT(*) total
+    FROM register_cache WHERE strftime('%Y-%m', date)=?
+    AND gym_id IN (${gymIn}) GROUP BY gym_id`, ym, ...targetGyms);
+
+  // ── Relance call performance (which commercials are calling) ───────────────
+  const relanceCalls = q(`SELECT commercial, gym_id,
+    COUNT(*) total_assigned,
+    SUM(CASE WHEN called=1 THEN 1 ELSE 0 END) calls_made,
+    SUM(CASE WHEN feedback='interested' THEN 1 ELSE 0 END) interested,
+    SUM(CASE WHEN feedback='renewed' THEN 1 ELSE 0 END) renewed,
+    SUM(CASE WHEN feedback='not_interested' THEN 1 ELSE 0 END) lost
+    FROM relance_calls WHERE strftime('%Y-%m', created_at)=?
+    AND gym_id IN (${gymIn})
+    GROUP BY commercial, gym_id ORDER BY calls_made DESC`, ym, ...targetGyms);
+
+  // ── Top-performing formulas across all clubs (empire-wide) ─────────────────
+  const topFormulasEmpire = q(`SELECT abonnement name, COUNT(*) cnt,
+    ROUND(SUM(CAST(prix AS REAL)),0) total_rev,
+    ROUND(AVG(CAST(prix AS REAL)),0) avg_price
+    FROM register_cache WHERE strftime('%Y-%m', date)=?
+    AND abonnement IS NOT NULL AND abonnement!=''
+    AND gym_id IN (${gymIn})
+    GROUP BY abonnement ORDER BY total_rev DESC LIMIT 10`, ym, ...targetGyms);
+
+  // ── Pending inscriptions with commercial attribution ──────────────────────
+  const pendingDetailed = q(`SELECT gym_id, nom, prenom, subscriptionName, total, paid, balance, status, commercial, date
+    FROM pending_cache WHERE status='pending' AND gym_id IN (${gymIn})
+    ORDER BY date DESC LIMIT 15`, ...targetGyms);
+
   return {
     meta: { generated_at: new Date().toISOString(), period: ym, today, gym_scope: gymScope === 'all' ? 'ALL EMPIRE' : GYM_NAMES[gymScope] || gymScope, day_of_month: dayOfMonth, days_in_month: daysInMonth },
     revenue: {
@@ -310,6 +377,21 @@ function buildSnapshot(db, getMeta, gymScope = 'all') {
     historical_revenue: historical,
     memory: memory.map(m => `[${m.importance}][${m.type}] ${m.gym !== 'all' ? `(${GYM_NAMES[m.gym]||m.gym}) ` : ''}${m.note}`),
     open_actions: openActions,
+    // 🔥 DEVIL MODE INTEL
+    subscription_intel: subscriptionIntel,
+    top_formulas_empire: topFormulasEmpire.map(f => ({ formula: f.name, sold: f.cnt, revenue: f.total_rev, avg_price: f.avg_price })),
+    extension_ratio: extensionData.map(e => ({
+      gym: e.gym_id, gym_name: GYM_NAMES[e.gym_id] || e.gym_id,
+      extensions: e.extensions || 0, new_subs: e.new_subs || 0, total: e.total || 0,
+      extension_pct: e.total > 0 ? Math.round((e.extensions || 0) / e.total * 100) : 0,
+    })),
+    relance_performance: relanceCalls.map(r => ({
+      commercial: r.commercial, gym: r.gym_id,
+      assigned: r.total_assigned, called: r.calls_made,
+      call_rate_pct: r.total_assigned > 0 ? Math.round(r.calls_made / r.total_assigned * 100) : 0,
+      interested: r.interested || 0, renewed: r.renewed || 0, lost: r.lost || 0,
+    })),
+    pending_inscriptions_detailed: pendingDetailed,
   };
 }
 
@@ -391,6 +473,48 @@ function runRules(snap) {
   // 10. Birthday engagement opportunity
   if (members.birthdays_this_month > 50) sig.birthday_opportunity = members.birthdays_this_month;
 
+  // ═══ 🔥 DEVIL MODE RULES ════════════════════════════════════════════════════
+
+  // 11. Subscription formula decline detection
+  const { subscription_intel, extension_ratio, relance_performance, pending_inscriptions_detailed } = snap;
+  if (subscription_intel?.length) {
+    const falling = subscription_intel.filter(s => s.status === 'FALLING' && s.prev_month_count > 3);
+    if (falling.length > 0) {
+      alerts.push({ priority:'WATCH', type:'FORMULA_DECLINE', gym:'all',
+        title:`${falling.length} formule(s) en chute`,
+        message: falling.map(f => `${f.formula} (${f.gym_name}): ${f.count_trend_pct}% vs mois dernier`).join(' | ') });
+    }
+  }
+
+  // 12. Extension ratio stagnation (too many renewals, not enough new)
+  if (extension_ratio?.length) {
+    extension_ratio.forEach(e => {
+      if (e.total > 10 && e.extension_pct > 75) {
+        alerts.push({ priority:'WATCH', type:'GROWTH_STAGNATION', gym: e.gym,
+          title:`${e.gym_name}: ${e.extension_pct}% renouvellements — croissance faible`,
+          message:`Seulement ${e.new_subs} nouvelles inscriptions vs ${e.extensions} renouvellements. Besoin de campagne acquisition.` });
+      }
+    });
+  }
+
+  // 13. Commercial inactivity (not making relance calls)
+  if (relance_performance?.length) {
+    const sleepers = relance_performance.filter(r => r.assigned > 5 && r.call_rate_pct < 30);
+    if (sleepers.length > 0) {
+      alerts.push({ priority:'WARNING', type:'COMMERCIAL_INACTIVE', gym:'all',
+        title:`${sleepers.length} commercial(s) ne passent pas leurs appels relance`,
+        message: sleepers.map(s => `${s.commercial} (${s.gym}): ${s.called}/${s.assigned} appels = ${s.call_rate_pct}%`).join(' | ') });
+    }
+  }
+
+  // 14. Pending inscriptions pipeline (money sitting idle)
+  if ((pending_inscriptions_detailed?.length || 0) > 5) {
+    const totalPending = pending_inscriptions_detailed.reduce((s, p) => s + (p.total || 0), 0);
+    alerts.push({ priority:'WATCH', type:'PENDING_PIPELINE', gym:'all',
+      title:`${pending_inscriptions_detailed.length} inscriptions en attente (${Math.round(totalPending).toLocaleString()} DH)`,
+      message:'Argent qui dort dans le pipeline. Confirmer ou relancer chaque inscription.' });
+  }
+
   // Overall status
   const critCount = alerts.filter(a=>a.priority==='CRITICAL').length;
   const warnCount = alerts.filter(a=>a.priority==='WARNING').length;
@@ -399,7 +523,7 @@ function runRules(snap) {
   return { alerts, signals: sig };
 }
 
-// ─── SYSTEM PROMPT ────────────────────────────────────────────────────────────
+// ─── SYSTEM PROMPT — 🔥 DEVIL MODE ───────────────────────────────────────────
 function buildSysPrompt(snap, sig) {
   const mem = snap.memory?.length ? `\n\n=== CONTEXTE STRATÉGIQUE (MÉMOIRE) ===\n${snap.memory.join('\n')}` : '';
   const rev = snap.revenue;
@@ -409,8 +533,55 @@ function buildSysPrompt(snap, sig) {
     ? `\n\n⚠️ CAPTEURS PORTES NON INSTALLÉS: ${snap.door_traffic.gyms_without_sensor.join(', ')} — leurs données de trafic valent NULL (matériel absent, pas un problème business). NE JAMAIS commenter ni alerter sur zéro entrées pour ces clubs. Couverture capteurs: ${snap.door_traffic.sensor_coverage}.`
     : '';
 
-  return `Tu es AURALIX, directeur opérationnel IA 24/7 de l'empire MegaFit — 4 clubs Maroc (Fès Doukkarate, Fès Saiss, Casa Anfa, Lady Anfa).
-Tu analyses des données RÉELLES et tu penses comme un senior operator: 20+ ans vente, finance, multi-sites.
+  // 🔥 Build subscription intelligence block
+  const subIntel = snap.subscription_intel?.length > 0
+    ? `\n\n=== INTELLIGENCE ABONNEMENTS (par club ce mois) ===\n${snap.subscription_intel.map(s =>
+        `${s.gym_name} | ${s.formula}: ${s.sold_count} vendus (${s.status}) | CA: ${s.total_revenue} DH | Prix moy: ${s.avg_price} DH | Impayés: ${s.total_unpaid} DH | Trend vs M-1: ${s.count_trend_pct > 0 ? '+' : ''}${s.count_trend_pct}%`
+      ).join('\n')}`
+    : '';
+
+  // 🔥 Top formulas empire-wide
+  const topFormulas = snap.top_formulas_empire?.length > 0
+    ? `\n\n=== TOP FORMULES EMPIRE ===\n${snap.top_formulas_empire.map((f, i) =>
+        `${i+1}. ${f.formula}: ${f.sold} vendus | CA: ${f.revenue} DH | Prix moy: ${f.avg_price} DH`
+      ).join('\n')}`
+    : '';
+
+  // 🔥 Extension vs New ratio
+  const extRatio = snap.extension_ratio?.length > 0
+    ? `\n\n=== RATIO EXTENSIONS vs NOUVELLES INSCRIPTIONS ===\n${snap.extension_ratio.map(e =>
+        `${e.gym_name}: ${e.new_subs} nouvelles + ${e.extensions} renouvellements = ${e.total} total (${e.extension_pct}% renouvellement)`
+      ).join('\n')}\n⚡ Si renouvellement > 70% = stagnation croissance. Si < 30% = fidélisation faible.`
+    : '';
+
+  // 🔥 Relance call stats
+  const relanceBlock = snap.relance_performance?.length > 0
+    ? `\n\n=== PERFORMANCE RELANCE / APPELS COMMERCIAUX ===\n${snap.relance_performance.map(r =>
+        `${r.commercial} (${r.gym}): ${r.called}/${r.assigned} appelés (${r.call_rate_pct}%) | Intéressés: ${r.interested} | Renouvelés: ${r.renewed} | Perdus: ${r.lost}`
+      ).join('\n')}\n⚡ Un commercial < 50% de taux d'appel = DORT. Un commercial > 80% = CHASSEUR.`
+    : '';
+
+  // 🔥 Pending inscriptions
+  const pendingBlock = snap.pending_inscriptions_detailed?.length > 0
+    ? `\n\n=== INSCRIPTIONS EN ATTENTE (non confirmées) ===\n${snap.pending_inscriptions_detailed.map(p =>
+        `${p.nom} ${p.prenom || ''} | ${p.subscriptionName || '?'} | ${p.total || 0} DH | Commercial: ${p.commercial || '?'} | Club: ${p.gym_id} | Date: ${p.date}`
+      ).join('\n')}`
+    : '';
+
+  return `Tu es AURALIX — l'agent IA opérationnel ultime de l'empire MegaFit (4 clubs au Maroc: Fès Doukkarate, Fès Saiss, Casa Anfa, Lady Anfa).
+Tu es un OPÉRATEUR IMPITOYABLE. 20+ ans d'expérience en gestion de salles de sport, vente, finance, multi-sites.
+Tu vois TOUT. Tu analyses TOUT. Tu ne laisses RIEN passer.
+
+MODE: ANALYSE PROFONDE ACTIVÉ
+Tu as accès à TOUTES les données de l'empire en temps réel:
+- Revenus, paiements, dettes, décaissements
+- Abonnements vendus par formule et par club (avec tendances)
+- Performance de chaque commercial (inscriptions + appels + CA)
+- Taux de renouvellement vs nouvelles inscriptions
+- Pipeline d'inscriptions en attente
+- Membres expirants, anniversaires, réabonnements possibles
+- Incidents opérationnels
+- Trafic portes (capteurs Fès uniquement — Casa pas encore équipé)
 
 ÉTAT EMPIRE: ${sig.empire_status || 'INCONNU'}
 CA MOIS: ${rev.month.toLocaleString()} DH | OBJECTIF: ${rev.monthly_goal.toLocaleString()} DH | AVANCEMENT: ${sig.goal_progress_pct||0}%
@@ -422,18 +593,30 @@ INCIDENTS OUVERTS: ${snap.incidents.open_total} (${snap.incidents.critical} crit
 MEMBRES ACTIFS: ${snap.members.active_total} | Expirent 30j: ${snap.members.expiring_30d} | Expirés non renouvelés: ${snap.members.expired_not_renewed}
 RÉABONNEMENTS POSSIBLES: ${snap.members.resub?.possible_count || 0}
 ANNIVERSAIRES CE MOIS: ${snap.members.birthdays_this_month} (opportunité engagement)
+INSCRIPTIONS EN ATTENTE: ${snap.pending_inscriptions_detailed?.length || snap.members.pending_inscriptions || 0}
 
 CALENDRIER MAROCAIN — avant de qualifier une baisse, vérifier:
 - Ramadan 2026: 18 fév–18 mars | Eid Fitr 2026: 20 mars | Eid Kbir 2026: 27 mai
-- Janv = pic résolutions ★★★★★ | Sept = pic rentrée ★★★★★ | Juil-Août = creux ★★ | Juin = Eid+BAC ★★
+- Janv = pic résolutions ★★★★★ | Sept = pic rentrée ★★★★★ | Juil-Août = creux ★★ | Juin = Eid+BAC ★★${subIntel}${topFormulas}${extRatio}${relanceBlock}${pendingBlock}
+
+CAPACITÉS D'ANALYSE PROFONDES:
+1. ABONNEMENTS: Tu sais quelles formules se vendent bien et lesquelles chutent. Tu peux recommander de pousser une formule sous-vendue ou d'arrêter une formule qui ne marche pas.
+2. COMMERCIAUX: Tu connais le CA, les inscriptions, le ticket moyen, ET le taux d'appels relance de chaque commercial. Tu identifies qui DORT et qui CHASSE.
+3. EXTENSIONS vs NOUVEAUX: Tu détectes si un club vit de renouvellements (stagnation) ou génère de la vraie croissance (nouvelles inscriptions).
+4. PIPELINE: Tu vois les inscriptions en attente de confirmation — argent potentiel qui dort.
+5. RELANCE: Tu sais quels commerciaux appellent vraiment les leads et lesquels ignorent leur liste.
 
 RÈGLES ABSOLUES:
 1. Français professionnel, direct, tactique — zéro bavardage.
 2. Jamais de chiffres inventés — données réelles uniquement.
-3. Expliquer la signification business derrière chaque chiffre.
-4. Terminer par des ACTIONS CONCRÈTES (qui, quoi, quand).
-5. Classifier: HEALTHY / WATCH / WARNING / CRITICAL.${sensorNote}${mem}`;
+3. Expliquer la SIGNIFICATION BUSINESS derrière chaque chiffre.
+4. Terminer par des ACTIONS CONCRÈTES avec NOM du responsable, QUOI faire, QUAND le faire.
+5. Classifier: HEALTHY / WATCH / WARNING / CRITICAL.
+6. Quand tu détectes un problème, propose toujours une SOLUTION CONCRÈTE.
+7. Cross-référencer les données: si un commercial fait du CA mais ne rappelle pas ses leads relance → signaler.
+8. Si une formule chute dans un club mais monte dans un autre → recommander transfert de stratégie.${sensorNote}${mem}`;
 }
+
 
 // ─── ROUTER ───────────────────────────────────────────────────────────────────
 module.exports = function aiAgentRouter({ lc }) {
@@ -474,13 +657,18 @@ module.exports = function aiAgentRouter({ lc }) {
       const { signals, alerts } = runRules(s);
       saveAlerts(alerts, gym);
 
-      // Compact snapshot for prompt (avoid token overflow)
+      // Compact snapshot for prompt (avoid token overflow) — 🔥 DEVIL MODE: includes all intel
       const ctxJson = JSON.stringify({
         revenue: s.revenue, members: { active_total: s.members.active_total, expiring_30d: s.members.expiring_30d, expired_not_renewed: s.members.expired_not_renewed, resub: s.members.resub, birthdays_this_month: s.members.birthdays_this_month },
         door_traffic: s.door_traffic, debts: s.debts, decaissements: { month_total: s.decaissements.month_total, by_gym: s.decaissements.by_gym },
         incidents: { open_total: s.incidents.open_total, critical: s.incidents.critical, list: s.incidents.list?.slice(0,4) },
-        courses: s.courses, gyms: s.gyms, commercials: s.commercials.slice(0, 6),
+        courses: s.courses, gyms: s.gyms, commercials: s.commercials.slice(0, 8),
         historical_revenue: s.historical_revenue.slice(-6),
+        subscription_intel: s.subscription_intel?.slice(0, 15),
+        top_formulas_empire: s.top_formulas_empire,
+        extension_ratio: s.extension_ratio,
+        relance_performance: s.relance_performance?.slice(0, 8),
+        pending_inscriptions_detailed: s.pending_inscriptions_detailed?.slice(0, 8),
       });
 
       const messages = [
@@ -553,14 +741,17 @@ module.exports = function aiAgentRouter({ lc }) {
 
   // ── POST /api/ai/quick/:mode ───────────────────────────────────────────────
   const QUICK_PROMPTS = {
-    'find-money':       'Analyse toutes les sources d\'argent non collecté: dettes impayées, réabonnements possibles, formules sous-vendues, membres expirés non relancés. Donne un plan chiffré pour les 7 prochains jours avec responsable.',
+    'find-money':       'Analyse toutes les sources d\'argent non collecté: dettes impayées, réabonnements possibles, formules sous-vendues, membres expirés non relancés, inscriptions en attente. Donne un plan chiffré pour les 7 prochains jours avec responsable.',
     'recover-debt':     'Analyse les créances ouvertes. Classe les débiteurs par priorité (montant + probabilité paiement). Génère un script d\'appel et propose une stratégie de recouvrement avec délais.',
-    'coach-commercial': 'Analyse chaque commercial ce mois: inscriptions, CA, ticket moyen, trend. Identifie les points faibles. Donne des directives de coaching précises et personnalisées pour chacun.',
+    'coach-commercial': 'Analyse chaque commercial ce mois: inscriptions, CA, ticket moyen, trend, taux d\'appels relance. Identifie qui DORT (pas d\'appels) et qui CHASSE (taux d\'appel élevé). Donne des directives de coaching précises.',
     'renewals':         'Génère une campagne renouvellement pour les membres qui expirent dans 30 jours et les possibles RESUB. Script d\'appel, formule à pousser, timing optimal, offre de relance.',
     'forecast':         'Analyse la vitesse CA actuelle. Projette la fin du mois. Si objectif en danger, calcule ce qu\'il faut faire PAR JOUR et PAR COMMERCIAL pour récupérer.',
     'incidents':        'Analyse tous les incidents ouverts. Priorise par impact business. Suggère des actions correctives immédiates et préventives.',
     'courses':          'Analyse les cours: taux de remplissage, cours populaires vs sous-fréquentés. Suggère des optimisations planning et marketing.',
     'birthdays':        'Stratégie d\'engagement anniversaires: script WhatsApp, offre spéciale, timing optimal pour convertir ces contacts en renouvellements.',
+    'subscriptions':    'Analyse approfondie des formules d\'abonnement: quelles formules se vendent le mieux dans chaque club? Lesquelles chutent? Compare les prix moyens et le CA par formule. Identifie les formules sous-vendues à haute marge. Recommande quelles formules pousser et lesquelles abandonner.',
+    'commercial-activity': 'Analyse l\'activité de chaque commercial: combien d\'appels relance effectués vs assignés, taux de conversion, temps passé sur l\'app inscription. Qui est actif? Qui dort? Qui a le meilleur ROI?',
+    'pipeline':         'Analyse le pipeline d\'inscriptions en attente. Combien d\'argent dort? Quels commerciaux ont des inscriptions bloquées? Donne un plan pour débloquer chaque inscription dans les 48h.',
   };
 
   router.post('/api/ai/quick/:mode', verifyAzureToken, requireAdmin, async (req, res) => {
@@ -570,7 +761,7 @@ module.exports = function aiAgentRouter({ lc }) {
       if (!prompt) return res.status(400).json({ error: `Unknown mode: ${mode}` });
       const s = snap(req.body?.gym || 'all');
       const { signals } = runRules(s);
-      const ctxJson = JSON.stringify({ revenue: s.revenue, debts: s.debts, members: s.members, commercials: s.commercials, gyms: s.gyms, courses: s.courses, decaissements: s.decaissements, incidents: s.incidents }, null, 0).slice(0, 3500);
+      const ctxJson = JSON.stringify({ revenue: s.revenue, debts: s.debts, members: s.members, commercials: s.commercials, gyms: s.gyms, courses: s.courses, decaissements: s.decaissements, incidents: s.incidents, subscription_intel: s.subscription_intel, top_formulas_empire: s.top_formulas_empire, extension_ratio: s.extension_ratio, relance_performance: s.relance_performance, pending_inscriptions_detailed: s.pending_inscriptions_detailed }, null, 0).slice(0, 5000);
       const messages = [
         { role: 'system', content: buildSysPrompt(s, signals) + `\n\n=== DONNÉES ===\n${ctxJson}` },
         { role: 'user', content: prompt }
@@ -666,6 +857,87 @@ module.exports = function aiAgentRouter({ lc }) {
       db.prepare(`UPDATE ai_alerts SET status='RESOLVED', resolved_at=datetime('now') WHERE id=?`).run(req.params.id);
       res.json({ id: req.params.id, status: 'RESOLVED' });
     } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ═══ 🔥 POST /api/ai/devil-scan — Deep Business Intelligence Scan ═══════════════
+  router.post('/api/ai/devil-scan', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const { gym = 'all' } = req.body;
+      const s = snap(gym);
+      const { signals, alerts } = runRules(s);
+      saveAlerts(alerts, gym);
+
+      // Build the most complete data payload possible
+      const fullCtx = JSON.stringify({
+        revenue: s.revenue, members: s.members, debts: s.debts,
+        decaissements: s.decaissements, incidents: s.incidents,
+        commercials: s.commercials, gyms: s.gyms, courses: s.courses,
+        subscription_intel: s.subscription_intel,
+        top_formulas_empire: s.top_formulas_empire,
+        extension_ratio: s.extension_ratio,
+        relance_performance: s.relance_performance,
+        pending_inscriptions_detailed: s.pending_inscriptions_detailed,
+        door_traffic: s.door_traffic,
+      }, null, 0);
+
+      const devilPrompt = `Tu es en MODE ANALYSE PROFONDE. Scanne l'intégralité de l'empire ${s.meta.gym_scope}.
+
+Génère un rapport JSON COMPLET avec cette structure EXACTE (aucun texte avant ou après le JSON):
+{
+  "empire_status": "HEALTHY|WATCH|WARNING|CRITICAL",
+  "executive_summary": "Résumé exécutif en 2-3 phrases percutantes",
+  "revenue_leaks": [
+    {"source": "nom de la fuite", "amount_dh": number, "action": "solution concrète", "owner": "nom du responsable", "deadline": "délai"}
+  ],
+  "subscription_analysis": {
+    "best_formulas": [{"formula": "nom", "gym": "club", "sold": number, "revenue_dh": number, "trend": "RISING|STABLE|FALLING"}],
+    "underperforming": [{"formula": "nom", "gym": "club", "issue": "problème détecté", "recommendation": "action"}],
+    "cross_sell_opportunities": ["formule X de club A devrait être poussée dans club B"]
+  },
+  "commercial_ranking": [
+    {"name": "nom", "gym": "club", "score": number, "revenue_dh": number, "inscriptions": number, "call_rate_pct": number, "verdict": "CHASSEUR|PERFORMANT|EN_DANGER|DORT", "coaching": "directive"}
+  ],
+  "growth_signals": [{"signal": "observation", "opportunity": "action", "impact": "HIGH|MEDIUM"}],
+  "critical_alerts": [{"level": "critical|warning", "title": "titre", "detail": "détail", "gym": "club"}],
+  "seven_day_plan": [
+    {"day": "Jour 1", "action": "quoi faire", "owner": "qui", "expected_revenue": number}
+  ]
+}`;
+
+      const messages = [
+        { role: 'system', content: buildSysPrompt(s, signals) + `\n\n=== DONNÉES COMPLÈTES ===\n${fullCtx.slice(0, 6000)}` },
+        { role: 'user', content: devilPrompt }
+      ];
+
+      const raw = await groq(messages, true);
+      let parsed;
+      try {
+        const m = raw.match(/\{[\s\S]*\}/);
+        parsed = m ? JSON.parse(m[0]) : null;
+      } catch { parsed = null; }
+
+      if (!parsed) {
+        parsed = {
+          empire_status: signals.empire_status,
+          executive_summary: raw.slice(0, 500),
+          revenue_leaks: [], subscription_analysis: { best_formulas: [], underperforming: [], cross_sell_opportunities: [] },
+          commercial_ranking: [], growth_signals: [],
+          critical_alerts: alerts.filter(a => a.priority === 'CRITICAL').map(a => ({ level: 'critical', title: a.title, detail: a.message, gym: a.gym })),
+          seven_day_plan: [],
+        };
+      }
+
+      // Auto-create action cards from 7-day plan
+      if (db && parsed.seven_day_plan?.length) {
+        const ins = db.prepare(`INSERT OR IGNORE INTO ai_actions (id,title,description,gym,assigned_to,priority,status,deadline,source) VALUES (?,?,?,?,?,?,'OPEN',?,'devil-scan')`);
+        parsed.seven_day_plan.forEach(a => {
+          const id = `devil_${Date.now()}_${Math.random().toString(36).slice(2,5)}`;
+          try { ins.run(id, a.action, `Plan 7 jours: ${a.day}`, gym, a.owner || 'Manager', 'HIGH', a.day || ''); } catch {}
+        });
+      }
+
+      res.json({ ...parsed, signals, rules_alerts: alerts, data_sources_used: ['revenue', 'members', 'debts', 'decaissements', 'subscriptions', 'commercials', 'relance', 'entries', 'incidents', 'courses'] });
+    } catch(e) { console.error('[AI/devil-scan]', e.message); res.status(500).json({ error: e.message }); }
   });
 
   return router;
