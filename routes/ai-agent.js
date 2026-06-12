@@ -119,8 +119,16 @@ function buildSnapshot(db, getMeta, gymScope = 'all') {
   const yearRev   = revSum("strftime('%Y', date)=?", [String(now.getFullYear())]);
   const prevRev   = revSum("strftime('%Y-%m', date)=?", [prevYm]);
 
+  // 🔥 PRO-RATA: Previous month revenue up to the SAME day (fair comparison)
+  // If today is June 12, compare June 1-12 vs May 1-12 (not May 1-31)
+  const prevSameDay = `${prevYm}-${String(dayOfMonth).padStart(2,'0')}`;
+  const prevRevProRata = revSum("strftime('%Y-%m', date)=? AND date <= ?", [prevYm, prevSameDay]);
+
   const monthlyGoal = parseInt(getMeta?.('auralix_revenue_goal') || 0) || 0;
-  const vsPrev = prevRev.total > 0 ? parseFloat(((monthRev.total - prevRev.total) / prevRev.total * 100).toFixed(1)) : 0;
+  // Use pro-rata for fair comparison (same number of days)
+  const vsPrevProRata = prevRevProRata.total > 0 ? parseFloat(((monthRev.total - prevRevProRata.total) / prevRevProRata.total * 100).toFixed(1)) : 0;
+  // Keep full-month comparison for reference but label it clearly
+  const vsPrevFull = prevRev.total > 0 ? parseFloat(((monthRev.total - prevRev.total) / prevRev.total * 100).toFixed(1)) : 0;
 
   // ── Payment method breakdown ───────────────────────────────────────────────
   const payRow = q1(`SELECT COALESCE(SUM(CAST(espece AS REAL)),0) es, COALESCE(SUM(CAST(virement AS REAL)),0) vi, COALESCE(SUM(CAST(cheque AS REAL)),0) ch, COALESCE(SUM(CAST(tpe AS REAL)),0) tp FROM register_cache WHERE strftime('%Y-%m', date)=? AND gym_id IN (${gymIn})`, ym, ...targetGyms);
@@ -139,7 +147,8 @@ function buildSnapshot(db, getMeta, gymScope = 'all') {
   // ── Commercial performance (from register_cache.commercial) ────────────────
   const commRows = q(`SELECT commercial name, gym_id gym, COUNT(*) inscriptions, ROUND(SUM(CAST(prix AS REAL)),0) revenue, ROUND(AVG(CAST(prix AS REAL)),0) avg_ticket FROM register_cache WHERE strftime('%Y-%m', date)=? AND commercial IS NOT NULL AND commercial!='' AND gym_id IN (${gymIn}) GROUP BY commercial, gym_id ORDER BY revenue DESC LIMIT 12`, ym, ...targetGyms);
 
-  const prevCommRows = q(`SELECT commercial name, gym_id gym, ROUND(SUM(CAST(prix AS REAL)),0) revenue FROM register_cache WHERE strftime('%Y-%m', date)=? AND commercial IS NOT NULL AND commercial!='' AND gym_id IN (${gymIn}) GROUP BY commercial, gym_id`, prevYm, ...targetGyms);
+  // 🔥 PRO-RATA: Compare commercial performance at the SAME day window
+  const prevCommRows = q(`SELECT commercial name, gym_id gym, ROUND(SUM(CAST(prix AS REAL)),0) revenue FROM register_cache WHERE strftime('%Y-%m', date)=? AND date <= ? AND commercial IS NOT NULL AND commercial!='' AND gym_id IN (${gymIn}) GROUP BY commercial, gym_id`, prevYm, prevSameDay, ...targetGyms);
   const prevCommMap = {};
   prevCommRows.forEach(r => { prevCommMap[`${r.name}|${r.gym}`] = r.revenue || 0; });
 
@@ -147,15 +156,16 @@ function buildSnapshot(db, getMeta, gymScope = 'all') {
     const goalKey = `auralix_goal_commercial_${c.name.toLowerCase().replace(/\s+/g,'_')}`;
     const goal = parseInt(getMeta?.(goalKey) || 0) || 0;
     const prevRev = prevCommMap[`${c.name}|${c.gym}`] || 0;
-    const trend = prevRev > 0 ? (c.revenue > prevRev ? 'up' : c.revenue < prevRev * 0.9 ? 'down' : 'stable') : 'new';
-    return { name: c.name, gym: c.gym, gym_name: GYM_NAMES[c.gym] || c.gym, inscriptions: c.inscriptions, revenue: Math.round(c.revenue||0), avg_ticket: Math.round(c.avg_ticket||0), goal, goal_pct: goal > 0 ? Math.round(c.revenue/goal*100) : null, trend, prev_month_revenue: Math.round(prevRev) };
+    const trend = prevRev > 0 ? (c.revenue > prevRev ? 'up' : c.revenue < prevRev * 0.8 ? 'down' : 'stable') : 'new';
+    return { name: c.name, gym: c.gym, gym_name: GYM_NAMES[c.gym] || c.gym, inscriptions: c.inscriptions, revenue: Math.round(c.revenue||0), avg_ticket: Math.round(c.avg_ticket||0), goal, goal_pct: goal > 0 ? Math.round(c.revenue/goal*100) : null, trend, prev_month_revenue: Math.round(prevRev), comparison_note: `vs jour 1-${dayOfMonth} mois dernier` };
   });
 
   // ── Per-gym breakdown ──────────────────────────────────────────────────────
   const gyms = targetGyms.map(gid => {
     const sensorInstalled = !GYMS_NO_DOOR_SENSOR.includes(gid);
     const cur  = q1(`SELECT COALESCE(SUM(CAST(tpe AS REAL)+CAST(espece AS REAL)+CAST(virement AS REAL)+CAST(cheque AS REAL)),0) revenue, COUNT(*) members FROM register_cache WHERE strftime('%Y-%m', date)=? AND gym_id=?`, ym, gid);
-    const prev = q1(`SELECT COALESCE(SUM(CAST(tpe AS REAL)+CAST(espece AS REAL)+CAST(virement AS REAL)+CAST(cheque AS REAL)),0) revenue FROM register_cache WHERE strftime('%Y-%m', date)=? AND gym_id=?`, prevYm, gid);
+    // 🔥 PRO-RATA: Same day window for fair gym comparison
+    const prev = q1(`SELECT COALESCE(SUM(CAST(tpe AS REAL)+CAST(espece AS REAL)+CAST(virement AS REAL)+CAST(cheque AS REAL)),0) revenue FROM register_cache WHERE strftime('%Y-%m', date)=? AND date <= ? AND gym_id=?`, prevYm, prevSameDay, gid);
     const rev    = Math.round(cur?.revenue || 0);
     const prevR  = Math.round(prev?.revenue || 0);
     const growth = prevR > 0 ? parseFloat(((rev - prevR) / prevR * 100).toFixed(1)) : 0;
@@ -331,7 +341,8 @@ function buildSnapshot(db, getMeta, gymScope = 'all') {
     meta: { generated_at: new Date().toISOString(), period: ym, today, gym_scope: gymScope === 'all' ? 'ALL EMPIRE' : GYM_NAMES[gymScope] || gymScope, day_of_month: dayOfMonth, days_in_month: daysInMonth },
     revenue: {
       today: todayRev.total, week: weekRev.total, month: monthRev.total, year: yearRev.total,
-      prev_month: prevRev.total, vs_prev_month_pct: vsPrev,
+      prev_month: prevRev.total, prev_month_same_period: prevRevProRata.total,
+      vs_prev_month_pct: vsPrevProRata, vs_prev_month_full_pct: vsPrevFull,
       monthly_goal: monthlyGoal,
       new_members_month: monthRev.count,
       payments,
@@ -422,8 +433,13 @@ function runRules(snap) {
     sig.revenue_status = revenue.month > 0 ? 'WATCH' : 'UNKNOWN';
   }
 
-  // 2. Month vs previous
-  if (revenue.vs_prev_month_pct < -15) alerts.push({ priority:'WARNING', type:'REVENUE_DROP', gym:'all', title:`CA en baisse de ${Math.abs(revenue.vs_prev_month_pct)}% vs mois précédent`, message:`${revenue.month.toLocaleString()} DH ce mois vs ${revenue.prev_month.toLocaleString()} DH le mois dernier.` });
+  // 2. Month vs previous — 🔥 PRO-RATA comparison (same day window, not full month)
+  // Only alert if the FAIR comparison (same number of days) shows a real drop
+  if (revenue.vs_prev_month_pct < -15) {
+    alerts.push({ priority:'WARNING', type:'REVENUE_DROP', gym:'all',
+      title:`CA en baisse de ${Math.abs(revenue.vs_prev_month_pct)}% vs même période mois précédent`,
+      message:`${revenue.month.toLocaleString()} DH (jour 1-${meta.day_of_month}) vs ${revenue.prev_month_same_period.toLocaleString()} DH même période mois dernier (jour 1-${meta.day_of_month}). Mois complet dernier: ${revenue.prev_month.toLocaleString()} DH.` });
+  }
 
   // 3. Debt risk
   if (debts.total_open > 0 && revenue.month > 0) {
@@ -586,7 +602,8 @@ Tu as accès à TOUTES les données de l'empire en temps réel:
 ÉTAT EMPIRE: ${sig.empire_status || 'INCONNU'}
 CA MOIS: ${rev.month.toLocaleString()} DH | OBJECTIF: ${rev.monthly_goal.toLocaleString()} DH | AVANCEMENT: ${sig.goal_progress_pct||0}%
 PRÉVISION FIN MOIS: ${(sig.projected_month_end||0).toLocaleString()} DH | ÉCART: ${(sig.gap_to_goal||0).toLocaleString()} DH | REQUIS/JOUR: ${(sig.required_daily||0).toLocaleString()} DH
-CA VS MOIS PRÉCÉDENT: ${rev.vs_prev_month_pct > 0 ? '+' : ''}${rev.vs_prev_month_pct}%
+CA VS MÊME PÉRIODE MOIS DERNIER (jour 1-${meta.day_of_month}): ${rev.vs_prev_month_pct > 0 ? '+' : ''}${rev.vs_prev_month_pct}% (${rev.prev_month_same_period?.toLocaleString() || 0} DH à même date)
+CA MOIS DERNIER COMPLET: ${rev.prev_month.toLocaleString()} DH (${rev.vs_prev_month_full_pct > 0 ? '+' : ''}${rev.vs_prev_month_full_pct}% brut — NE PAS comparer directement, le mois n'est pas fini)
 SORTIES ESPÈCES MOIS: ${dec.month_total.toLocaleString()} DH (${sig.decais_ratio_pct||0}% du CA)
 DETTE TOTALE: ${snap.debts.total_open.toLocaleString()} DH | ${snap.debts.members_count} membres | Ratio: ${sig.debt_ratio||0}%
 INCIDENTS OUVERTS: ${snap.incidents.open_total} (${snap.incidents.critical} critiques)
