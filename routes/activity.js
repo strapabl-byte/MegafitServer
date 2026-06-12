@@ -82,6 +82,73 @@ module.exports = function (deps) {
     }
   });
 
+  // ── POST /public/activity/pwa-log ─────────────────────────────────────────
+  // Lightweight activity beacon for the Inscription PWA.
+  // Called fire-and-forget from the PWA whenever a commercial/manager performs
+  // an action (select action, submit inscription, pay rest, extension, etc.)
+  // Logs into the same 'manager_activity_logs' Firestore collection so these
+  // activities appear in the Super Admin Command Center.
+  // ──────────────────────────────────────────────────────────────────────────
+  const GYM_CLUBS = {
+    dokarat: { id: 'dokarat', name: 'Doukkarate', color: '#10b981' },
+    marjane: { id: 'marjane', name: 'Saïss',      color: '#3b82f6' },
+    casa1:   { id: 'casa1',   name: 'Casa Anfa',   color: '#f59e0b' },
+    casa2:   { id: 'casa2',   name: 'Casa Lady',   color: '#ec4899' },
+  };
+
+  router.post('/public/activity/pwa-log', async (req, res) => {
+    try {
+      const {
+        action,        // e.g. 'Nouvelle inscription soumise'
+        page,          // e.g. 'Inscription', 'Payer Reste', 'Extension'
+        gymId,         // e.g. 'dokarat'
+        managerEmail,  // Azure email of the logged-in manager
+        managerName,   // Display name
+        commercialName,// QR-authenticated commercial
+        memberName,    // Member being processed (optional)
+        buttonClicked, // e.g. 'SOUMETTRE', 'PAYER', 'VALIDER' (optional)
+      } = req.body;
+
+      if (!action || !gymId) {
+        return res.status(400).json({ error: 'action and gymId required' });
+      }
+
+      const club = GYM_CLUBS[gymId] || { id: gymId, name: gymId, color: '#999' };
+
+      const payload = {
+        action,
+        page: page || 'Inscription PWA',
+        gymId,
+        club,
+        userId: 'pwa_inscription',
+        userName: commercialName || managerName || 'Commercial PWA',
+        userEmail: (managerEmail || '').toLowerCase(),
+        userRole: 'manager',
+        path: '/public/inscriptions',
+        method: 'POST',
+        source: 'inscription_pwa',
+        commercialName: commercialName || null,
+        managerName: managerName || null,
+        memberName: memberName || null,
+        buttonClicked: buttonClicked || null,
+        createdAt: deps.admin.firestore.FieldValue.serverTimestamp(),
+      };
+
+      // Fire-and-forget — don't block the PWA
+      db.collection('manager_activity_logs').add(payload).catch(err => {
+        console.error('[PWA-Log] Failed to write activity:', err.message);
+      });
+
+      // Invalidate activity cache so the dashboard sees the new entry sooner
+      activityCache = {};
+
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('[PWA-Log] Error:', err);
+      res.status(500).json({ error: 'Failed to log activity' });
+    }
+  });
+
   return router;
 };
 

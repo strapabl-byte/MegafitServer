@@ -228,6 +228,8 @@ const auditLogger = (req, res, next) => {
         club: targetClub,
         userId: req.user?.oid || 'system_id',
         userName: req.user?.name || req.user?.preferred_username || 'App System',
+        userEmail: req.user?.preferred_username || req.user?.upn || '',
+        userRole: req.isAdmin ? 'admin' : req.isRH ? 'rh' : req.isPerfManager ? 'performance_manager' : req.isManager ? 'manager' : 'unknown',
         path: path.split('?')[0],
         method: req.method,
         createdAt: deps.admin.firestore.FieldValue.serverTimestamp()
@@ -714,6 +716,7 @@ app.use('/',                require('./routes/email')(deps));         // /api/se
 
 app.use('/',                require('./routes/auralix')(deps));   // /api/auralix/*
 app.use('/',                require('./routes/ai-agent')(deps));   // /api/ai/* AURALIX 24/7 Agent (Firebase token auth)
+app.use('/',                require('./routes/superadmin')(deps)); // /api/superadmin/* Super Admin Command Center
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUSH NOTIFICATIONS HELPERS
