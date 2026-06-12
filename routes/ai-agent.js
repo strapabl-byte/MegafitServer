@@ -544,6 +544,7 @@ function buildSysPrompt(snap, sig) {
   const mem = snap.memory?.length ? `\n\n=== CONTEXTE STRATÉGIQUE (MÉMOIRE) ===\n${snap.memory.join('\n')}` : '';
   const rev = snap.revenue;
   const dec = snap.decaissements;
+  const meta = snap.meta;
 
   const sensorNote = snap.door_traffic?.gyms_without_sensor?.length > 0
     ? `\n\n⚠️ CAPTEURS PORTES NON INSTALLÉS: ${snap.door_traffic.gyms_without_sensor.join(', ')} — leurs données de trafic valent NULL (matériel absent, pas un problème business). NE JAMAIS commenter ni alerter sur zéro entrées pour ces clubs. Couverture capteurs: ${snap.door_traffic.sensor_coverage}.`
