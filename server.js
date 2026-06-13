@@ -713,6 +713,7 @@ app.use('/',                require('./routes/activity')(deps));    // /api/acti
 app.use('/',                require('./routes/recruitment')(deps)); // /api/recruitment/applications
 app.use('/',                require('./routes/scan')(deps));          // /public/scan-cin, /public/scan-contract, /public/save-contract-scan, /api/contracts
 app.use('/',                require('./routes/email')(deps));         // /api/send-contract-email, /api/save-member-email
+app.use('/',                require('./routes/email-bulk')(deps));    // /api/emails/* Bulk email campaigns
 
 app.use('/',                require('./routes/auralix')(deps));   // /api/auralix/*
 app.use('/',                require('./routes/ai-agent')(deps));   // /api/ai/* AURALIX 24/7 Agent (Firebase token auth)
