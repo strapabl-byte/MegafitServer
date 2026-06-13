@@ -748,9 +748,12 @@ function router(deps = {}) {
 
       // Verso: address line starting with "Adresse" label + extract city
       const versoPrompt =
-        'Moroccan CIN card back. Find label "Adresse" then read the full address. Return ONLY this JSON:\n' +
-        '{"cin":null,"nom":null,"prenom":null,"dateNaissance":null,"lieuNaissance":null,"ville":"Barcelone","adresse":"C PI 192 CANOVELLES BARCELONE ESPAGNE"}\n' +
-        'ville=city extracted from address. null if unreadable.';
+        'Moroccan CIN card back (verso). Read the full address after the label "Adresse".\n' +
+        'Extract the CITY (ville) from the address text — it is usually a Moroccan city like Fès, Casablanca, Rabat, Meknès, Marrakech, Tanger, Oujda, Kénitra, Tétouan, Safi, etc.\n' +
+        'IMPORTANT: Do NOT copy the example below. Extract the REAL city from the actual card image.\n' +
+        'Return ONLY this JSON (no text, no markdown):\n' +
+        '{"cin":null,"nom":null,"prenom":null,"dateNaissance":null,"lieuNaissance":null,"ville":"Fès","adresse":"ROUTE IMMOUZER HAY NARJISS FES"}\n' +
+        'ville = the city name extracted from the address. adresse = full address text. null if unreadable.';
 
       const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
