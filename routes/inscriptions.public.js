@@ -894,5 +894,74 @@ Réponds UNIQUEMENT en JSON valide (pas de markdown):
     }
   });
 
+  // ── POST /public/incident ──────────────────────────────────────────────────
+  // Commercials can report incidents directly from the tablet PWA.
+  // No Azure auth — validates gymId + requires title/emergency/reporter.
+  // Shows up in dashboard Report/Incidents page.
+  router.post('/public/incident', async (req, res) => {
+    try {
+      const { gymId: rawGymId, title, cause, explanation, emergency, reporter, category } = req.body;
+
+      const gymId = (rawGymId || '').toLowerCase().trim();
+      if (!VALID_GYMS.includes(gymId)) return res.status(400).json({ error: 'Salle invalide' });
+      if (!title || !title.trim()) return res.status(400).json({ error: 'Titre requis' });
+      if (!reporter || !reporter.trim()) return res.status(400).json({ error: 'Nom du reporter requis' });
+
+      const VALID_EMERGENCIES = ['Low', 'Medium', 'High'];
+      const safeEmergency = VALID_EMERGENCIES.includes(emergency) ? emergency : 'Low';
+
+      const GYM_NAMES = { dokarat: 'Dokkarat Fès', marjane: 'Fès Saiss', casa1: 'Casa Anfa', casa2: 'Lady Anfa' };
+      const gymName = GYM_NAMES[gymId] || gymId;
+      const today = new Date().toISOString().slice(0, 10);
+
+      // Sanitize text inputs (max length)
+      const safeTitle = title.trim().slice(0, 200);
+      const safeCause = (cause || '').trim().slice(0, 500);
+      const safeExplanation = (explanation || '').trim().slice(0, 500);
+      const safeReporter = reporter.trim().slice(0, 100);
+      const safeCategory = (category || '').trim().slice(0, 100);
+
+      // Save to Firestore
+      const docRef = await db.collection('incidents').add({
+        gymId, gymName, title: safeTitle, cause: safeCause,
+        explanation: safeExplanation, emergency: safeEmergency,
+        reporter: safeReporter, category: safeCategory,
+        date: today, status: 'Pending',
+        source: 'tablet_pwa',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      // Cache in SQLite
+      const now = new Date().toISOString();
+      lc.upsertIncidents([{
+        id: docRef.id, gymId, gymName, title: safeTitle, cause: safeCause,
+        explanation: safeExplanation, emergency: safeEmergency,
+        reporter: safeReporter, date: today, status: 'Pending', createdAt: now,
+      }]);
+
+      // 🔔 Notification
+      try {
+        lc.addNotification({
+          type: 'incident',
+          gymId,
+          title: `🚨 Incident signalé — ${safeTitle}`,
+          message: `${gymName} · ${safeEmergency} · Par ${safeReporter}${safeCategory ? ` · ${safeCategory}` : ''}`,
+          severity: safeEmergency === 'High' ? 'critical' : safeEmergency === 'Medium' ? 'warning' : 'info',
+          route: '/report',
+          icon: safeEmergency === 'High' ? '🔴' : '🟡',
+          refId: docRef.id,
+        });
+      } catch(_) {}
+
+      console.log(`🚨 [Incident/Tablet] ${safeReporter} | ${safeTitle} | ${safeEmergency} | ${gymId}`);
+      res.json({ ok: true, id: docRef.id });
+
+    } catch (err) {
+      console.error('❌ [PUBLIC INCIDENT ERROR]:', err);
+      res.status(500).json({ error: 'Échec du signalement', detail: err.message });
+    }
+  });
+
   return router;
 };
