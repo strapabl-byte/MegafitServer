@@ -6,10 +6,12 @@
 const nodemailer = require('nodemailer');
 
 // ─── SMTP Config ──────────────────────────────────────────────────────────────
+// Reuses SMTP_HOST & SMTP_PORT from existing contract email config.
+// Uses separate SMTP_NOTIF_USER / SMTP_NOTIF_PASS for the notification account.
 const SMTP_HOST = process.env.SMTP_HOST || 'mail.megafit.ma';
 const SMTP_PORT = parseInt(process.env.SMTP_PORT || '465', 10);
-const SMTP_USER = process.env.SMTP_USER || 'notification@megafit.ma';
-const SMTP_PASS = process.env.SMTP_PASS || '';
+const SMTP_USER = process.env.SMTP_NOTIF_USER || process.env.SMTP_USER || 'notification@megafit.ma';
+const SMTP_PASS = process.env.SMTP_NOTIF_PASS || process.env.SMTP_PASS || '';
 const SMTP_FROM = `"MegaFit" <${SMTP_USER}>`;
 
 // cPanel limit: ~300/hour → safe batch: 40 per batch, 6s delay = ~400/hour max
