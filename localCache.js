@@ -1192,6 +1192,92 @@ function markNotificationsRead(gymId) {
   }
 }
 
+// ─── Email Campaign Tracking ────────────────────────────────────────────────
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS email_campaigns (
+      id TEXT PRIMARY KEY,
+      subject TEXT NOT NULL,
+      body_preview TEXT,
+      gym_filter TEXT DEFAULT 'all',
+      total INTEGER DEFAULT 0,
+      sent INTEGER DEFAULT 0,
+      failed INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'pending',
+      created_at TEXT NOT NULL,
+      completed_at TEXT,
+      errors TEXT
+    );
+  `);
+} catch(e) {}
+
+function getDistinctEmails(gymId) {
+  // Collect from members_cache (active + archive)
+  let memberSql = `SELECT DISTINCT email, full_name as name, gym_id FROM members_cache WHERE email IS NOT NULL AND email != ''`;
+  const params = [];
+  if (gymId && gymId !== 'all') {
+    memberSql += ` AND gym_id = ?`;
+    params.push(gymId);
+  }
+  const memberEmails = db.prepare(memberSql).all(...params);
+
+  // Collect from pending_cache (new inscriptions)
+  let pendingSql = `SELECT DISTINCT email, nom || ' ' || prenom as name, gym_id FROM pending_cache WHERE email IS NOT NULL AND email != ''`;
+  const params2 = [];
+  if (gymId && gymId !== 'all') {
+    pendingSql += ` AND gym_id = ?`;
+    params2.push(gymId);
+  }
+  const pendingEmails = db.prepare(pendingSql).all(...params2);
+
+  // Merge + deduplicate by email
+  const emailMap = new Map();
+  for (const row of [...memberEmails, ...pendingEmails]) {
+    const email = (row.email || '').trim().toLowerCase();
+    if (!email) continue;
+    if (!emailMap.has(email)) {
+      emailMap.set(email, { email, name: row.name || '', gymId: row.gym_id || '' });
+    }
+  }
+
+  return Array.from(emailMap.values());
+}
+
+function upsertEmailCampaign(campaign) {
+  db.prepare(`
+    INSERT OR REPLACE INTO email_campaigns (id, subject, body_preview, gym_filter, total, sent, failed, status, created_at, completed_at, errors)
+    VALUES (@id, @subject, @bodyPreview, @gymFilter, @total, @sent, @failed, @status, @createdAt, @completedAt, @errors)
+  `).run({
+    id: campaign.id,
+    subject: campaign.subject,
+    bodyPreview: (campaign.bodyPreview || '').slice(0, 200),
+    gymFilter: campaign.gymFilter || 'all',
+    total: campaign.total || 0,
+    sent: campaign.sent || 0,
+    failed: campaign.failed || 0,
+    status: campaign.status || 'pending',
+    createdAt: campaign.createdAt || new Date().toISOString(),
+    completedAt: campaign.completedAt || null,
+    errors: campaign.errors ? JSON.stringify(campaign.errors) : null,
+  });
+}
+
+function getEmailCampaigns(limit = 20) {
+  return db.prepare(`SELECT * FROM email_campaigns ORDER BY created_at DESC LIMIT ?`).all(limit);
+}
+
+function updateEmailCampaign(id, updates) {
+  const fields = [];
+  const params = [];
+  for (const [key, val] of Object.entries(updates)) {
+    const col = key.replace(/([A-Z])/g, '_$1').toLowerCase();
+    fields.push(`${col} = ?`);
+    params.push(typeof val === 'object' ? JSON.stringify(val) : val);
+  }
+  params.push(id);
+  db.prepare(`UPDATE email_campaigns SET ${fields.join(', ')} WHERE id = ?`).run(...params);
+}
+
 module.exports = {
   // raw db — for custom queries in routes (e.g. commercial stats aggregation)
   db,
@@ -1223,6 +1309,8 @@ module.exports = {
   upsertPushHistory, getPushHistory,
   // notifications engine
   addNotification, getNotifications, markNotificationsRead,
+  // email
+  getDistinctEmails, upsertEmailCampaign, getEmailCampaigns, updateEmailCampaign,
   // info
   getCacheStats,
 };
