@@ -233,6 +233,21 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
       }
 
       console.log(`✅ [Settle/Public] ${member.fullName} | Paid: ${payAmount} DH | New balance: ${newBalance} DH`);
+
+      // 🔔 Notification: payment received
+      try {
+        lc.addNotification({
+          type: 'payment',
+          gymId: gymId,
+          title: `💳 Paiement reçu — ${member.fullName}`,
+          message: `${payAmount.toLocaleString()} DH payé (${method || 'Espèces'})${newBalance > 0 ? ` · Reste: ${newBalance} DH` : ' · Solde réglé ✅'}`,
+          severity: newBalance === 0 ? 'info' : 'warning',
+          route: '/payments',
+          icon: '💳',
+          refId: payRef.id,
+        });
+      } catch(_) {}
+
       res.json({ ok: true, paymentId: payRef.id, newBalance });
 
     } catch (err) {
@@ -362,6 +377,22 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
 
       invalidateCache(apiCache.inscriptions);
       console.log(`[Inscription] ✅ Success for ${data.prenom} ${data.nom}`);
+
+      // 🔔 Notification: new inscription
+      try {
+        const totalPaid = Number(safeData.totals?.paid || 0);
+        lc.addNotification({
+          type: 'inscription',
+          gymId: normalizedGymId,
+          title: `📋 Nouvelle inscription — ${data.prenom} ${data.nom}`,
+          message: `${safeData.subscriptionName || 'Abonnement'} · ${totalPaid > 0 ? totalPaid + ' DH payé' : '0 DH'} · Contrat #${finalContractNumber}`,
+          severity: totalPaid === 0 ? 'warning' : 'info',
+          route: '/members',
+          icon: '📋',
+          refId: id,
+        });
+      } catch(_) {}
+
       res.json({ id, ok: true, contractNumber: finalContractNumber });
 
       // ── 🤖 NON-BLOCKING AI Smart Assessment ───────────────────────────────
@@ -467,6 +498,24 @@ Réponds UNIQUEMENT en JSON valide (pas de markdown):
             },
           });
           console.log(`[AI] ✅ Assessment for ${prenom} ${nom}: ${assessment.status} — ${assessment.message}`);
+
+          // 🔔 Notification: AI flagged an issue
+          if (assessment.status === 'warning' || assessment.status === 'error') {
+            try {
+              lc.addNotification({
+                type: 'ai_alert',
+                gymId: normalizedGymId,
+                title: assessment.status === 'error'
+                  ? `🔴 IA Alerte — ${prenom} ${nom}`
+                  : `⚠️ IA Attention — ${prenom} ${nom}`,
+                message: assessment.message + (assessment.issues?.length ? ` (${assessment.issues.join(', ')})` : ''),
+                severity: assessment.status === 'error' ? 'critical' : 'warning',
+                route: '/members',
+                icon: assessment.status === 'error' ? '🔴' : '⚠️',
+                refId: `ai_${id}`,
+              });
+            } catch(_) {}
+          }
         } catch (aiErr) {
           console.warn(`[AI] ⚠️ Assessment failed (non-blocking):`, aiErr.message);
         }
@@ -782,6 +831,21 @@ Réponds UNIQUEMENT en JSON valide (pas de markdown):
       lc.upsertDecaissements(gymId, today, [{ id: ref.id, ...newDoc.data() }]);
 
       console.log(`✅ [Décaissement/Tablet] ${verifiedManagerName} | ${Number(montant)} DH | ${categorie} | ${raison.trim()} | ${gymId}`);
+
+      // 🔔 Notification: new décaissement pending
+      try {
+        lc.addNotification({
+          type: 'decaissement',
+          gymId: gymId,
+          title: `💰 Décaissement en attente — ${Number(montant).toLocaleString()} DH`,
+          message: `${categorie} · ${beneficiaire.trim()} · ${raison.trim()} · Par ${verifiedManagerName}`,
+          severity: Number(montant) >= 5000 ? 'critical' : 'warning',
+          route: '/registre',
+          icon: '💰',
+          refId: ref.id,
+        });
+      } catch(_) {}
+
       res.json({ ok: true, id: ref.id, status: 'pending' });
 
     } catch (err) {
