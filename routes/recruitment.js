@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 const express = require('express');
 const admin = require('firebase-admin');
 const { getFirestore } = require('firebase-admin/firestore');
@@ -82,6 +82,22 @@ module.exports = function(deps) {
         }, newApps[0].createdAt);
         lc.setLastRecruitmentSync(newestDate);
         console.log(`✅ [RECRUITMENT] Synced ${newApps.length} new applications.`);
+
+        // 🔔 Notification: new recruitment applications (for RH)
+        try {
+          for (const app of newApps) {
+            lc.addNotification({
+              type: 'recruitment',
+              gymId: 'all',
+              title: `👤 Nouvelle candidature — ${app.fullName || 'Candidat'}`,
+              message: `Poste: ${app.position || 'Non précisé'} · ${app.phone || app.email || ''}`,
+              severity: 'info',
+              route: '/recrute',
+              icon: '👤',
+              refId: app.id,
+            });
+          }
+        } catch(_) {}
       }
 
       const allApps = lc.getRecruitmentApplications();

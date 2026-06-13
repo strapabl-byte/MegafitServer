@@ -330,6 +330,36 @@ module.exports = function createRelanceRouter(deps) {
       );
 
       res.json({ ok: true, id, action: 'created' });
+
+      // 🔔 Notification: relance call logged (for performance managers)
+      try {
+        const LIST_LABELS = { birthday: '🎂 Anniversaire', expiring: '📅 Expiration', expired: '🔴 Expiré', inactive: '💤 Inactif' };
+        const listLabel = LIST_LABELS[listType] || listType;
+
+        if (called && feedback === 'negative') {
+          lc.addNotification({
+            type: 'relance_negative',
+            gymId: gymId,
+            title: `📞 Relance négative — ${effectiveName}`,
+            message: `${listLabel} · ${effectiveCommercial} · ${comment || 'Pas intéressé'}`,
+            severity: 'warning',
+            route: '/relance',
+            icon: '📞',
+            refId: id,
+          });
+        } else if (called && feedback === 'positive') {
+          lc.addNotification({
+            type: 'relance_positive',
+            gymId: gymId,
+            title: `✅ Relance positive — ${effectiveName}`,
+            message: `${listLabel} · ${effectiveCommercial} · ${comment || 'Intéressé'}`,
+            severity: 'info',
+            route: '/relance',
+            icon: '✅',
+            refId: id,
+          });
+        }
+      } catch(_) {}
     } catch (err) {
       console.error('[relance/call]', err);
       res.status(500).json({ error: err.message });
