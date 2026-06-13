@@ -5,16 +5,22 @@
 const { Router } = require('express');
 const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 
-// ─── Groq caller ──────────────────────────────────────────────────────────────
-const GROQ_KEY      = process.env.GROQ_API_KEY || '';
+// ─── Groq caller with dual-key rotation ──────────────────────────────────────
+const GROQ_KEYS = [
+  process.env.GROQ_API_KEY || '',
+  process.env.GROQ_API_KEY_2 || '',
+].filter(Boolean);
+
 const GROQ_LARGE    = 'llama-3.3-70b-versatile';
 const GROQ_SMALL    = 'llama-3.1-8b-instant';
+let groqKeyIndex = 0; // Tracks which key to try first
 
-async function callGroq(messages, model = GROQ_LARGE, maxTokens = 1800) {
-  if (!GROQ_KEY) throw new Error('GROQ_API_KEY not configured');
+async function callGroq(messages, model = GROQ_LARGE, maxTokens = 1800, apiKey = null) {
+  const key = apiKey || GROQ_KEYS[groqKeyIndex] || GROQ_KEYS[0];
+  if (!key) throw new Error('GROQ_API_KEY not configured');
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
-    headers: { 'Authorization': `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
+    headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model, messages, temperature: 0.35, max_tokens: maxTokens })
   });
   if (!res.ok) {
@@ -26,10 +32,33 @@ async function callGroq(messages, model = GROQ_LARGE, maxTokens = 1800) {
 }
 
 async function groq(messages, useLarge = true) {
+  const model = useLarge ? GROQ_LARGE : GROQ_SMALL;
+  const tokens = useLarge ? 2000 : 1000;
+
+  // Try primary key
   try {
-    return await callGroq(messages, useLarge ? GROQ_LARGE : GROQ_SMALL, useLarge ? 2000 : 1000);
+    return await callGroq(messages, model, tokens, GROQ_KEYS[groqKeyIndex]);
   } catch(e) {
-    if (e.message.includes('429') || e.message.includes('rate')) {
+    if ((e.message.includes('429') || e.message.includes('rate')) && GROQ_KEYS.length > 1) {
+      // Rate limited → rotate to fallback key
+      const fallbackIdx = (groqKeyIndex + 1) % GROQ_KEYS.length;
+      console.log(`[GROQ] Key ${groqKeyIndex + 1} rate-limited → switching to key ${fallbackIdx + 1}`);
+      groqKeyIndex = fallbackIdx; // Remember for next calls
+
+      try {
+        return await callGroq(messages, model, tokens, GROQ_KEYS[fallbackIdx]);
+      } catch(e2) {
+        // Both keys exhausted on large model → try small model with both keys
+        if (useLarge) {
+          for (const key of GROQ_KEYS) {
+            try { return await callGroq(messages, GROQ_SMALL, 800, key); } catch {}
+          }
+        }
+        throw e2;
+      }
+    }
+    // Not a rate limit error, or only 1 key — try small model as fallback
+    if (useLarge) {
       try { return await callGroq(messages, GROQ_SMALL, 800); } catch {}
     }
     throw e;
