@@ -426,6 +426,20 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
         lc.updatePendingStatus(insId, 'awaiting_payment');
       }
 
+      // 🔔 Notification: inscription confirmed
+      try {
+        lc.addNotification({
+          type: 'inscription_confirmed',
+          gymId: ins?.gymId || '',
+          title: `✅ Inscription confirmée — ${member.fullName}`,
+          message: `Contrat #${ins?.contractNumber || 'N/A'} · ${ins?.subscriptionName || ''} · Membre activé`,
+          severity: 'info',
+          route: '/members',
+          icon: '✅',
+          refId: `confirmed_${insId}`,
+        });
+      } catch(_) {}
+
       res.json({ ok: true, member, confirmedId: insId, nextStep: 'Payment recorded and register updated automatically' });
     } catch (err) {
       console.error('Confirm Inscription Error:', err);

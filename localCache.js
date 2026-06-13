@@ -1124,6 +1124,74 @@ function getPushHistory(limit = 50) {
   }));
 }
 
+// ── NOTIFICATIONS ENGINE ──────────────────────────────────────────────────────
+// Unified notification system: inscriptions, AI alerts, décaissements,
+// payments, expirations, birthdays, incidents — all in one place.
+
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS notifications_cache (
+    id          TEXT PRIMARY KEY,
+    type        TEXT NOT NULL,
+    gym_id      TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    message     TEXT,
+    severity    TEXT DEFAULT 'info',
+    route       TEXT,
+    icon        TEXT,
+    ref_id      TEXT,
+    is_read     INTEGER DEFAULT 0,
+    created_at  TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_notif_gym    ON notifications_cache(gym_id);
+  CREATE INDEX IF NOT EXISTS idx_notif_read   ON notifications_cache(is_read);
+  CREATE INDEX IF NOT EXISTS idx_notif_type   ON notifications_cache(type);
+  CREATE INDEX IF NOT EXISTS idx_notif_date   ON notifications_cache(created_at);
+`); } catch(e) {}
+
+const insertNotification = db.prepare(`
+  INSERT OR IGNORE INTO notifications_cache
+  (id, type, gym_id, title, message, severity, route, icon, ref_id, is_read, created_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+`);
+
+function addNotification({ type, gymId, title, message, severity = 'info', route, icon, refId }) {
+  const id = `${type}_${refId || Date.now()}_${gymId}`;
+  const now = new Date().toISOString();
+  try {
+    insertNotification.run(id, type, gymId || 'all', title, message || '', severity, route || '/', icon || '📢', refId || null, now);
+  } catch(e) {
+    console.warn('[NOTIF] Insert failed:', e.message);
+  }
+}
+
+function getNotifications(gymId, { limit = 50, unreadOnly = false } = {}) {
+  // Auto-prune notifications older than 7 days
+  try { db.prepare(`DELETE FROM notifications_cache WHERE created_at < datetime('now', '-7 days')`).run(); } catch(_) {}
+
+  let sql = 'SELECT * FROM notifications_cache WHERE 1=1';
+  const params = [];
+
+  if (gymId && gymId !== 'all') {
+    sql += ` AND (gym_id = ? OR gym_id = 'all')`;
+    params.push(gymId);
+  }
+  if (unreadOnly) {
+    sql += ' AND is_read = 0';
+  }
+  sql += ' ORDER BY created_at DESC LIMIT ?';
+  params.push(limit);
+
+  return db.prepare(sql).all(...params);
+}
+
+function markNotificationsRead(gymId) {
+  if (gymId && gymId !== 'all') {
+    db.prepare(`UPDATE notifications_cache SET is_read = 1 WHERE (gym_id = ? OR gym_id = 'all') AND is_read = 0`).run(gymId);
+  } else {
+    db.prepare(`UPDATE notifications_cache SET is_read = 1 WHERE is_read = 0`).run();
+  }
+}
+
 module.exports = {
   // raw db — for custom queries in routes (e.g. commercial stats aggregation)
   db,
@@ -1153,6 +1221,8 @@ module.exports = {
   upsertCourses,
   // push notifications history
   upsertPushHistory, getPushHistory,
+  // notifications engine
+  addNotification, getNotifications, markNotificationsRead,
   // info
   getCacheStats,
 };

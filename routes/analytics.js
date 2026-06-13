@@ -1796,6 +1796,48 @@ Sois brutal, précis, data-driven. Zéro généralité. Chaque point cité avec 
     }
   });
 
+  // ── GET /api/notifications ──────────────────────────────────────────────────
+  // Unified notification feed: AI alerts, inscriptions, décaissements, incidents, etc.
+  router.get('/api/notifications', verifyAzureToken, async (req, res) => {
+    try {
+      const gymId = req.query.gymId || (req.assignedGyms?.includes('all') ? 'all' : req.assignedGyms?.[0] || 'all');
+      const rows = lc.getNotifications(gymId, { limit: 50 });
+
+      const GYM_NAMES = { dokarat: 'Dokkarat', marjane: 'Saiss', casa1: 'Anfa', casa2: 'Lady Anfa' };
+
+      const notifications = rows.map(r => ({
+        id:        r.id,
+        type:      r.type,
+        gymId:     r.gym_id,
+        gymName:   GYM_NAMES[r.gym_id] || r.gym_id,
+        title:     r.title,
+        message:   r.message,
+        severity:  r.severity,
+        route:     r.route,
+        icon:      r.icon,
+        refId:     r.ref_id,
+        unread:    r.is_read === 0,
+        createdAt: r.created_at,
+      }));
+
+      res.json(notifications);
+    } catch (err) {
+      console.error('[NOTIFICATIONS GET] error:', err);
+      res.status(500).json({ error: 'Failed to fetch notifications' });
+    }
+  });
+
+  // ── POST /api/notifications/read ────────────────────────────────────────────
+  router.post('/api/notifications/read', verifyAzureToken, async (req, res) => {
+    try {
+      const gymId = req.body.gymId || 'all';
+      lc.markNotificationsRead(gymId);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to mark notifications read' });
+    }
+  });
+
   // POST /api/incidents
   router.post('/api/incidents', verifyAzureToken, async (req, res) => {
     try {
@@ -1809,6 +1851,21 @@ Sois brutal, précis, data-driven. Zéro généralité. Chaque point cité avec 
       const now = new Date().toISOString();
       lc.upsertIncidents([{ id: docRef.id, gymId, gymName, title, cause, explanation, emergency, reporter, date, status: 'Pending', createdAt: now }]);
       incidentsCachedAt = 0;
+
+      // 🔔 Notification: new incident
+      try {
+        lc.addNotification({
+          type: 'incident',
+          gymId: gymId,
+          title: `🚨 Incident — ${title}`,
+          message: `${gymName || gymId} · ${emergency} · ${cause || explanation || ''}`.slice(0, 200),
+          severity: emergency === 'High' ? 'critical' : emergency === 'Medium' ? 'warning' : 'info',
+          route: '/report',
+          icon: emergency === 'High' ? '🔴' : '🟡',
+          refId: docRef.id,
+        });
+      } catch(_) {}
+
       res.json({ id: docRef.id, gymId, gymName, title, cause, explanation, emergency, reporter, date, status: 'Pending', createdAt: now });
     } catch (err) {
       console.error('[INCIDENTS POST] error:', err);
