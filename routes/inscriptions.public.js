@@ -363,6 +363,114 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
       invalidateCache(apiCache.inscriptions);
       console.log(`[Inscription] ✅ Success for ${data.prenom} ${data.nom}`);
       res.json({ id, ok: true, contractNumber: finalContractNumber });
+
+      // ── 🤖 NON-BLOCKING AI Smart Assessment ───────────────────────────────
+      // Runs AFTER the response is sent — never slows down the PWA.
+      // Loads official prices from config, validates payment/phone/email/CIN.
+      // Stores result in aiAssessment field so dashboard never re-checks.
+      (async () => {
+        try {
+          const GROQ_KEY = process.env.GROQ_API_KEY;
+          if (!GROQ_KEY) return;
+
+          // 1. Load official subscription prices for this gym
+          let officialPrices = '';
+          try {
+            const cfgDoc = await db.collection('config').doc(`inscription-${normalizedGymId}`).get();
+            if (cfgDoc.exists) {
+              const groups = cfgDoc.data().subscriptionGroups || [];
+              const priceLines = [];
+              groups.forEach(g => {
+                (g.options || []).forEach(o => {
+                  if (o.name && o.price > 0) priceLines.push(`  ${o.name}: ${o.price} DH`);
+                });
+              });
+              if (priceLines.length > 0) officialPrices = `\nOfficial subscription prices for this gym:\n${priceLines.join('\n')}`;
+            }
+          } catch (_) {}
+
+          // 2. Build comprehensive validation prompt
+          const subName = safeData.subscriptionName || 'N/A';
+          const totalDue = Number(safeData.totals?.total || 0);
+          const totalPaid = Number(safeData.totals?.paid || 0);
+          const balance = Number(safeData.totals?.balance || 0);
+          const subPrice = Number(safeData.totals?.subscription || 0);
+          const phone = safeData.telephone || '';
+          const email = safeData.email || '';
+          const cin = safeData.cin || '';
+          const nom = safeData.nom || '';
+          const prenom = safeData.prenom || '';
+          const dateNaissance = safeData.dateNaissance || '';
+          const periodFrom = safeData.periodFrom || '';
+          const periodTo = safeData.periodTo || '';
+
+          const prompt = `Tu es une IA de contrôle qualité pour les inscriptions en salle de sport MEGA FIT au Maroc.
+Analyse cette inscription et donne un verdict STRICT en JSON:
+${officialPrices}
+
+Inscription soumise:
+- Membre: ${prenom} ${nom}
+- Abonnement: ${subName}
+- Prix abonnement: ${subPrice} DH
+- Total dû: ${totalDue} DH
+- Montant payé: ${totalPaid} DH
+- Reste: ${balance} DH
+- Téléphone: "${phone}"
+- Email: "${email}"
+- CIN: "${cin}"
+- Date naissance: "${dateNaissance}"
+- Période: ${periodFrom} → ${periodTo}
+
+Vérifie TOUT:
+1. PAIEMENT: Le prix payé est-il cohérent avec le prix officiel de cet abonnement? Un paiement partiel (50%+) est acceptable. Moins de 40% du prix = suspect.
+2. TELEPHONE: Format marocain valide? (06/07/05 + 8 chiffres = 10 chiffres total)
+3. EMAIL: Présent ou manquant? Format valide?
+4. CIN: Format marocain? (1-2 lettres + 5-7 chiffres, ex: AB123456)
+5. CHAMPS MANQUANTS: Nom, prénom, date naissance, période?
+6. PRIX vs OFFICIEL: Si le prix officiel existe dans la liste, le montant correspond-il?
+
+Réponds UNIQUEMENT en JSON valide (pas de markdown):
+{"status":"ok|warning|error","message":"Résumé court en 1 phrase","issues":[]}
+- status "ok": tout est bon
+- status "warning": problème mineur (email manquant, petit écart de prix)
+- status "error": problème grave (gros écart de prix, téléphone invalide, données manquantes critiques)
+- issues: liste des problèmes détectés (strings courts)
+- message: résumé humain en français, max 20 mots`;
+
+          const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: 'llama-3.3-70b-versatile',
+              messages: [{ role: 'user', content: prompt }],
+              temperature: 0.1,
+              max_tokens: 200,
+            }),
+          });
+
+          if (!groqRes.ok) throw new Error(`Groq HTTP ${groqRes.status}`);
+          const groqData = await groqRes.json();
+          const rawText = groqData.choices?.[0]?.message?.content || '';
+          const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+
+          let assessment = { status: 'ok', message: 'Analyse IA indisponible', issues: [] };
+          if (jsonMatch) {
+            try { assessment = JSON.parse(jsonMatch[0]); } catch (_) {}
+          }
+
+          // 3. Store on the inscription document (non-blocking)
+          await db.collection('pending_members').doc(id).update({
+            aiAssessment: {
+              ...assessment,
+              checkedAt: new Date().toISOString(),
+              model: 'llama-3.3-70b',
+            },
+          });
+          console.log(`[AI] ✅ Assessment for ${prenom} ${nom}: ${assessment.status} — ${assessment.message}`);
+        } catch (aiErr) {
+          console.warn(`[AI] ⚠️ Assessment failed (non-blocking):`, aiErr.message);
+        }
+      })();
     } catch (err) {
       console.error('❌ [PUBLIC INSCRIPTION ERROR]:', err);
       res.status(500).json({
