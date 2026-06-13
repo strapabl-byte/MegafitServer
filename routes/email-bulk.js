@@ -1,20 +1,105 @@
 'use strict';
 // routes/email-bulk.js — MegaFit Bulk Email Campaign API
 // Super admin only. Sends branded emails via notification@megafit.ma
+// Sources: Firestore members collection (14k+) + SQLite cache (pending inscriptions)
 
 const { Router } = require('express');
 const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 const { cleanEmail, sendBulkEmails, sendEmail } = require('../services/email-service');
 const crypto = require('crypto');
 
-module.exports = function emailBulkRouter({ lc }) {
+// GYM_ID mapping for Firestore members (they use 'location' field)
+const GYM_ALIASES = {
+  'dokarat': ['dokarat', 'dokkarat', 'doukkarate'],
+  'marjane': ['marjane', 'saiss', 'saïss'],
+  'casa1':   ['casa1', 'casa anfa', 'anfa'],
+  'casa2':   ['casa2', 'lady anfa', 'lady', 'casa lady'],
+};
+
+function resolveGymId(location) {
+  if (!location) return '';
+  const l = location.toLowerCase().trim();
+  for (const [gymId, aliases] of Object.entries(GYM_ALIASES)) {
+    if (aliases.some(a => l.includes(a) || l === a)) return gymId;
+  }
+  return l;
+}
+
+// Collect ALL emails from Firestore + SQLite
+async function getAllEmails(db, lc, gymFilter) {
+  const emailMap = new Map(); // email → { email, name, gymId }
+
+  // 1. Firestore members (the main 14k+ database)
+  try {
+    const membersSnap = await db.collection('members')
+      .where('email', '!=', null)
+      .select('email', 'fullName', 'location', 'gymId')
+      .get();
+
+    console.log(`[EMAIL] Firestore members with email field: ${membersSnap.size}`);
+
+    membersSnap.forEach(doc => {
+      const d = doc.data();
+      const email = (d.email || '').trim().toLowerCase();
+      if (!email) return;
+      const gymId = resolveGymId(d.location || d.gymId || '');
+      if (gymFilter && gymFilter !== 'all' && gymId !== gymFilter) return;
+      if (!emailMap.has(email)) {
+        emailMap.set(email, { email, name: d.fullName || '', gymId });
+      }
+    });
+  } catch (err) {
+    console.warn('[EMAIL] Firestore members query failed:', err.message);
+  }
+
+  // 2. Firestore pending_members (unconfirmed inscriptions may have emails too)
+  try {
+    const pendingSnap = await db.collection('pending_members')
+      .where('email', '!=', null)
+      .select('email', 'nom', 'prenom', 'gymId')
+      .get();
+
+    console.log(`[EMAIL] Firestore pending_members with email: ${pendingSnap.size}`);
+
+    pendingSnap.forEach(doc => {
+      const d = doc.data();
+      const email = (d.email || '').trim().toLowerCase();
+      if (!email) return;
+      const gymId = resolveGymId(d.gymId || '');
+      if (gymFilter && gymFilter !== 'all' && gymId !== gymFilter) return;
+      const name = `${d.prenom || ''} ${d.nom || ''}`.trim();
+      if (!emailMap.has(email)) {
+        emailMap.set(email, { email, name, gymId });
+      }
+    });
+  } catch (err) {
+    console.warn('[EMAIL] Firestore pending query failed:', err.message);
+  }
+
+  // 3. SQLite cache (backup — catches anything synced locally)
+  try {
+    const sqliteEmails = lc.getDistinctEmails(gymFilter || 'all');
+    for (const r of sqliteEmails) {
+      const email = (r.email || '').trim().toLowerCase();
+      if (!email || emailMap.has(email)) continue;
+      emailMap.set(email, { email, name: r.name || '', gymId: r.gymId || '' });
+    }
+    console.log(`[EMAIL] SQLite added ${sqliteEmails.length} (after dedup: ${emailMap.size} total)`);
+  } catch (err) {
+    console.warn('[EMAIL] SQLite query failed:', err.message);
+  }
+
+  return Array.from(emailMap.values());
+}
+
+module.exports = function emailBulkRouter({ lc, db }) {
   const router = Router();
 
   // ── GET /api/emails/recipients ─────────────────────────────────────────────
-  router.get('/api/emails/recipients', verifyAzureToken, requireAdmin, (req, res) => {
+  router.get('/api/emails/recipients', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
       const gymFilter = req.query.gym || 'all';
-      const raw = lc.getDistinctEmails(gymFilter);
+      const raw = await getAllEmails(db, lc, gymFilter);
 
       let valid = 0, invalid = 0, fixed = 0;
       const validEmails = [];
@@ -48,7 +133,7 @@ module.exports = function emailBulkRouter({ lc }) {
       if (!subject?.trim()) return res.status(400).json({ error: 'Sujet requis' });
       if (!html?.trim()) return res.status(400).json({ error: 'Contenu requis' });
 
-      const raw = lc.getDistinctEmails(gymFilter || 'all');
+      const raw = await getAllEmails(db, lc, gymFilter || 'all');
       const recipients = [];
       for (const r of raw) {
         const cleaned = cleanEmail(r.email);
@@ -66,7 +151,6 @@ module.exports = function emailBulkRouter({ lc }) {
         createdAt: new Date().toISOString(),
       });
 
-      // Respond immediately
       res.json({ ok: true, campaignId, total: recipients.length, message: `Envoi lance: ${recipients.length} emails` });
 
       // Background send
