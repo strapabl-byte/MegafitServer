@@ -5,7 +5,7 @@
 const { Router } = require('express');
 const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 
-// ─── Groq caller with dual-key rotation ──────────────────────────────────────
+// ─── Groq caller with dual-key rotation + retry delay ───────────────────────
 const GROQ_KEYS = [
   process.env.GROQ_API_KEY || '',
   process.env.GROQ_API_KEY_2 || '',
@@ -13,9 +13,25 @@ const GROQ_KEYS = [
 
 const GROQ_LARGE    = 'llama-3.3-70b-versatile';
 const GROQ_SMALL    = 'llama-3.1-8b-instant';
-let groqKeyIndex = 0; // Tracks which key to try first
+let groqKeyIndex = 0;
+let groqLastCall = 0;        // Timestamp of last call
+const GROQ_MIN_GAP = 2500;   // Minimum 2.5s between calls to avoid bursts
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Parse retry delay from Groq error message
+function parseRetryDelay(errMsg) {
+  const match = errMsg.match(/try again in (\d+\.?\d*)s/i);
+  return match ? Math.min(Math.ceil(parseFloat(match[1]) * 1000) + 500, 30000) : 5000;
+}
 
 async function callGroq(messages, model = GROQ_LARGE, maxTokens = 1800, apiKey = null) {
+  // Rate-limit outgoing calls
+  const now = Date.now();
+  const wait = GROQ_MIN_GAP - (now - groqLastCall);
+  if (wait > 0) await sleep(wait);
+  groqLastCall = Date.now();
+
   const key = apiKey || GROQ_KEYS[groqKeyIndex] || GROQ_KEYS[0];
   if (!key) throw new Error('GROQ_API_KEY not configured');
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -39,31 +55,50 @@ async function groq(messages, useLarge = true) {
   try {
     return await callGroq(messages, model, tokens, GROQ_KEYS[groqKeyIndex]);
   } catch(e) {
-    if ((e.message.includes('429') || e.message.includes('rate')) && GROQ_KEYS.length > 1) {
-      // Rate limited → rotate to fallback key
-      const fallbackIdx = (groqKeyIndex + 1) % GROQ_KEYS.length;
-      console.log(`[GROQ] Key ${groqKeyIndex + 1} rate-limited → switching to key ${fallbackIdx + 1}`);
-      groqKeyIndex = fallbackIdx; // Remember for next calls
+    if ((e.message.includes('429') || e.message.includes('rate'))) {
+      const retryDelay = parseRetryDelay(e.message);
+      console.log(`[GROQ] Rate limited → waiting ${retryDelay}ms before retry`);
 
-      try {
-        return await callGroq(messages, model, tokens, GROQ_KEYS[fallbackIdx]);
-      } catch(e2) {
-        // Both keys exhausted on large model → try small model with both keys
-        if (useLarge) {
-          for (const key of GROQ_KEYS) {
-            try { return await callGroq(messages, GROQ_SMALL, 800, key); } catch {}
+      // 1. Try rotating to another key immediately
+      if (GROQ_KEYS.length > 1) {
+        const fallbackIdx = (groqKeyIndex + 1) % GROQ_KEYS.length;
+        console.log(`[GROQ] Switching to key ${fallbackIdx + 1}`);
+        groqKeyIndex = fallbackIdx;
+        try {
+          return await callGroq(messages, model, tokens, GROQ_KEYS[fallbackIdx]);
+        } catch(e2) {
+          if (e2.message.includes('429')) {
+            console.log(`[GROQ] Key ${fallbackIdx + 1} also rate-limited`);
+          } else {
+            throw e2;
           }
         }
-        throw e2;
+      }
+
+      // 2. Wait the retry delay, then try with smaller model (uses fewer tokens)
+      await sleep(retryDelay);
+      try {
+        return await callGroq(messages, GROQ_SMALL, 800, GROQ_KEYS[groqKeyIndex]);
+      } catch(e3) {
+        if (e3.message.includes('429')) {
+          // 3. Last resort: wait longer and try all keys with small model
+          console.log('[GROQ] Still limited → waiting 20s with small model');
+          await sleep(20000);
+          for (const key of GROQ_KEYS) {
+            try { return await callGroq(messages, GROQ_SMALL, 600, key); } catch {}
+          }
+        }
+        throw e3;
       }
     }
-    // Not a rate limit error, or only 1 key — try small model as fallback
+    // Not a rate limit error — try small model as fallback
     if (useLarge) {
       try { return await callGroq(messages, GROQ_SMALL, 800); } catch {}
     }
     throw e;
   }
 }
+
 
 // ─── DB Tables ────────────────────────────────────────────────────────────────
 function initAiTables(db) {
