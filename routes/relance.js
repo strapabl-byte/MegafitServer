@@ -90,7 +90,7 @@ function enrichWithActiveStatus(db, gymId, entries) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 module.exports = function createRelanceRouter(deps) {
-  const { lc } = deps;
+  const { lc, db } = deps;
   const router = express.Router();
 
   // ── GET /api/relance/birthdays?gym=XXX&window=7 ──────────────────────────
@@ -181,43 +181,224 @@ module.exports = function createRelanceRouter(deps) {
     }
   });
 
-  // ── GET /api/relance/inactive?gym=XXX&days=60 ────────────────────────────
-  // Members who have had no door scan in the last N days (default 60).
-  router.get('/inactive', (req, res) => {
+  // ── GET /api/relance/inactive?gym=XXX&page=1&pageSize=60 ──────────────────
+  // Inactive members: archived OR expired from SQLite + Firestore.
+  // Paginated 60 at a time. Commercial must confirm batch before seeing next.
+  router.get('/inactive', async (req, res) => {
     try {
-      const gymId = req.query.gym;
-      const days  = parseInt(req.query.days, 10) || 60;
+      const gymId    = req.query.gym;
+      const page     = Math.max(1, parseInt(req.query.page, 10) || 1);
+      const pageSize = Math.min(100, parseInt(req.query.pageSize, 10) || 60);
 
       if (!gymId) return res.status(400).json({ error: 'gym param required' });
 
-      const cutoff = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+      const seen = new Set(); // dedup by normalized name+phone
+      const allInactive = [];
 
-      // Members with no entry since cutoff and still active subscription
-      const members = lc.db.prepare(
-        `SELECT mc.*, rc.id as call_id, rc.called, rc.feedback, rc.comment, rc.call_date, rc.commercial as assigned_commercial,
-                MAX(e.date) as last_visit
-         FROM members_cache mc
-         LEFT JOIN entries e ON (e.name LIKE '%' || mc.full_name || '%') AND e.gym_id = mc.gym_id
-         LEFT JOIN relance_calls rc
-           ON rc.member_id = mc.id AND rc.gym_id = mc.gym_id AND rc.list_type = 'inactive'
-         WHERE mc.gym_id = ?
-           AND (mc.status = 'Active' OR mc.status = 'active' OR mc.status = '')
-           AND (mc.is_archive IS NULL OR mc.is_archive = 0)
-           AND (mc.expires_on IS NULL OR mc.expires_on >= date('now'))
-         GROUP BY mc.id
-         HAVING (last_visit IS NULL OR last_visit < ?)
-         ORDER BY last_visit ASC
-         LIMIT 200`
-      ).all(gymId, cutoff);
+      const makeKey = (name, phone) => {
+        const n = normName(name);
+        const p = (phone || '').replace(/\s+/g, '').replace(/^\+212/, '0').slice(-8);
+        return `${n}::${p}`;
+      };
 
-      const result = members.map(m => ({
-        ...m,
-        commercial: m.assigned_commercial || assignCommercial(gymId, m.id),
-      }));
+      // 1. SQLite: archived members + expired members
+      try {
+        const sqliteMembers = lc.db.prepare(
+          `SELECT mc.*, rc.id as call_id, rc.called, rc.feedback, rc.comment, rc.call_date, rc.commercial as assigned_commercial
+           FROM members_cache mc
+           LEFT JOIN relance_calls rc
+             ON rc.member_id = mc.id AND rc.gym_id = mc.gym_id AND rc.list_type = 'inactive'
+           WHERE mc.gym_id = ?
+             AND (
+               mc.is_archive = 1
+               OR mc.status IN ('Inactive', 'inactive', 'Expired', 'expired', 'Frozen', 'frozen', '')
+               OR (mc.expires_on IS NOT NULL AND mc.expires_on < date('now'))
+             )
+           ORDER BY mc.full_name ASC`
+        ).all(gymId);
 
-      // Enrich with active subscriber detection
-      const enriched = enrichWithActiveStatus(lc.db, gymId, result);
-      res.json({ members: enriched, total: enriched.length });
+        for (const m of sqliteMembers) {
+          const key = makeKey(m.full_name, m.phone);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          allInactive.push({
+            id: m.id,
+            full_name: m.full_name || '',
+            phone: m.phone || '',
+            email: m.email || '',
+            plan: m.plan || m.subscription_name || '',
+            expires_on: m.expires_on || '',
+            status: m.status || 'Inactive',
+            is_archive: m.is_archive || 0,
+            gym_id: gymId,
+            source: 'sqlite',
+            called: m.called || 0,
+            feedback: m.feedback || '',
+            comment: m.comment || '',
+            call_date: m.call_date || '',
+            commercial: m.assigned_commercial || assignCommercial(gymId, m.id),
+          });
+        }
+        console.log(`[relance/inactive] SQLite: ${sqliteMembers.length} inactive for ${gymId}`);
+      } catch (err) {
+        console.warn('[relance/inactive] SQLite error:', err.message);
+      }
+
+      // 2. Firestore: members collection — expired or no active subscription
+      if (db) {
+        try {
+          // Gym location mapping
+          const GYM_LOCATIONS = {
+            'dokarat': ['dokarat', 'dokkarat', 'doukkarate'],
+            'marjane': ['marjane', 'saiss', 'saïss'],
+            'casa1':   ['casa1', 'casa anfa', 'anfa'],
+            'casa2':   ['casa2', 'lady anfa', 'lady', 'casa lady'],
+          };
+
+          const locations = GYM_LOCATIONS[gymId] || [gymId];
+
+          // Get all members for this gym location
+          for (const loc of locations) {
+            try {
+              const snap = await db.collection('members')
+                .where('location', '==', loc)
+                .select('fullName', 'phone', 'email', 'subscriptionName', 'expiresOn', 'status', 'location', 'gymId')
+                .get();
+
+              snap.forEach(doc => {
+                const d = doc.data();
+                const name = d.fullName || '';
+                const phone = d.phone || '';
+                const key = makeKey(name, phone);
+                if (seen.has(key)) return;
+
+                // Check if expired or inactive
+                const expiresOn = d.expiresOn?.toDate ? d.expiresOn.toDate().toISOString().slice(0, 10) : (d.expiresOn || '');
+                const status = (d.status || '').toLowerCase();
+                const isExpired = expiresOn && expiresOn < new Date().toISOString().slice(0, 10);
+                const isInactive = ['inactive', 'expired', 'frozen', 'cancelled', ''].includes(status);
+
+                if (isExpired || isInactive) {
+                  seen.add(key);
+                  allInactive.push({
+                    id: doc.id,
+                    full_name: name,
+                    phone: phone,
+                    email: d.email || '',
+                    plan: d.subscriptionName || '',
+                    expires_on: expiresOn,
+                    status: isExpired ? 'Expired' : (d.status || 'Inactive'),
+                    is_archive: 0,
+                    gym_id: gymId,
+                    source: 'firestore',
+                    called: 0,
+                    feedback: '',
+                    comment: '',
+                    call_date: '',
+                    commercial: assignCommercial(gymId, doc.id),
+                  });
+                }
+              });
+            } catch(_) {}
+          }
+
+          // Also try by gymId field
+          try {
+            const snap2 = await db.collection('members')
+              .where('gymId', '==', gymId)
+              .select('fullName', 'phone', 'email', 'subscriptionName', 'expiresOn', 'status', 'location', 'gymId')
+              .get();
+
+            snap2.forEach(doc => {
+              const d = doc.data();
+              const name = d.fullName || '';
+              const phone = d.phone || '';
+              const key = makeKey(name, phone);
+              if (seen.has(key)) return;
+
+              const expiresOn = d.expiresOn?.toDate ? d.expiresOn.toDate().toISOString().slice(0, 10) : (d.expiresOn || '');
+              const status = (d.status || '').toLowerCase();
+              const isExpired = expiresOn && expiresOn < new Date().toISOString().slice(0, 10);
+              const isInactive = ['inactive', 'expired', 'frozen', 'cancelled', ''].includes(status);
+
+              if (isExpired || isInactive) {
+                seen.add(key);
+                allInactive.push({
+                  id: doc.id,
+                  full_name: name,
+                  phone: phone,
+                  email: d.email || '',
+                  plan: d.subscriptionName || '',
+                  expires_on: expiresOn,
+                  status: isExpired ? 'Expired' : (d.status || 'Inactive'),
+                  is_archive: 0,
+                  gym_id: gymId,
+                  source: 'firestore',
+                  called: 0,
+                  feedback: '',
+                  comment: '',
+                  call_date: '',
+                  commercial: assignCommercial(gymId, doc.id),
+                });
+              }
+            });
+          } catch(_) {}
+
+          console.log(`[relance/inactive] Firestore total: ${allInactive.length} inactive for ${gymId}`);
+        } catch (err) {
+          console.warn('[relance/inactive] Firestore error:', err.message);
+        }
+      }
+
+      // Merge call history from relance_calls for Firestore entries
+      try {
+        const calls = lc.db.prepare(
+          `SELECT member_id, called, feedback, comment, call_date, commercial
+           FROM relance_calls WHERE gym_id = ? AND list_type = 'inactive'`
+        ).all(gymId);
+        const callMap = {};
+        for (const c of calls) callMap[c.member_id] = c;
+
+        for (const m of allInactive) {
+          if (m.source === 'firestore' && callMap[m.id]) {
+            const c = callMap[m.id];
+            m.called = c.called || 0;
+            m.feedback = c.feedback || '';
+            m.comment = c.comment || '';
+            m.call_date = c.call_date || '';
+            m.commercial = c.commercial || m.commercial;
+          }
+        }
+      } catch(_) {}
+
+      // Sort: uncalled first, then by name
+      allInactive.sort((a, b) => {
+        if (a.called && !b.called) return 1;
+        if (!a.called && b.called) return -1;
+        return (a.full_name || '').localeCompare(b.full_name || '');
+      });
+
+      // Pagination
+      const total = allInactive.length;
+      const totalPages = Math.ceil(total / pageSize);
+      const start = (page - 1) * pageSize;
+      const pageData = allInactive.slice(start, start + pageSize);
+
+      // Check if previous batch is confirmed (all called)
+      const prevBatchEnd = start;
+      const prevBatch = allInactive.slice(Math.max(0, prevBatchEnd - pageSize), prevBatchEnd);
+      const prevBatchAllCalled = prevBatch.length === 0 || prevBatch.every(m => m.called);
+
+      res.json({
+        members: pageData,
+        total,
+        page,
+        pageSize,
+        totalPages,
+        prevBatchConfirmed: prevBatchAllCalled,
+        calledInBatch: pageData.filter(m => m.called).length,
+        pendingInBatch: pageData.filter(m => !m.called).length,
+      });
     } catch (err) {
       console.error('[relance/inactive]', err);
       res.status(500).json({ error: err.message });
