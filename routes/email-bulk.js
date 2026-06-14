@@ -274,13 +274,113 @@ module.exports = function emailBulkRouter({ lc, db }) {
   // ── POST /api/emails/send-test ─────────────────────────────────────────────
   router.post('/api/emails/send-test', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
-      const { to, subject, html, template, imageUrl, ctaText, ctaUrl } = req.body;
+      const { to, subject, html, template, imageUrl, ctaText, ctaUrl, language } = req.body;
       if (!to || !subject || !html) return res.status(400).json({ error: 'to, subject, html requis' });
-      const options = { template: template || 'announcement', imageUrl, ctaText, ctaUrl };
+      const options = { template: template || 'announcement', imageUrl, ctaText, ctaUrl, language: language || 'fr' };
       const result = await sendEmail(to, subject, html, 'Admin', options);
       res.json({ ok: true, ...result });
     } catch (err) {
       console.error('[EMAIL-BULK send-test]', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── POST /api/emails/ai-enhance ────────────────────────────────────────────
+  // AI-powered: improve text, translate, adjust tone for template type
+  router.post('/api/emails/ai-enhance', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const { subject, body, template, language, action } = req.body;
+      // action: 'improve' | 'translate_ar' | 'translate_both' | 'shorten' | 'formal'
+
+      const GROQ_KEYS = [process.env.GROQ_API_KEY || '', process.env.GROQ_API_KEY_2 || ''].filter(Boolean);
+      if (GROQ_KEYS.length === 0) return res.status(503).json({ error: 'AI not configured (GROQ_API_KEY missing)' });
+
+      const templateInfo = TEMPLATES[template] || TEMPLATES.announcement;
+      const templateContext = `Type de campagne: ${templateInfo.label}`;
+
+      let systemPrompt = `Tu es un expert en marketing email pour MegaFit, une chaine de salles de sport premium au Maroc. Tu rediges des emails professionnels, engageants et percutants. REGLES STRICTES:
+- JAMAIS d'emojis dans le texte
+- Ton professionnel et chaleureux
+- Utilise {firstname} pour personnaliser
+- Retourne UNIQUEMENT le HTML du corps de l'email (pas de balises html/body/head)
+- Utilise des balises HTML simples: <b>, <i>, <p>, <br>, <h2>, <h3>
+- ${templateContext}`;
+
+      let userPrompt = '';
+
+      switch (action) {
+        case 'translate_ar':
+          systemPrompt += '\n- Traduis en arabe marocain/standard. Direction RTL.';
+          userPrompt = `Traduis cet email en arabe professionnel:\n\nSujet: ${subject}\nContenu:\n${body}\n\nRetourne un JSON: {"subject": "sujet en arabe", "body": "contenu HTML en arabe"}`;
+          break;
+
+        case 'translate_both':
+          systemPrompt += '\n- Cree une version bilingue: francais en premier, puis arabe. Separe par une ligne horizontale.';
+          userPrompt = `Cree une version bilingue (francais + arabe) de cet email:\n\nSujet: ${subject}\nContenu:\n${body}\n\nRetourne un JSON: {"subject": "sujet bilingue", "body": "contenu HTML bilingue avec francais en haut et arabe en bas, separes par <hr style='border:1px solid #e5e5e5;margin:24px 0;'>"}`;
+          break;
+
+        case 'shorten':
+          systemPrompt += '\n- Raccourcis le texte: garde l\'essentiel, sois concis et impactant.';
+          userPrompt = `Raccourcis cet email en gardant l'impact:\n\nSujet: ${subject}\nContenu:\n${body}\n\nRetourne un JSON: {"subject": "sujet court", "body": "contenu HTML raccourci"}`;
+          break;
+
+        case 'formal':
+          systemPrompt += '\n- Rends le texte tres formel et institutionnel.';
+          userPrompt = `Rends cet email plus formel et professionnel:\n\nSujet: ${subject}\nContenu:\n${body}\n\nRetourne un JSON: {"subject": "sujet formel", "body": "contenu HTML formel"}`;
+          break;
+
+        case 'improve':
+        default:
+          userPrompt = `Ameliore cet email pour le rendre plus professionnel et engageant. Adapte le ton au type "${templateInfo.label}":\n\nSujet: ${subject || '(a generer)'}\nContenu:\n${body || '(a generer)'}\n\nRetourne un JSON: {"subject": "sujet ameliore", "body": "contenu HTML ameliore"}`;
+          break;
+      }
+
+      // Call Groq with key rotation
+      let result = null;
+      for (const key of GROQ_KEYS) {
+        try {
+          const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+            body: JSON.stringify({
+              model: 'llama-3.3-70b-versatile',
+              messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userPrompt },
+              ],
+              max_tokens: 2000,
+              temperature: 0.7,
+            }),
+          });
+
+          if (!groqRes.ok) {
+            if (groqRes.status === 429) continue; // try next key
+            const errText = await groqRes.text();
+            throw new Error(`Groq ${groqRes.status}: ${errText.slice(0, 200)}`);
+          }
+
+          const data = await groqRes.json();
+          const raw = data.choices?.[0]?.message?.content || '';
+
+          // Parse JSON from response
+          const jsonMatch = raw.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            result = JSON.parse(jsonMatch[0]);
+          } else {
+            result = { subject: subject, body: raw };
+          }
+          break; // success
+        } catch (err) {
+          if (err.message.includes('429')) continue;
+          throw err;
+        }
+      }
+
+      if (!result) return res.status(429).json({ error: 'AI temporairement indisponible. Reessayez.' });
+
+      res.json({ ok: true, subject: result.subject || subject, body: result.body || body });
+    } catch (err) {
+      console.error('[EMAIL AI]', err);
       res.status(500).json({ error: err.message });
     }
   });
@@ -305,3 +405,4 @@ module.exports = function emailBulkRouter({ lc, db }) {
 
   return router;
 };
+

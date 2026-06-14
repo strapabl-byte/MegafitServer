@@ -1,6 +1,6 @@
 'use strict';
-// services/email-service.js — MegaFit Bulk Email Service v2
-// Premium HTML templates, image support, batch sending with persistent queue
+// services/email-service.js — MegaFit Professional Email Service v3
+// Clean, professional HTML templates — NO emojis in emails
 
 const nodemailer = require('nodemailer');
 
@@ -11,10 +11,8 @@ const SMTP_USER = process.env.SMTP_NOTIF_USER || process.env.SMTP_USER || 'notif
 const SMTP_PASS = process.env.SMTP_NOTIF_PASS || process.env.SMTP_PASS || '';
 const SMTP_FROM = `"MegaFit" <${SMTP_USER}>`;
 
-// Banner hosted on dashboard (public, accessible by email clients)
 const BANNER_URL = 'https://megafitauth.web.app/images/megafit-banner.png';
 
-// cPanel limit: ~300/hour → safe batch: 40 per batch, 6s delay
 const BATCH_SIZE = 40;
 const BATCH_DELAY_MS = 6000;
 
@@ -79,48 +77,49 @@ function cleanEmail(raw) {
 }
 
 // ─── Template Types ───────────────────────────────────────────────────────────
+// Each template has a distinct visual identity and use case
 const TEMPLATES = {
   announcement: {
     accent: '#6366f1',
-    accentLight: 'rgba(99,102,241,0.15)',
-    icon: '📢',
-    label: 'Annonce',
+    label: 'Annonce Generale',
+    labelAr: 'اعلان عام',
+    tagline: 'Communication officielle',
   },
   offer: {
     accent: '#22c55e',
-    accentLight: 'rgba(34,197,94,0.15)',
-    icon: '🔥',
-    label: 'Offre',
+    label: 'Offre Promotionnelle',
+    labelAr: 'عرض ترويجي',
+    tagline: 'Offre exclusive pour nos membres',
   },
   challenge: {
     accent: '#f59e0b',
-    accentLight: 'rgba(245,158,11,0.15)',
-    icon: '🏆',
-    label: 'Challenge',
+    label: 'Challenge Fitness',
+    labelAr: 'تحدي اللياقة',
+    tagline: 'Relevez le defi',
   },
   event: {
     accent: '#ec4899',
-    accentLight: 'rgba(236,72,153,0.15)',
-    icon: '🎉',
-    label: 'Événement',
+    label: 'Evenement',
+    labelAr: 'حدث',
+    tagline: 'A ne pas manquer',
   },
   info: {
     accent: '#3b82f6',
-    accentLight: 'rgba(59,130,246,0.15)',
-    icon: 'ℹ️',
     label: 'Information',
+    labelAr: 'معلومات',
+    tagline: 'Information importante',
   },
   reminder: {
     accent: '#8b5cf6',
-    accentLight: 'rgba(139,92,246,0.15)',
-    icon: '⏰',
     label: 'Rappel',
+    labelAr: 'تذكير',
+    tagline: 'Rappel important',
   },
 };
 
-// ─── Premium HTML Template ────────────────────────────────────────────────────
+// ─── Professional HTML Template ───────────────────────────────────────────────
 function buildHtmlEmail(subject, bodyHtml, recipientName, options = {}) {
-  const { template = 'announcement', imageUrl = null, ctaText = '', ctaUrl = '' } = options;
+  const { template = 'announcement', imageUrl = null, ctaText = '', ctaUrl = '', language = 'fr' } = options;
   const tmpl = TEMPLATES[template] || TEMPLATES.announcement;
 
   const firstName = recipientName
@@ -133,56 +132,55 @@ function buildHtmlEmail(subject, bodyHtml, recipientName, options = {}) {
     .replace(/\{name\}/gi, recipientName || 'Membre')
     .replace(/\[name\]/gi, recipientName || 'Membre');
 
+  const isRtl = language === 'ar';
+  const dir = isRtl ? 'rtl' : 'ltr';
+
   const imageBlock = imageUrl ? `
     <tr>
       <td style="padding:0;">
-        <img src="${imageUrl}" alt="" style="width:100%;height:auto;display:block;border-radius:0;" />
+        <img src="${imageUrl}" alt="" style="width:100%;height:auto;display:block;" />
       </td>
     </tr>` : '';
 
   const ctaBlock = (ctaText && ctaUrl) ? `
     <tr>
-      <td style="padding:24px 32px 8px;text-align:center;">
-        <a href="${ctaUrl}" style="
-          display:inline-block;padding:16px 40px;
+      <td style="padding:28px 40px 12px;text-align:center;">
+        <a href="${ctaUrl}" target="_blank" style="
+          display:inline-block;padding:14px 42px;
           background:${tmpl.accent};color:#ffffff;
-          border-radius:14px;text-decoration:none;
-          font-weight:900;font-size:16px;letter-spacing:0.5px;
-          box-shadow:0 4px 16px ${tmpl.accent}40;
+          border-radius:8px;text-decoration:none;
+          font-weight:700;font-size:15px;letter-spacing:0.3px;
         ">${ctaText}</a>
       </td>
     </tr>` : '';
 
+  const tagLabel = isRtl ? tmpl.labelAr : tmpl.label;
+
   return `<!DOCTYPE html>
-<html lang="fr">
+<html lang="${language}" dir="${dir}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${subject}</title>
 </head>
-<body style="margin:0;padding:0;background:#0a0a12;font-family:'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0a0a12;padding:24px 8px;">
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;-webkit-font-smoothing:antialiased;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:32px 8px;">
     <tr>
       <td align="center">
-        <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;border-radius:20px;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,0.5);">
+        <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.06);border:1px solid #e4e4e7;">
 
-          <!-- Banner -->
+          <!-- Banner with white background -->
           <tr>
-            <td style="background:#000;padding:20px 24px 12px;text-align:center;">
-              <img src="${BANNER_URL}" alt="MegaFit" style="max-width:220px;height:auto;display:inline-block;" />
+            <td style="background:#ffffff;padding:24px 32px 16px;text-align:center;border-bottom:1px solid #f0f0f0;">
+              <img src="${BANNER_URL}" alt="MegaFit" style="max-width:200px;height:auto;display:inline-block;" />
             </td>
           </tr>
 
-          <!-- Accent Line -->
+          <!-- Category Tag -->
           <tr>
-            <td style="height:3px;background:linear-gradient(90deg, ${tmpl.accent}, ${tmpl.accent}80, transparent);"></td>
-          </tr>
-
-          <!-- Template Badge -->
-          <tr>
-            <td style="background:#111118;padding:16px 32px 4px;">
-              <div style="display:inline-block;padding:6px 14px;border-radius:10px;background:${tmpl.accentLight};border:1px solid ${tmpl.accent}30;font-size:12px;font-weight:800;color:${tmpl.accent};letter-spacing:0.5px;">
-                ${tmpl.icon} ${tmpl.label.toUpperCase()}
+            <td style="background:#ffffff;padding:16px 40px 0;">
+              <div style="display:inline-block;padding:5px 14px;border-radius:6px;background:${tmpl.accent}12;border:1px solid ${tmpl.accent}25;font-size:11px;font-weight:700;color:${tmpl.accent};letter-spacing:0.5px;text-transform:uppercase;">
+                ${tagLabel}
               </div>
             </td>
           </tr>
@@ -191,7 +189,7 @@ function buildHtmlEmail(subject, bodyHtml, recipientName, options = {}) {
 
           <!-- Body -->
           <tr>
-            <td style="background:#111118;padding:20px 32px 28px;color:#d1d5db;font-size:15px;line-height:1.8;">
+            <td style="background:#ffffff;padding:20px 40px 32px;color:#27272a;font-size:15px;line-height:1.8;direction:${dir};">
               ${processedBody}
             </td>
           </tr>
@@ -199,18 +197,18 @@ function buildHtmlEmail(subject, bodyHtml, recipientName, options = {}) {
           ${ctaBlock}
 
           <!-- Spacer -->
-          <tr><td style="background:#111118;height:16px;"></td></tr>
+          <tr><td style="background:#ffffff;height:8px;"></td></tr>
 
           <!-- Footer -->
           <tr>
-            <td style="background:#0a0a10;padding:20px 32px;text-align:center;border-top:1px solid rgba(255,255,255,0.05);">
-              <div style="font-size:11px;color:#4b5563;line-height:1.6;">
-                <strong style="color:#6b7280;">MegaFit</strong> — Dokkarat · Saïss · Anfa · Lady Anfa<br>
-                📧 notification@megafit.ma · 🌐 megafit.ma<br><br>
-                <span style="font-size:10px;color:#374151;">
-                  Vous recevez cet email car vous êtes membre de MegaFit.<br>
-                  Pour ne plus recevoir ces emails, répondez "STOP".
-                </span>
+            <td style="background:#fafafa;padding:24px 40px;text-align:center;border-top:1px solid #f0f0f0;">
+              <div style="font-size:12px;color:#71717a;line-height:1.6;">
+                <strong style="color:#52525b;">MegaFit</strong><br>
+                Dokkarat &middot; Sa&iuml;ss &middot; Anfa &middot; Lady Anfa
+              </div>
+              <div style="margin-top:12px;font-size:10px;color:#a1a1aa;line-height:1.5;">
+                Vous recevez cet email en tant que membre de MegaFit.<br>
+                Pour vous d&eacute;sabonner, r&eacute;pondez &laquo; STOP &raquo; &agrave; cet email.
               </div>
             </td>
           </tr>
@@ -242,7 +240,7 @@ async function sendEmail(to, subject, htmlBody, recipientName, options = {}) {
   return { messageId: info.messageId, accepted: info.accepted, rejected: info.rejected };
 }
 
-// ─── Bulk Sender (with rate limiting) ─────────────────────────────────────────
+// ─── Bulk Sender ──────────────────────────────────────────────────────────────
 async function sendBulkEmails(recipients, subject, htmlBody, onProgress, options = {}) {
   const transport = getTransporter();
   let sent = 0, failed = 0, errors = [];
