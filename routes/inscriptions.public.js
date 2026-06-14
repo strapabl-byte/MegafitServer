@@ -726,7 +726,7 @@ Réponds UNIQUEMENT en JSON valide (pas de markdown):
     try {
       const {
         managerToken, gymId: rawGymId,
-        montant, raison, categorie, beneficiaire,
+        montant, raison, categorie, beneficiaire, moyenPaiement,
         proofPhoto, managerSignature, managerName: clientManagerName
       } = req.body;
 
@@ -812,6 +812,7 @@ Réponds UNIQUEMENT en JSON valide (pas de markdown):
         location: gymId,
         status: 'pending',
         source: 'tablet_qr',
+        moyenPaiement: moyenPaiement || null,
         requestedBy: verifiedManagerName,
         managerTokenId: managerToken,
         approvedBy: null,
@@ -834,14 +835,14 @@ Réponds UNIQUEMENT en JSON valide (pas de markdown):
 
       // 🔔 Notification: new décaissement pending
       try {
-        lc.addNotification({
+         lc.addNotification({
           type: 'decaissement',
           gymId: gymId,
-          title: `💰 Décaissement en attente — ${Number(montant).toLocaleString()} DH`,
-          message: `${categorie} · ${beneficiaire.trim()} · ${raison.trim()} · Par ${verifiedManagerName}`,
+          title: `Decaissement en attente - ${Number(montant).toLocaleString()} DH`,
+          message: `${categorie}${moyenPaiement ? ' (' + moyenPaiement + ')' : ''} - ${beneficiaire.trim()} - ${raison.trim()} - Par ${verifiedManagerName}`,
           severity: Number(montant) >= 5000 ? 'critical' : 'warning',
           route: '/registre',
-          icon: '💰',
+          icon: categorie === 'banque' ? '🏦' : '💰',
           refId: ref.id,
         });
       } catch(_) {}
