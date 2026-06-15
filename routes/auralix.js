@@ -72,15 +72,32 @@ module.exports = function(deps) {
                 COALESCE(CAST(espece AS REAL),0) AS espece,
                 COALESCE(CAST(virement AS REAL),0) AS virement,
                 COALESCE(CAST(cheque AS REAL),0) AS cheque,
-                COALESCE(CAST(reste AS REAL),0) AS reste
+                COALESCE(CAST(prix AS REAL),0) AS prix,
+                COALESCE(CAST(reste AS REAL),0) AS stored_reste,
+                COALESCE(source, '') AS source
          FROM register_cache WHERE gym_id=? AND date IN (${ph})`
       ).all(gymId, ...dates);
       const espece   = Math.round(rows.reduce((s, r) => s + (r.espece || 0), 0));
       const tpe      = Math.round(rows.reduce((s, r) => s + (r.tpe || 0), 0));
       const virement = Math.round(rows.reduce((s, r) => s + (r.virement || 0), 0));
       const cheque   = Math.round(rows.reduce((s, r) => s + (r.cheque || 0), 0));
-      const reste    = Math.round(rows.reduce((s, r) => s + (r.reste || 0), 0));
-      const resteCount = rows.filter(r => (r.reste || 0) > 0).length;
+
+      // Smart reste calculation: recalculate from prix - paid (like frontend)
+      // Exclude reste_settlement entries (they are payments, not debts)
+      let reste = 0, resteCount = 0;
+      for (const r of rows) {
+        if (r.source === 'reste_settlement') continue; // skip payment entries
+        const paid = (r.tpe || 0) + (r.espece || 0) + (r.virement || 0) + (r.cheque || 0);
+        const prix = r.prix || 0;
+        if (prix > 0) {
+          const computed = prix - paid;
+          if (computed > 0) { reste += computed; resteCount++; }
+        } else if ((r.stored_reste || 0) > 0) {
+          reste += r.stored_reste; resteCount++;
+        }
+      }
+      reste = Math.round(reste);
+
       const revenue  = espece + tpe + virement + cheque;
       const dec = lc.db.prepare(
         `SELECT COALESCE(CAST(montant AS REAL),0) AS m FROM decaissements_cache
