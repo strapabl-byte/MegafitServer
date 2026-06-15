@@ -209,7 +209,7 @@ function buildSnapshot(db, getMeta, gymScope = 'all') {
   if (!db) return { error: 'DB not available', meta: { gym_scope: gymScope } };
 
   const GYMS      = ['dokarat', 'marjane', 'casa1', 'casa2'];
-  const GYM_NAMES = { dokarat: 'Fès Doukkarate', marjane: 'Fès Saiss', casa1: 'Casa Anfa', casa2: 'Lady Anfa' };
+  const GYM_NAMES = { dokarat: 'Fès Doukkarate', marjane: 'Fès Saiss', casa1: 'Casa Anfa', casa2: 'Casa Lady' };
   // Gyms where door sensor hardware is NOT yet installed — traffic = 0 is a hardware gap, NOT a business signal
   const GYMS_NO_DOOR_SENSOR = ['casa1', 'casa2'];
   const targetGyms = gymScope === 'all' ? GYMS : [gymScope];
@@ -374,7 +374,7 @@ function buildSnapshot(db, getMeta, gymScope = 'all') {
   } catch {}
 
   // ── Door traffic — only gyms WITH sensor installed ────────────────────────
-  // casa1 (Casa Anfa) and casa2 (Lady Anfa) have no door sensor yet — excluded
+  // casa1 (Casa Anfa) and casa2 (Casa Lady) have no door sensor yet — excluded
   const trafficToday  = trafficGyms.length > 0 ? q1(`SELECT COALESCE(SUM(count),0) v FROM daily_stats WHERE date=? AND gym_id IN (${trafficGymIn})`, today, ...trafficGyms) : { v: 0 };
   const trafficMonth  = trafficGyms.length > 0 ? q1(`SELECT COALESCE(SUM(count),0) v FROM daily_stats WHERE strftime('%Y-%m',date)=? AND gym_id IN (${trafficGymIn})`, ym, ...trafficGyms) : { v: 0 };
   const trafficAvg30  = trafficGyms.length > 0 ? q1(`SELECT AVG(daily) avg FROM (SELECT date, SUM(count) daily FROM daily_stats WHERE date >= date(?,' -30 days') AND gym_id IN (${trafficGymIn}) GROUP BY date)`, today, ...trafficGyms) : { avg: 0 };
@@ -710,7 +710,7 @@ function buildSysPrompt(snap, sig) {
       ).join('\n')}`
     : '';
 
-  return `Tu es AURALIX — l'agent IA opérationnel ultime de l'empire MegaFit (4 clubs au Maroc: Fès Doukkarate, Fès Saiss, Casa Anfa, Lady Anfa).
+  return `Tu es AURALIX — l'agent IA opérationnel ultime de l'empire MegaFit (4 clubs au Maroc: Fès Doukkarate, Fès Saiss, Casa Anfa, Casa Lady).
 Tu es un OPÉRATEUR IMPITOYABLE. 20+ ans d'expérience en gestion de salles de sport, vente, finance, multi-sites.
 Tu vois TOUT. Tu analyses TOUT. Tu ne laisses RIEN passer.
 

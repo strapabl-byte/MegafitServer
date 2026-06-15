@@ -33,7 +33,7 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
     'dokarat': 'dokarat', 'dokkarat': 'dokarat', 'doukkarate': 'dokarat', 'fes dokkarat': 'dokarat', 'doukarat': 'dokarat',
     'marjane': 'marjane', 'saiss': 'marjane', 'fes saiss': 'marjane', 'marjan': 'marjane',
     'casa1':   'casa1',   'anfa': 'casa1', 'casa anfa': 'casa1', 'casablanca anfa': 'casa1',
-    'casa2':   'casa2',   'lady': 'casa2', 'casa lady': 'casa2', 'casa lady anfa': 'casa2', 'lady anfa': 'casa2',
+    'casa2':   'casa2',   'lady': 'casa2', 'casa lady': 'casa2', 'casa casa lady': 'casa2', 'casa lady': 'casa2',
   };
   const VALID_GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
 
@@ -550,7 +550,7 @@ Réponds UNIQUEMENT en JSON valide (pas de markdown):
         LIMIT ${allGyms ? 10 : 5}
       `).all(searchTerm, searchTerm, searchTerm);
 
-      const GYM_NAMES = { dokarat: 'F\u00e8s Doukkarate', marjane: 'F\u00e8s Sa\u00efss', casa1: 'Casa Anfa', casa2: 'Casa Lady Anfa' };
+      const GYM_NAMES = { dokarat: 'F\u00e8s Doukkarate', marjane: 'F\u00e8s Sa\u00efss', casa1: 'Casa Anfa', casa2: 'Casa Lady' };
 
       res.json(rows.map(m => ({
         id: m.id,
@@ -911,7 +911,7 @@ Réponds UNIQUEMENT en JSON valide (pas de markdown):
       const VALID_EMERGENCIES = ['Low', 'Medium', 'High'];
       const safeEmergency = VALID_EMERGENCIES.includes(emergency) ? emergency : 'Low';
 
-      const GYM_NAMES = { dokarat: 'Dokkarat Fès', marjane: 'Fès Saiss', casa1: 'Casa Anfa', casa2: 'Lady Anfa' };
+      const GYM_NAMES = { dokarat: 'Dokkarat Fès', marjane: 'Fès Saiss', casa1: 'Casa Anfa', casa2: 'Casa Lady' };
       const gymName = GYM_NAMES[gymId] || gymId;
       const today = new Date().toISOString().slice(0, 10);
 
