@@ -184,6 +184,23 @@ function initAiTables(db) {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       resolved_at DATETIME
     );
+    CREATE TABLE IF NOT EXISTS ai_snapshot_cache (
+      id TEXT PRIMARY KEY DEFAULT 'latest',
+      gym_scope TEXT DEFAULT 'all',
+      snapshot_json TEXT,
+      signals_json TEXT,
+      alerts_json TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS ai_daily_digest (
+      id TEXT PRIMARY KEY,
+      date TEXT NOT NULL,
+      gym_scope TEXT DEFAULT 'all',
+      digest_text TEXT,
+      key_metrics TEXT,
+      trends TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 }
 
@@ -754,6 +771,165 @@ module.exports = function aiAgentRouter({ lc }) {
   const getMeta = (key) => { try { return lc.getMeta?.(key); } catch { return null; } };
   const snap = (gym) => buildSnapshot(db, getMeta, gym);
 
+  // ═══ 🧠 BACKGROUND INTELLIGENCE ENGINE ═══════════════════════════════════
+  // Caches snapshot every 15 min + generates AI digest every 6 hours
+  // So when user calls AI, data is INSTANT — no rebuilding from scratch
+  const CACHE_INTERVAL  = 15 * 60 * 1000;  // 15 minutes
+  const DIGEST_INTERVAL = 6 * 60 * 60 * 1000; // 6 hours
+  let lastDigestTime = 0;
+
+  // In-memory cache for instant access
+  let cachedSnapshot = null;
+  let cachedSignals  = null;
+  let cachedAlerts   = null;
+  let cacheTimestamp = 0;
+
+  function refreshCache(gymScope = 'all') {
+    try {
+      const s = snap(gymScope);
+      const { signals, alerts } = runRules(s);
+      cachedSnapshot = s;
+      cachedSignals  = signals;
+      cachedAlerts   = alerts;
+      cacheTimestamp = Date.now();
+
+      // Persist to DB so it survives restarts
+      if (db) {
+        try {
+          db.prepare(`INSERT OR REPLACE INTO ai_snapshot_cache (id, gym_scope, snapshot_json, signals_json, alerts_json, updated_at) VALUES (?, ?, ?, ?, ?, datetime('now'))`)
+            .run(`cache_${gymScope}`, gymScope, JSON.stringify(s), JSON.stringify(signals), JSON.stringify(alerts));
+        } catch (dbErr) { console.error('[AURALIX-BG] Cache DB write error:', dbErr.message); }
+      }
+
+      // Save alerts to DB
+      saveAlerts(alerts, gymScope);
+
+      console.log(`[AURALIX-BG] ✓ Cache refreshed (${gymScope}) — CA: ${s.revenue?.month?.toLocaleString() || 0} DH | ${alerts.length} alerts`);
+      return { snapshot: s, signals, alerts };
+    } catch (e) {
+      console.error('[AURALIX-BG] Cache refresh error:', e.message);
+      return null;
+    }
+  }
+
+  // Get cached or fresh data — always fast
+  function getCached(gymScope = 'all') {
+    const cacheAge = Date.now() - cacheTimestamp;
+    // If cache is fresh enough (< 20 min) and same scope, use it
+    if (cachedSnapshot && cacheAge < CACHE_INTERVAL * 1.3 && (gymScope === 'all' || cachedSnapshot.meta?.gym_scope === gymScope)) {
+      return { snapshot: cachedSnapshot, signals: cachedSignals, alerts: cachedAlerts, fromCache: true, cacheAge: Math.round(cacheAge / 1000) };
+    }
+    // Otherwise rebuild (and cache it)
+    const result = refreshCache(gymScope);
+    if (result) return { ...result, fromCache: false, cacheAge: 0 };
+    // Last resort: try loading from DB
+    if (db) {
+      try {
+        const row = db.prepare(`SELECT * FROM ai_snapshot_cache WHERE id=?`).get(`cache_${gymScope}`);
+        if (row) {
+          return {
+            snapshot: JSON.parse(row.snapshot_json),
+            signals: JSON.parse(row.signals_json),
+            alerts: JSON.parse(row.alerts_json),
+            fromCache: true, cacheAge: 999,
+          };
+        }
+      } catch {}
+    }
+    return { snapshot: snap(gymScope), signals: {}, alerts: [], fromCache: false };
+  }
+
+  // Build daily digest context — accumulated AI memory
+  function getDailyDigests(limit = 7) {
+    if (!db) return [];
+    try {
+      return db.prepare(`SELECT date, digest_text, key_metrics, trends FROM ai_daily_digest ORDER BY date DESC LIMIT ?`).all(limit);
+    } catch { return []; }
+  }
+
+  // Generate AI daily digest (runs every 6h)
+  async function generateDigest() {
+    try {
+      const { snapshot: s, signals } = getCached('all');
+      if (!s?.revenue) return;
+
+      const today = new Date(Date.now() + 3600000).toISOString().slice(0, 10);
+      const digestId = `digest_${today}_${Date.now()}`;
+
+      // Check if we already have a digest for today
+      if (db) {
+        const existing = db.prepare(`SELECT COUNT(*) cnt FROM ai_daily_digest WHERE date=?`).get(today);
+        if ((existing?.cnt || 0) >= 4) {
+          console.log('[AURALIX-BG] Already have enough digests for today, skipping');
+          return;
+        }
+      }
+
+      // Build compact metrics snapshot for digest
+      const metrics = {
+        date: today,
+        ca_month: s.revenue.month,
+        ca_today: s.revenue.today,
+        vs_prev: s.revenue.vs_prev_month_pct,
+        goal_pct: signals.goal_progress_pct || 0,
+        debt: s.debts?.total_open || 0,
+        debt_members: s.debts?.members_count || 0,
+        active_members: s.members?.active_total || 0,
+        expiring: s.members?.expiring_30d || 0,
+        incidents_open: s.incidents?.open_total || 0,
+        decaissements: s.decaissements?.month_total || 0,
+        empire_status: signals.empire_status || 'UNKNOWN',
+        top_gyms: s.gyms?.map(g => ({ name: g.name, rev: g.revenue, growth: g.growth_pct })) || [],
+      };
+
+      // Previous digests for trend context
+      const prevDigests = getDailyDigests(3);
+      const trendContext = prevDigests.length > 0
+        ? `\nHISTORIQUE RÉCENT:\n${prevDigests.map(d => `${d.date}: ${d.digest_text?.slice(0, 150) || '?'}`).join('\n')}`
+        : '';
+
+      // Ask AI to generate a concise digest
+      const digestPrompt = `Données du jour ${today}:\n${JSON.stringify(metrics)}${trendContext}\n\nGénère un digest en 3-4 lignes max: 1) Statut + CA 2) Tendances vs jours précédents 3) Action prioritaire. Sois ultra-concis, style tableau de bord.`;
+
+      const messages = compactMessages([
+        { role: 'system', content: 'Tu es AURALIX, agent BI MegaFit. Génère des digests concis en français.' },
+        { role: 'user', content: digestPrompt }
+      ]);
+
+      const digestText = await groq(messages, false);
+
+      // Save digest to DB
+      if (db && digestText) {
+        try {
+          db.prepare(`INSERT OR IGNORE INTO ai_daily_digest (id, date, gym_scope, digest_text, key_metrics, trends) VALUES (?, ?, 'all', ?, ?, ?)`)
+            .run(digestId, today, digestText.slice(0, 1000), JSON.stringify(metrics), JSON.stringify(prevDigests.map(d => d.key_metrics).slice(0, 3)));
+          console.log(`[AURALIX-BG] ✓ Daily digest generated for ${today}`);
+        } catch (dbErr) { console.error('[AURALIX-BG] Digest DB error:', dbErr.message); }
+      }
+    } catch (e) {
+      console.error('[AURALIX-BG] Digest generation error:', e.message);
+    }
+  }
+
+  // ── Start background engine ────────────────────────────────────────────────
+  // Initial cache on startup (delayed 10s to let DB settle)
+  setTimeout(() => {
+    console.log('[AURALIX-BG] 🚀 Starting background intelligence engine...');
+    refreshCache('all');
+  }, 10000);
+
+  // Periodic cache refresh every 15 min
+  setInterval(() => {
+    refreshCache('all');
+    // Generate digest every 6 hours
+    if (Date.now() - lastDigestTime > DIGEST_INTERVAL) {
+      lastDigestTime = Date.now();
+      generateDigest().catch(e => console.error('[AURALIX-BG] Digest error:', e.message));
+    }
+  }, CACHE_INTERVAL);
+
+  console.log('[AURALIX-BG] ⏰ Cache: every 15min | Digest: every 6h');
+
   // ── Save alert to DB ───────────────────────────────────────────────────────
   function saveAlerts(alerts, gym = 'all') {
     if (!db || !alerts?.length) return;
@@ -767,10 +943,24 @@ module.exports = function aiAgentRouter({ lc }) {
   // ── GET /api/ai/snapshot ───────────────────────────────────────────────────
   router.get('/api/ai/snapshot', verifyAzureToken, (req, res) => {
     try {
-      const s = snap(req.query.gym || 'all');
-      const { signals, alerts } = runRules(s);
-      saveAlerts(alerts, req.query.gym || 'all');
-      res.json({ snapshot: s, signals, alerts });
+      const { snapshot: s, signals, alerts, fromCache, cacheAge } = getCached(req.query.gym || 'all');
+      res.json({ snapshot: s, signals, alerts, fromCache, cacheAgeSec: cacheAge });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ── GET /api/ai/cache-status ───────────────────────────────────────────────
+  router.get('/api/ai/cache-status', verifyAzureToken, (req, res) => {
+    try {
+      const digests = getDailyDigests(5);
+      res.json({
+        cached: !!cachedSnapshot,
+        cacheAgeSec: cachedSnapshot ? Math.round((Date.now() - cacheTimestamp) / 1000) : null,
+        lastRefresh: cachedSnapshot ? new Date(cacheTimestamp).toISOString() : null,
+        empireStatus: cachedSignals?.empire_status || 'UNKNOWN',
+        alertCount: cachedAlerts?.length || 0,
+        recentDigests: digests.map(d => ({ date: d.date, summary: d.digest_text?.slice(0, 200) })),
+        engine: { cacheInterval: '15min', digestInterval: '6h' },
+      });
     } catch(e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -779,11 +969,18 @@ module.exports = function aiAgentRouter({ lc }) {
     try {
       const { question, gym = 'all' } = req.body;
       if (!question?.trim()) return res.status(400).json({ error: 'Question required' });
-      const s = snap(gym);
-      const { signals, alerts } = runRules(s);
+
+      // Use cached data — instant!
+      const { snapshot: s, signals, alerts, fromCache } = getCached(gym);
       saveAlerts(alerts, gym);
 
-      // Compact snapshot for prompt (avoid token overflow) — 🔥 DEVIL MODE: includes all intel
+      // Inject daily digest memory for richer context
+      const digests = getDailyDigests(5);
+      const digestMemory = digests.length > 0
+        ? `\n\n=== MÉMOIRE IA (digests récents) ===\n${digests.map(d => `[${d.date}] ${d.digest_text?.slice(0, 150) || ''}`).join('\n')}`
+        : '';
+
+      // Compact snapshot for prompt
       const ctxJson = JSON.stringify({
         revenue: s.revenue, members: { active_total: s.members.active_total, expiring_30d: s.members.expiring_30d, expired_not_renewed: s.members.expired_not_renewed, resub: s.members.resub, birthdays_this_month: s.members.birthdays_this_month },
         door_traffic: s.door_traffic, debts: s.debts, decaissements: { month_total: s.decaissements.month_total, by_gym: s.decaissements.by_gym },
@@ -798,11 +995,11 @@ module.exports = function aiAgentRouter({ lc }) {
       });
 
       const messages = [
-        { role: 'system', content: buildSysPrompt(s, signals) + `\n\n=== DONNÉES COMPLÈTES ===\n${ctxJson.slice(0, 3500)}` },
+        { role: 'system', content: buildSysPrompt(s, signals) + digestMemory + `\n\n=== DONNÉES COMPLÈTES ===\n${ctxJson.slice(0, 3500)}` },
         { role: 'user', content: question }
       ];
       const reply = await groq(messages, true);
-      res.json({ reply, signals, alerts, empire_status: signals.empire_status });
+      res.json({ reply, signals, alerts, empire_status: signals.empire_status, fromCache });
     } catch(e) { console.error('[AI/ask]', e.message); res.status(500).json({ error: e.message }); }
   });
 
@@ -810,8 +1007,7 @@ module.exports = function aiAgentRouter({ lc }) {
   router.post('/api/ai/scan', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
       const { gym = 'all' } = req.body;
-      const s = snap(gym);
-      const { signals, alerts } = runRules(s);
+      const { snapshot: s, signals, alerts, fromCache } = getCached(gym);
       saveAlerts(alerts, gym);
 
       const ctxJson = JSON.stringify({
@@ -855,8 +1051,15 @@ module.exports = function aiAgentRouter({ lc }) {
       const s = snap(req.body?.gym || 'all');
       const { signals, alerts } = runRules(s);
       const critCount = alerts.filter(a=>a.priority==='CRITICAL').length;
+
+      // Inject digest memory for context
+      const digests = getDailyDigests(3);
+      const digestCtx = digests.length > 0
+        ? `\n\nMÉMOIRE IA:\n${digests.map(d => `[${d.date}] ${d.digest_text?.slice(0, 120)}`).join('\n')}`
+        : '';
+
       const messages = compactMessages([
-        { role: 'system', content: buildSysPrompt(s, signals) },
+        { role: 'system', content: buildSysPrompt(s, signals) + digestCtx },
         { role: 'user', content: `Génère le brief CEO matinal en 5 sections numérotées:\n1. STATUT EMPIRE (${signals.empire_status})\n2. CHIFFRES CLÉS (CA, objectif, prévision)\n3. ALERTES CRITIQUES (${critCount} détectée(s))\n4. OPPORTUNITÉ DU JOUR\n5. DIRECTIVE PRIORITAIRE\n\nSois direct et actionnable. Termine par une seule instruction pour l'équipe aujourd'hui.` }
       ]);
       const brief = await groq(messages, false);
@@ -885,8 +1088,7 @@ module.exports = function aiAgentRouter({ lc }) {
       const { mode } = req.params;
       const prompt = QUICK_PROMPTS[mode];
       if (!prompt) return res.status(400).json({ error: `Unknown mode: ${mode}` });
-      const s = snap(req.body?.gym || 'all');
-      const { signals } = runRules(s);
+      const { snapshot: s, signals } = getCached(req.body?.gym || 'all');
       const ctxJson = JSON.stringify({ revenue: s.revenue, debts: s.debts, members: s.members, commercials: s.commercials.slice(0,6), gyms: s.gyms, courses: s.courses, decaissements: { month_total: s.decaissements.month_total, by_gym: s.decaissements.by_gym }, incidents: { open_total: s.incidents.open_total, critical: s.incidents.critical }, subscription_intel: s.subscription_intel?.slice(0,10), top_formulas_empire: s.top_formulas_empire?.slice(0,5), extension_ratio: s.extension_ratio, relance_performance: s.relance_performance?.slice(0,6), pending_inscriptions_detailed: s.pending_inscriptions_detailed?.slice(0,5) }, null, 0).slice(0, 3500);
       const messages = [
         { role: 'system', content: buildSysPrompt(s, signals) + `\n\n=== DONNÉES ===\n${ctxJson}` },
@@ -900,12 +1102,10 @@ module.exports = function aiAgentRouter({ lc }) {
   // ── Health check (rules only, no LLM) ─────────────────────────────────────
   router.get('/api/ai/health-check', verifyAzureToken, (req, res) => {
     try {
-      const s = snap(req.query.gym || 'all');
-      const { signals, alerts } = runRules(s);
-      saveAlerts(alerts, req.query.gym || 'all');
+      const { snapshot: s, signals, alerts, fromCache, cacheAge } = getCached(req.query.gym || 'all');
       const openActCount = db ? db.prepare(`SELECT COUNT(*) cnt FROM ai_actions WHERE status='OPEN'`).get()?.cnt || 0 : 0;
       const openAlertCount = db ? db.prepare(`SELECT COUNT(*) cnt FROM ai_alerts WHERE status='OPEN'`).get()?.cnt || 0 : 0;
-      res.json({ empire_status: signals.empire_status, signals, alerts, open_actions: openActCount, open_alerts: openAlertCount });
+      res.json({ empire_status: signals.empire_status, signals, alerts, open_actions: openActCount, open_alerts: openAlertCount, fromCache, cacheAgeSec: cacheAge });
     } catch(e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -989,8 +1189,7 @@ module.exports = function aiAgentRouter({ lc }) {
   router.post('/api/ai/devil-scan', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
       const { gym = 'all' } = req.body;
-      const s = snap(gym);
-      const { signals, alerts } = runRules(s);
+      const { snapshot: s, signals, alerts } = getCached(gym);
       saveAlerts(alerts, gym);
 
       // Build the most complete data payload possible
