@@ -298,7 +298,7 @@ function buildSnapshot(db, getMeta, gymScope = 'all') {
     const traffic = sensorInstalled ? q1(`SELECT COALESCE(SUM(count),0) v FROM daily_stats WHERE strftime('%Y-%m', date)=? AND gym_id=?`, ym, gid) : null;
     const todayT  = sensorInstalled ? q1(`SELECT COALESCE(SUM(count),0) v FROM daily_stats WHERE date=? AND gym_id=?`, today, gid) : null;
     const openInc = q1(`SELECT COUNT(*) cnt FROM incidents_cache WHERE gym_id=? AND status!='Resolved'`, gid);
-    const debt    = q1(`SELECT COALESCE(SUM(reste),0) total, COUNT(*) cnt FROM register_cache WHERE gym_id=? AND reste>0`, gid);
+    const debt    = q1(`SELECT COALESCE(SUM(CASE WHEN CAST(prix AS REAL) > 0 THEN CAST(prix AS REAL) - (COALESCE(CAST(tpe AS REAL),0)+COALESCE(CAST(espece AS REAL),0)+COALESCE(CAST(virement AS REAL),0)+COALESCE(CAST(cheque AS REAL),0)) ELSE CAST(reste AS REAL) END),0) total, COUNT(*) cnt FROM register_cache WHERE gym_id=? AND COALESCE(source,'')!='reste_settlement' AND (CASE WHEN CAST(prix AS REAL)>0 THEN CAST(prix AS REAL)-(COALESCE(CAST(tpe AS REAL),0)+COALESCE(CAST(espece AS REAL),0)+COALESCE(CAST(virement AS REAL),0)+COALESCE(CAST(cheque AS REAL),0)) ELSE CAST(reste AS REAL) END)>0`, gid);
     const activeM = q1(`SELECT COUNT(*) cnt FROM members_cache WHERE gym_id=? AND is_archive=0`, gid);
     const expiringM = q1(`SELECT COUNT(*) cnt FROM members_cache WHERE gym_id=? AND is_archive=0 AND expires_on IS NOT NULL AND expires_on < date('now','+30 days') AND expires_on > date('now')`, gid);
     const expiredM  = q1(`SELECT COUNT(*) cnt FROM members_cache WHERE gym_id=? AND is_archive=0 AND expires_on IS NOT NULL AND expires_on < date('now')`, gid);
@@ -321,8 +321,8 @@ function buildSnapshot(db, getMeta, gymScope = 'all') {
   });
 
   // ── Debt analysis ──────────────────────────────────────────────────────────
-  const debtRow  = q1(`SELECT COALESCE(SUM(reste),0) total, COUNT(*) cnt FROM register_cache WHERE reste>0 AND gym_id IN (${gymIn})`, ...targetGyms);
-  const topDebtors = q(`SELECT nom, gym_id, reste, note_reste, date FROM register_cache WHERE reste>0 AND gym_id IN (${gymIn}) ORDER BY reste DESC LIMIT 10`, ...targetGyms);
+  const debtRow  = q1(`SELECT COALESCE(SUM(CASE WHEN CAST(prix AS REAL)>0 THEN CAST(prix AS REAL)-(COALESCE(CAST(tpe AS REAL),0)+COALESCE(CAST(espece AS REAL),0)+COALESCE(CAST(virement AS REAL),0)+COALESCE(CAST(cheque AS REAL),0)) ELSE CAST(reste AS REAL) END),0) total, COUNT(*) cnt FROM register_cache WHERE COALESCE(source,'')!='reste_settlement' AND (CASE WHEN CAST(prix AS REAL)>0 THEN CAST(prix AS REAL)-(COALESCE(CAST(tpe AS REAL),0)+COALESCE(CAST(espece AS REAL),0)+COALESCE(CAST(virement AS REAL),0)+COALESCE(CAST(cheque AS REAL),0)) ELSE CAST(reste AS REAL) END)>0 AND gym_id IN (${gymIn})`, ...targetGyms);
+  const topDebtors = q(`SELECT nom, gym_id, (CASE WHEN CAST(prix AS REAL)>0 THEN CAST(prix AS REAL)-(COALESCE(CAST(tpe AS REAL),0)+COALESCE(CAST(espece AS REAL),0)+COALESCE(CAST(virement AS REAL),0)+COALESCE(CAST(cheque AS REAL),0)) ELSE CAST(reste AS REAL) END) AS reste, note_reste, date FROM register_cache WHERE COALESCE(source,'')!='reste_settlement' AND (CASE WHEN CAST(prix AS REAL)>0 THEN CAST(prix AS REAL)-(COALESCE(CAST(tpe AS REAL),0)+COALESCE(CAST(espece AS REAL),0)+COALESCE(CAST(virement AS REAL),0)+COALESCE(CAST(cheque AS REAL),0)) ELSE CAST(reste AS REAL) END)>0 AND gym_id IN (${gymIn}) ORDER BY reste DESC LIMIT 10`, ...targetGyms);
 
   // ── Members lifecycle ──────────────────────────────────────────────────────
   const activeMem   = q1(`SELECT COUNT(*) cnt FROM members_cache WHERE is_archive=0 AND gym_id IN (${gymIn})`, ...targetGyms);
