@@ -48,7 +48,7 @@ function normName(s) {
 function enrichWithActiveStatus(db, gymId, entries) {
   // Load all active members for this gym (non-archived, non-expired)
   const activeMembers = db.prepare(
-    `SELECT full_name, phone, expires_on FROM members_cache
+    `SELECT full_name, phone, expires_on, period_from, created_at FROM members_cache
      WHERE gym_id = ?
        AND (is_archive IS NULL OR is_archive = 0)
        AND expires_on IS NOT NULL AND expires_on >= date('now')`
@@ -59,6 +59,7 @@ function enrichWithActiveStatus(db, gymId, entries) {
     name: normName(m.full_name),
     phone: (m.phone || '').replace(/\s+/g, '').replace(/^\+212/, '0'),
     expiresOn: m.expires_on,
+    periodFrom: m.period_from || m.created_at || null,
   }));
 
   return entries.map(e => {
@@ -84,6 +85,7 @@ function enrichWithActiveStatus(db, gymId, entries) {
       ...e,
       isActiveSubscriber: !!match,
       activeExpiresOn: match ? match.expiresOn : null,
+      renewedDate: match ? match.periodFrom : null,
     };
   });
 }
@@ -390,7 +392,7 @@ module.exports = function createRelanceRouter(deps) {
       const prevBatchAllCalled = prevBatch.length === 0 || prevBatch.every(m => m.called);
 
       res.json({
-        members: pageData,
+        members: enrichWithActiveStatus(lc.db, gymId, pageData),
         total,
         page,
         pageSize,
