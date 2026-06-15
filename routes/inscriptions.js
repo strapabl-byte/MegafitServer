@@ -276,9 +276,9 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
           tpe:      Number(paymentsSplit?.carte     || paymentsSplit?.tpe     || 0) || (['tpe','carte','carte bancaire'].includes(normMethod) ? payAmount : 0),
           virement: Number(paymentsSplit?.virement  || 0) || (normMethod === 'virement' ? payAmount : 0),
           cheque:   Number(paymentsSplit?.cheque    || 0) || (normMethod === 'cheque' ? payAmount : 0),
-          abonnement: member.subscriptionName || member.plan || '',
+          abonnement: `COMPL. ${member.subscriptionName || member.plan || ''}`.trim(),
           reste: newBalance,
-          note_reste: newBalance > 0 ? `Reste: ${newBalance} DH` : '',
+          note_reste: newBalance > 0 ? `Reste: ${newBalance} DH` : 'Reste réglé ✅',
           source: 'reste_settlement',
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
