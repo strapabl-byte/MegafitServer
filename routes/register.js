@@ -240,9 +240,10 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
               cached.forEach(e => {
                 const paid = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
                 ca += paid;
-                const sr = Number(e.reste) || 0;
-                if (sr > 0) reste += sr;
-                else { const prix = Number(e.prix)||0; if (prix > 0 && prix > paid) reste += prix - paid; }
+                if ((e.source || '') === 'reste_settlement') return; // skip — payment, not debt
+                const prix = Number(e.prix) || 0;
+                if (prix > 0 && prix > paid) reste += prix - paid;
+                else if (prix <= 0) { const sr = Number(e.reste) || 0; if (sr > 0) reste += sr; }
               });
 
               // Subtract all décaissements except rejected ones
@@ -284,9 +285,10 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
                   fetched.forEach(e => {
                     const paid = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
                     ca += paid;
-                    const sr = Number(e.reste) || 0;
-                    if (sr > 0) reste += sr;
-                    else { const prix = Number(e.prix)||0; if (prix > 0 && prix > paid) reste += prix - paid; }
+                    if ((e.source || '') === 'reste_settlement') return; // skip — payment, not debt
+                    const prix = Number(e.prix) || 0;
+                    if (prix > 0 && prix > paid) reste += prix - paid;
+                    else if (prix <= 0) { const sr = Number(e.reste) || 0; if (sr > 0) reste += sr; }
                   });
                   if (ca > 0) calendarData[dateStr] = (calendarData[dateStr] || 0) + ca;
                   if (reste > 0) resteData[dateStr] = (resteData[dateStr] || 0) + reste;
