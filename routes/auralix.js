@@ -71,13 +71,16 @@ module.exports = function(deps) {
         `SELECT COALESCE(CAST(tpe AS REAL),0) AS tpe,
                 COALESCE(CAST(espece AS REAL),0) AS espece,
                 COALESCE(CAST(virement AS REAL),0) AS virement,
-                COALESCE(CAST(cheque AS REAL),0) AS cheque
+                COALESCE(CAST(cheque AS REAL),0) AS cheque,
+                COALESCE(CAST(reste AS REAL),0) AS reste
          FROM register_cache WHERE gym_id=? AND date IN (${ph})`
       ).all(gymId, ...dates);
       const espece   = Math.round(rows.reduce((s, r) => s + (r.espece || 0), 0));
       const tpe      = Math.round(rows.reduce((s, r) => s + (r.tpe || 0), 0));
       const virement = Math.round(rows.reduce((s, r) => s + (r.virement || 0), 0));
       const cheque   = Math.round(rows.reduce((s, r) => s + (r.cheque || 0), 0));
+      const reste    = Math.round(rows.reduce((s, r) => s + (r.reste || 0), 0));
+      const resteCount = rows.filter(r => (r.reste || 0) > 0).length;
       const revenue  = espece + tpe + virement + cheque;
       const dec = lc.db.prepare(
         `SELECT COALESCE(CAST(montant AS REAL),0) AS m FROM decaissements_cache
@@ -85,8 +88,8 @@ module.exports = function(deps) {
       ).all(gymId, ...dates);
       const decaissement = Math.round(dec.reduce((s, r) => s + (r.m || 0), 0));
       return { revenue, members: rows.length, entries: rows.length, decaissement, net: revenue - decaissement,
-               espece, tpe, virement, cheque };
-    } catch(e) { return { revenue: 0, members: 0, entries: 0, decaissement: 0, net: 0, espece: 0, tpe: 0, virement: 0, cheque: 0 }; }
+               espece, tpe, virement, cheque, reste, resteCount };
+    } catch(e) { return { revenue: 0, members: 0, entries: 0, decaissement: 0, net: 0, espece: 0, tpe: 0, virement: 0, cheque: 0, reste: 0, resteCount: 0 }; }
   }
 
   // GET /api/auralix/summary?period=today|week|month
@@ -117,7 +120,9 @@ module.exports = function(deps) {
       tpe: s.tpe + (g.tpe || 0),
       virement: s.virement + (g.virement || 0),
       cheque: s.cheque + (g.cheque || 0),
-    }), { revenue: 0, members: 0, entries: 0, decaissement: 0, net: 0, espece: 0, tpe: 0, virement: 0, cheque: 0 });
+      reste: s.reste + (g.reste || 0),
+      resteCount: s.resteCount + (g.resteCount || 0),
+    }), { revenue: 0, members: 0, entries: 0, decaissement: 0, net: 0, espece: 0, tpe: 0, virement: 0, cheque: 0, reste: 0, resteCount: 0 });
     res.json({ gyms, total, period: p });
   });
 
