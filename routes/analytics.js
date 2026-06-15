@@ -1174,6 +1174,48 @@ Reply ONLY with valid JSON (no markdown):
         regsCustom = countRegisterInRange(cStart, cEnd);
       }
 
+      // 💳 Reste à Payer — unpaid balances from register_cache
+      const getResteAPayer = (fromDate, toDate = null) => {
+        let totalReste = 0, count = 0;
+        const cursor = new Date(fromDate);
+        const limit = toDate || now;
+        while (cursor <= limit) {
+          const dateStr = toLocalDateStr(cursor);
+          for (const gid of gymIds) {
+            lc.getRegister(gid, dateStr).forEach(e => {
+              const reste = Number(e.reste) || 0;
+              if (reste > 0) { totalReste += reste; count++; }
+            });
+          }
+          cursor.setDate(cursor.getDate() + 1);
+        }
+        return { total: Math.round(totalReste), count };
+      };
+
+      const resteDay       = getResteAPayer(todayStart);
+      const resteYesterday = getResteAPayer(yesterdayStart, yesterdayEnd);
+      const resteWeek      = getResteAPayer(weekStart);
+      const resteMonth     = getResteAPayer(monthStart);
+      const resteYear      = getResteAPayer(yearStart);
+      let resteCustom = { total: 0, count: 0 };
+      if (customStart && customEnd) {
+        const cStart = parseLocalDate(customStart);
+        const cEnd = parseLocalDate(customEnd);
+        cEnd.setHours(23, 59, 59);
+        resteCustom = getResteAPayer(cStart, cEnd);
+      }
+
+      // Top debtors (for display — all time, across selected gyms)
+      const phReste = gymIds.map(() => '?').join(',');
+      const topDebtors = lc.db.prepare(
+        `SELECT gym_id, nom, CAST(reste AS REAL) AS reste, date, note_reste
+         FROM register_cache
+         WHERE gym_id IN (${phReste}) AND CAST(reste AS REAL) > 0
+         ORDER BY CAST(reste AS REAL) DESC LIMIT 10`
+      ).all(...gymIds).map(r => ({
+        gym: r.gym_id, nom: r.nom, reste: Math.round(r.reste), date: r.date, note: r.note_reste || ''
+      }));
+
       const kpis = {
         currentMonthLabel,   // e.g. "MAI 2026"
         odooTotal,           // Real total from Odoo (e.g. 7429 for Dokarat)
@@ -1194,6 +1236,15 @@ Reply ONLY with valid JSON (no markdown):
           month: incomeMonth.total, 
           year: incomeYear.total,
           custom: incomeCustom.total
+        },
+        resteAPayer: {
+          day:       resteDay,
+          yesterday: resteYesterday,
+          week:      resteWeek,
+          month:     resteMonth,
+          year:      resteYear,
+          custom:    resteCustom,
+          topDebtors,
         },
         paymentMethods: { 
           espece: customStart && customEnd ? incomeCustom.espece : incomeMonth.espece, 
