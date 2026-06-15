@@ -5,10 +5,11 @@
 const { Router } = require('express');
 const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 
-// ─── Groq caller with dual-key rotation + retry delay ───────────────────────
+// ─── Groq caller with multi-key rotation + retry delay ──────────────────────
 const GROQ_KEYS = [
   process.env.GROQ_API_KEY || '',
   process.env.GROQ_API_KEY_2 || '',
+  process.env.GROQ_API_KEY_3 || '',
 ].filter(Boolean);
 
 const GROQ_LARGE    = 'llama-3.3-70b-versatile';
@@ -41,59 +42,102 @@ async function callGroq(messages, model = GROQ_LARGE, maxTokens = 1800, apiKey =
   });
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Groq HTTP ${res.status}: ${err.slice(0, 300)}`);
+    const e = new Error(`Groq HTTP ${res.status}: ${err.slice(0, 300)}`);
+    e.httpStatus = res.status;
+    throw e;
   }
   const j = await res.json();
   return j.choices?.[0]?.message?.content?.trim() || '';
+}
+
+// ── Compact messages for small model (trim system prompt + context to ~3k tokens) ──
+function compactMessages(messages) {
+  return messages.map(m => {
+    if (m.role === 'system') {
+      // Keep only the first 2500 chars of system prompt (core identity + key metrics)
+      // and truncate data context aggressively
+      let content = m.content;
+      // Strip verbose intel blocks
+      content = content.replace(/=== INTELLIGENCE ABONNEMENTS[\s\S]*?(?===|$)/g, '')
+                       .replace(/=== TOP FORMULES[\s\S]*?(?===|$)/g, '')
+                       .replace(/=== RATIO EXTENSIONS[\s\S]*?(?===|$)/g, '')
+                       .replace(/=== PERFORMANCE RELANCE[\s\S]*?(?===|$)/g, '')
+                       .replace(/=== INSCRIPTIONS EN ATTENTE[\s\S]*?(?===|$)/g, '')
+                       .replace(/CAPACITÉS D'ANALYSE PROFONDES:[\s\S]*?RÈGLES ABSOLUES:/g, 'RÈGLES:')
+                       .replace(/\n{3,}/g, '\n\n');
+      // Hard cap at 2800 chars for system
+      if (content.length > 2800) content = content.slice(0, 2800) + '\n[contexte tronqué]';
+      return { role: 'system', content };
+    }
+    if (m.role === 'user') {
+      // Cap user messages at 800 chars
+      return { role: 'user', content: m.content.slice(0, 800) };
+    }
+    return m;
+  });
 }
 
 async function groq(messages, useLarge = true) {
   const model = useLarge ? GROQ_LARGE : GROQ_SMALL;
   const tokens = useLarge ? 2000 : 1000;
 
+  const isRetryableError = (e) => e.message.includes('429') || e.message.includes('rate') || e.httpStatus === 413 || e.message.includes('413') || e.message.includes('Request too large');
+
   // Try primary key
   try {
     return await callGroq(messages, model, tokens, GROQ_KEYS[groqKeyIndex]);
   } catch(e) {
-    if ((e.message.includes('429') || e.message.includes('rate'))) {
-      const retryDelay = parseRetryDelay(e.message);
-      console.log(`[GROQ] Rate limited → waiting ${retryDelay}ms before retry`);
+    if (isRetryableError(e)) {
+      const is413 = e.httpStatus === 413 || e.message.includes('413');
+      const retryDelay = is413 ? 500 : parseRetryDelay(e.message);
+      console.log(`[GROQ] ${is413 ? 'Request too large (413)' : 'Rate limited (429)'} → ${is413 ? 'compacting messages' : `waiting ${retryDelay}ms`}`);
 
-      // 1. Try rotating to another key immediately
-      if (GROQ_KEYS.length > 1) {
-        const fallbackIdx = (groqKeyIndex + 1) % GROQ_KEYS.length;
-        console.log(`[GROQ] Switching to key ${fallbackIdx + 1}`);
-        groqKeyIndex = fallbackIdx;
+      // 1. For 413: compact messages and try same key + model first
+      if (is413) {
+        const compact = compactMessages(messages);
         try {
-          return await callGroq(messages, model, tokens, GROQ_KEYS[fallbackIdx]);
+          return await callGroq(compact, model, tokens, GROQ_KEYS[groqKeyIndex]);
+        } catch (e1b) {
+          console.log('[GROQ] Compacted messages still too large, trying small model...');
+        }
+      }
+
+      // 2. Try rotating to another key immediately
+      for (let i = 1; i < GROQ_KEYS.length; i++) {
+        const fallbackIdx = (groqKeyIndex + i) % GROQ_KEYS.length;
+        console.log(`[GROQ] Switching to key ${fallbackIdx + 1}`);
+        try {
+          const msgs = is413 ? compactMessages(messages) : messages;
+          return await callGroq(msgs, model, tokens, GROQ_KEYS[fallbackIdx]);
         } catch(e2) {
-          if (e2.message.includes('429')) {
-            console.log(`[GROQ] Key ${fallbackIdx + 1} also rate-limited`);
+          if (isRetryableError(e2)) {
+            console.log(`[GROQ] Key ${fallbackIdx + 1} also failed (${e2.httpStatus || '429'})`);
           } else {
             throw e2;
           }
         }
       }
 
-      // 2. Wait the retry delay, then try with smaller model (uses fewer tokens)
-      await sleep(retryDelay);
+      // 3. Wait + try with smaller model + compacted messages
+      if (!is413) await sleep(retryDelay);
+      const smallMsgs = compactMessages(messages);
       try {
-        return await callGroq(messages, GROQ_SMALL, 800, GROQ_KEYS[groqKeyIndex]);
+        return await callGroq(smallMsgs, GROQ_SMALL, 600, GROQ_KEYS[groqKeyIndex]);
       } catch(e3) {
-        if (e3.message.includes('429')) {
-          // 3. Last resort: wait longer and try all keys with small model
-          console.log('[GROQ] Still limited → waiting 20s with small model');
-          await sleep(20000);
+        if (isRetryableError(e3)) {
+          // 4. Last resort: wait longer and try all keys with small model + compacted
+          console.log('[GROQ] Still failing → waiting 15s with small model + all keys');
+          await sleep(15000);
           for (const key of GROQ_KEYS) {
-            try { return await callGroq(messages, GROQ_SMALL, 600, key); } catch {}
+            try { return await callGroq(smallMsgs, GROQ_SMALL, 400, key); } catch {}
           }
         }
         throw e3;
       }
     }
-    // Not a rate limit error — try small model as fallback
+    // Not a rate/size limit error — try small model as fallback
     if (useLarge) {
-      try { return await callGroq(messages, GROQ_SMALL, 800); } catch {}
+      try { return await callGroq(compactMessages(messages), GROQ_SMALL, 800); } catch {}
     }
     throw e;
   }
@@ -754,7 +798,7 @@ module.exports = function aiAgentRouter({ lc }) {
       });
 
       const messages = [
-        { role: 'system', content: buildSysPrompt(s, signals) + `\n\n=== DONNÉES COMPLÈTES ===\n${ctxJson.slice(0, 4500)}` },
+        { role: 'system', content: buildSysPrompt(s, signals) + `\n\n=== DONNÉES COMPLÈTES ===\n${ctxJson.slice(0, 3500)}` },
         { role: 'user', content: question }
       ];
       const reply = await groq(messages, true);
@@ -811,10 +855,10 @@ module.exports = function aiAgentRouter({ lc }) {
       const s = snap(req.body?.gym || 'all');
       const { signals, alerts } = runRules(s);
       const critCount = alerts.filter(a=>a.priority==='CRITICAL').length;
-      const messages = [
+      const messages = compactMessages([
         { role: 'system', content: buildSysPrompt(s, signals) },
         { role: 'user', content: `Génère le brief CEO matinal en 5 sections numérotées:\n1. STATUT EMPIRE (${signals.empire_status})\n2. CHIFFRES CLÉS (CA, objectif, prévision)\n3. ALERTES CRITIQUES (${critCount} détectée(s))\n4. OPPORTUNITÉ DU JOUR\n5. DIRECTIVE PRIORITAIRE\n\nSois direct et actionnable. Termine par une seule instruction pour l'équipe aujourd'hui.` }
-      ];
+      ]);
       const brief = await groq(messages, false);
       saveAlerts(alerts, 'all');
       res.json({ brief, signals, alerts, empire_status: signals.empire_status });
@@ -843,7 +887,7 @@ module.exports = function aiAgentRouter({ lc }) {
       if (!prompt) return res.status(400).json({ error: `Unknown mode: ${mode}` });
       const s = snap(req.body?.gym || 'all');
       const { signals } = runRules(s);
-      const ctxJson = JSON.stringify({ revenue: s.revenue, debts: s.debts, members: s.members, commercials: s.commercials, gyms: s.gyms, courses: s.courses, decaissements: s.decaissements, incidents: s.incidents, subscription_intel: s.subscription_intel, top_formulas_empire: s.top_formulas_empire, extension_ratio: s.extension_ratio, relance_performance: s.relance_performance, pending_inscriptions_detailed: s.pending_inscriptions_detailed }, null, 0).slice(0, 5000);
+      const ctxJson = JSON.stringify({ revenue: s.revenue, debts: s.debts, members: s.members, commercials: s.commercials.slice(0,6), gyms: s.gyms, courses: s.courses, decaissements: { month_total: s.decaissements.month_total, by_gym: s.decaissements.by_gym }, incidents: { open_total: s.incidents.open_total, critical: s.incidents.critical }, subscription_intel: s.subscription_intel?.slice(0,10), top_formulas_empire: s.top_formulas_empire?.slice(0,5), extension_ratio: s.extension_ratio, relance_performance: s.relance_performance?.slice(0,6), pending_inscriptions_detailed: s.pending_inscriptions_detailed?.slice(0,5) }, null, 0).slice(0, 3500);
       const messages = [
         { role: 'system', content: buildSysPrompt(s, signals) + `\n\n=== DONNÉES ===\n${ctxJson}` },
         { role: 'user', content: prompt }
