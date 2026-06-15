@@ -1048,8 +1048,7 @@ module.exports = function aiAgentRouter({ lc }) {
   // ── POST /api/ai/startup-brief ─────────────────────────────────────────────
   router.post('/api/ai/startup-brief', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
-      const s = snap(req.body?.gym || 'all');
-      const { signals, alerts } = runRules(s);
+      const { snapshot: s, signals, alerts } = getCached(req.body?.gym || 'all');
       const critCount = alerts.filter(a=>a.priority==='CRITICAL').length;
 
       // Inject digest memory for context
