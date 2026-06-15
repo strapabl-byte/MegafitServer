@@ -18,7 +18,7 @@ const DB_PATH   = path.join(__dirname, 'megafit_cache.db');
 // ── Club → gym_id mapping (must match GymContext.jsx in dashboard) ──────────────────
 const CLUB_MAP = {
   'CASA ANFA'      : 'casa1',   // Casa Anfa regular (dashboard: id='casa1')
-  'CASA ANFA LADY' : 'casa2',   // Casa Lady Anfa (dashboard: id='casa2')
+  'CASA ANFA LADY' : 'casa2',   // Casa Casa Lady (dashboard: id='casa2')
   'FES DOUKKARATE' : 'dokarat',
   'FES MARJANE'    : 'marjane',
 };

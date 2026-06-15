@@ -204,7 +204,7 @@ function buildHtmlEmail(subject, bodyHtml, recipientName, options = {}) {
             <td style="background:#fafafa;padding:24px 40px;text-align:center;border-top:1px solid #f0f0f0;">
               <div style="font-size:12px;color:#71717a;line-height:1.6;">
                 <strong style="color:#52525b;">MegaFit</strong><br>
-                Dokkarat &middot; Sa&iuml;ss &middot; Anfa &middot; Lady Anfa
+                Dokkarat &middot; Sa&iuml;ss &middot; Anfa &middot; Casa Lady
               </div>
               <div style="margin-top:12px;font-size:10px;color:#a1a1aa;line-height:1.5;">
                 Vous recevez cet email en tant que membre de MegaFit.<br>

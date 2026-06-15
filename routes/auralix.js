@@ -23,7 +23,7 @@ module.exports = function(deps) {
   }
 
   const GYMS = ['marjane', 'dokarat', 'casa1', 'casa2'];
-  const NAMES = { marjane: 'Fès Saiss', dokarat: 'Dokarat', casa1: 'Casa Anfa', casa2: 'Lady Anfa' };
+  const NAMES = { marjane: 'Fès Saiss', dokarat: 'Dokarat', casa1: 'Casa Anfa', casa2: 'Casa Lady' };
 
   function dateRange(days) {
     const dates = [];

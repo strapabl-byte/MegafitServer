@@ -11,9 +11,9 @@ const DEFAULT_SUBSCRIPTION_GROUPS = [
   { label: '1 MOIS', options: [{ name: '1 MOIS LOCAL', price: 1000, note: 'Accès local uniquement' }, { name: '1 MOIS LOCAL KIDS', price: 800, note: 'Enfants — accès local' }, { name: '1 MOIS MULTI', price: 1000, note: 'Multiclub — tous les 4 Gyms Megafit' }, { name: '1 MOIS MULTI CASA', price: 1200, note: 'Multiclub Casablanca' }] },
   { label: '3 MOIS', options: [{ name: '3 MOIS LOCAL', price: 0, note: 'Accès local uniquement' }, { name: '3 MOIS MULTI FES', price: 0, note: 'Multiclub Fès' }, { name: '3 MOIS CASA', price: 2200, note: 'Casablanca' }, { name: '3 MOIS KIDS', price: 2200, note: 'Enfants' }] },
   { label: '6 MOIS', options: [{ name: '6 MOIS MULTI', price: 5000, note: 'Multiclub — tous les 4 Gyms Megafit' }, { name: '6 MOIS KIDS', price: 6000, note: 'Enfants' }] },
-  { label: '12 MOIS', options: [{ name: '12 MOIS LOCAL - 4000', price: 0, note: 'Accès local' }, { name: '12 MOIS - MULTI 5250', price: 0, note: 'Multiclub' }, { name: '12 MOIS AVEC ASSURANCE MEGA KIDS', price: 0, note: 'Enfants' }, { name: '12 MOIS OUVERTURE CASA-LADY ANFA', price: 0, note: 'Ouverture Anfa' }, { name: '12 MOIS OUVERTURE CASA-LADY ANFA + 10 SEANCES PILATES', price: 0, note: 'Lady Anfa + Pilates' }] },
+  { label: '12 MOIS', options: [{ name: '12 MOIS LOCAL - 4000', price: 0, note: 'Accès local' }, { name: '12 MOIS - MULTI 5250', price: 0, note: 'Multiclub' }, { name: '12 MOIS AVEC ASSURANCE MEGA KIDS', price: 0, note: 'Enfants' }, { name: '12 MOIS OUVERTURE CASA-LADY', price: 0, note: 'Ouverture Anfa' }, { name: '12 MOIS OUVERTURE CASA-LADY + 10 SEANCES PILATES', price: 0, note: 'Casa Lady + Pilates' }] },
   { label: '18 MOIS', options: [{ name: '18 MOIS LOCAL', price: 5500, note: 'Accès local' }, { name: '18 MOIS MULTI', price: 6500, note: 'Multiclub' }] },
-  { label: '24 MOIS', options: [{ name: '24 MOIS - BLACK FRIDAY LOCAL', price: 0, note: 'Black Friday local' }, { name: '24 MOIS - BLACK FRIDAY MULTI', price: 0, note: 'Black Friday multiclub' }, { name: '24 MOIS AVEC ASSURANCE MEGA KIDS', price: 0, note: 'Enfants' }, { name: '24 MOIS OUVERTURE CASA-ANFA', price: 8900, note: 'Ouverture Anfa' }, { name: '24 MOIS OUVERTURE CASA-LADY ANFA', price: 6900, note: 'Ouverture Lady Anfa' }, { name: '24 MOIS OUVERTURE CASA-LADY ANFA + 10 SEANCES PILATES', price: 7900, note: 'Lady Anfa + Pilates' }, { name: '24 MOIS OUVERTURE SAISS MARJANE FES', price: 7900, note: 'Multiclub Fès' }, { name: '24 MOIS OUVERTURE SAISS MARJANE FES LOCAL', price: 6900, note: 'Fès local' }, { name: 'UPGRADE 24 MOIS OUVERTURE CASA-LADY ANFA', price: 0, note: 'Upgrade Lady Anfa' }] },
+  { label: '24 MOIS', options: [{ name: '24 MOIS - BLACK FRIDAY LOCAL', price: 0, note: 'Black Friday local' }, { name: '24 MOIS - BLACK FRIDAY MULTI', price: 0, note: 'Black Friday multiclub' }, { name: '24 MOIS AVEC ASSURANCE MEGA KIDS', price: 0, note: 'Enfants' }, { name: '24 MOIS OUVERTURE CASA-ANFA', price: 8900, note: 'Ouverture Anfa' }, { name: '24 MOIS OUVERTURE CASA-LADY', price: 6900, note: 'Ouverture Casa Lady' }, { name: '24 MOIS OUVERTURE CASA-LADY + 10 SEANCES PILATES', price: 7900, note: 'Casa Lady + Pilates' }, { name: '24 MOIS OUVERTURE SAISS MARJANE FES', price: 7900, note: 'Multiclub Fès' }, { name: '24 MOIS OUVERTURE SAISS MARJANE FES LOCAL', price: 6900, note: 'Fès local' }, { name: 'UPGRADE 24 MOIS OUVERTURE CASA-LADY', price: 0, note: 'Upgrade Casa Lady' }] },
   { label: 'SAINT VALENTIN', options: [{ name: '1 AN S/V', price: 0, note: 'Offre Saint Valentin 1 an' }, { name: '2 ANS S/V', price: 0, note: 'Offre Saint Valentin 2 ans' }] },
   { label: 'ENTREES / CARNETS', options: [{ name: 'ENTREE JOURNALIER', price: 0, note: 'Séance unique' }, { name: '10 ENTREES', price: 0, note: 'Carnet 10' }, { name: '25 ENTREES', price: 1750, note: 'Carnet 25' }, { name: '30 ENTREES', price: 1800, note: 'Carnet 30' }, { name: '50 ENTREES', price: 2000, note: 'Carnet 50' }, { name: '25 TICKETS ENTREE JOURNALIERS CASA', price: 2500, note: 'Casa 25 tickets' }, { name: '50 TICKETS ENTREE JOURNALIERS CASA', price: 4500, note: 'Casa 50 tickets' }] },
   { label: 'CONVENTIONS', options: [{ name: 'CONVENTION CDGAPR', price: 0 }, { name: 'CONVENTION ATT.IJARI', price: 0 }, { name: 'CONVENTION BANQUE POPULAIRE', price: 0 }, { name: 'CONVENTION MARKET SOLUTION', price: 0 }, { name: 'CONVENTION CREDIT AGRICOL', price: 0 }] },
@@ -23,7 +23,7 @@ const DEFAULT_SUBSCRIPTION_GROUPS = [
 
 const defaultGymConfig = (gymId) => ({
   gymId,
-  gymName: { dokarat: 'MEGAFIT DOKKARAT', marjane: 'MEGAFIT SAISS', casa1: 'MEGAFIT ANFA', casa2: 'MEGAFIT LADY ANFA' }[gymId] || 'MEGA FIT',
+  gymName: { dokarat: 'MEGAFIT DOKKARAT', marjane: 'MEGAFIT SAISS', casa1: 'MEGAFIT ANFA', casa2: 'MEGAFIT CASA LADY' }[gymId] || 'MEGA FIT',
   registrationFee: 3000,
   isOpen: true,
   subscriptionGroups: DEFAULT_SUBSCRIPTION_GROUPS,
@@ -63,7 +63,7 @@ module.exports = function configRouter({ db, admin }) {
       const doc  = snap.docs[0];
       const data = doc.data();
       const dLeft = daysLeft(data.expiresOn);
-      const GYM_NAMES = { dokarat: 'MegaFit Dokkarat', marjane: 'MegaFit Saiss', casa1: 'MegaFit Anfa', casa2: 'MegaFit Lady Anfa' };
+      const GYM_NAMES = { dokarat: 'MegaFit Dokkarat', marjane: 'MegaFit Saiss', casa1: 'MegaFit Anfa', casa2: 'MegaFit Casa Lady' };
       // Return only what the mini-app needs — no sensitive internals
       res.json({
         id:             doc.id,

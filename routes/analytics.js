@@ -808,7 +808,7 @@ Reply ONLY with valid JSON (no markdown):
 
       const limitCount = Math.min(parseInt(limitParam) || 300, 500);
       const today = getMoroccanDateStr();
-      const GYM_NAMES = { marjane: 'Fes Saiss', dokarat: 'Doukkarate', casa1: 'Casa Anfa', casa2: 'Lady Anfa' };
+      const GYM_NAMES = { marjane: 'Fes Saiss', dokarat: 'Doukkarate', casa1: 'Casa Anfa', casa2: 'Casa Lady' };
       const gymIds = gymId === 'all' ? ['marjane', 'dokarat', 'casa1', 'casa2'] : gymId.split(',');
 
       const options = { limit: limitCount };
@@ -983,7 +983,7 @@ Reply ONLY with valid JSON (no markdown):
       }
 
       const GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
-      const GYM_LABELS = { dokarat: 'DOUKKARATE', marjane: 'FES SAISS', casa1: 'CASA ANFA', casa2: 'LADY ANFA' };
+      const GYM_LABELS = { dokarat: 'DOUKKARATE', marjane: 'FES SAISS', casa1: 'CASA ANFA', casa2: 'CASA LADY' };
       const GYM_COLORS = { dokarat: '#f59e0b', marjane: '#10b981', casa1: '#38bdf8', casa2: '#ec4899' };
       const HOUR_SLOTS = Array.from({ length: 18 }, (_, i) => i + 6); // 6..23
 
@@ -1599,9 +1599,9 @@ Rules:
 
     try {
       const GYM_NAMES = {
-        all: 'ALL EMPIRE (Dokarat + Saiss + Casa Anfa + Lady Anfa)',
+        all: 'ALL EMPIRE (Dokarat + Saiss + Casa Anfa + Casa Lady)',
         dokarat: 'Fès Doukkarate', marjane: 'Fès Saiss',
-        casa1: 'Casa Anfa', casa2: 'Lady Anfa'
+        casa1: 'Casa Anfa', casa2: 'Casa Lady'
       };
       const sectorName = GYM_NAMES[sector] || sector || 'ALL EMPIRE';
       const fullContext = buildContext(sectorName);
@@ -1610,7 +1610,7 @@ Rules:
       const messages = [
         {
           role: 'system',
-          content: `Tu es AURALIX, l'IA tactique de commandement du groupe MegaFit — 4 clubs (Fès Doukkarate, Fès Saiss, Casa Anfa, Lady Anfa).
+          content: `Tu es AURALIX, l'IA tactique de commandement du groupe MegaFit — 4 clubs (Fès Doukkarate, Fès Saiss, Casa Anfa, Casa Lady).
 
 RÈGLES ABSOLUES:
 1. Réponse UNIQUEMENT en français professionnel et percutant.
@@ -1769,7 +1769,7 @@ Sois brutal, précis, data-driven. Zéro généralité. Chaque point cité avec 
 
     try {
       const messages = [
-        { role: 'system', content: `Tu es AURALIX, directeur operationnel IA du groupe MegaFit (4 clubs: Dokarat, Saiss, Casa Anfa, Lady Anfa). Reponse UNIQUEMENT en francais professionnel. Bullet points ultra-concis. Chiffres exacts. Signale anomalies avec WARNING. IMPORTANT: avant de qualifier une baisse comme anomalie, verifie toujours le calendrier: Ramadan 2026=18fev-18mars, Eid Fitr 2026=20mars, Eid Kbir 2026=27mai, Juillet-Aout=creux estival, Juin=exams BAC+risque Eid Kbir, Septembre=pic rentree, Janvier=pic resolutions. Correle les baisses avec ces facteurs avant de conclure a une sous-performance reelle.` },
+        { role: 'system', content: `Tu es AURALIX, directeur operationnel IA du groupe MegaFit (4 clubs: Dokarat, Saiss, Casa Anfa, Casa Lady). Reponse UNIQUEMENT en francais professionnel. Bullet points ultra-concis. Chiffres exacts. Signale anomalies avec WARNING. IMPORTANT: avant de qualifier une baisse comme anomalie, verifie toujours le calendrier: Ramadan 2026=18fev-18mars, Eid Fitr 2026=20mars, Eid Kbir 2026=27mai, Juillet-Aout=creux estival, Juin=exams BAC+risque Eid Kbir, Septembre=pic rentree, Janvier=pic resolutions. Correle les baisses avec ces facteurs avant de conclure a une sous-performance reelle.` },
         { role: 'user', content: prompt }
       ];
       const callGroq = async (key, model) => {
@@ -1854,7 +1854,7 @@ Sois brutal, précis, data-driven. Zéro généralité. Chaque point cité avec 
       const gymId = req.query.gymId || (req.assignedGyms?.includes('all') ? 'all' : req.assignedGyms?.[0] || 'all');
       const rows = lc.getNotifications(gymId, { limit: 50 });
 
-      const GYM_NAMES = { dokarat: 'Dokkarat', marjane: 'Saiss', casa1: 'Anfa', casa2: 'Lady Anfa' };
+      const GYM_NAMES = { dokarat: 'Dokkarat', marjane: 'Saiss', casa1: 'Anfa', casa2: 'Casa Lady' };
 
       const notifications = rows.map(r => ({
         id:        r.id,

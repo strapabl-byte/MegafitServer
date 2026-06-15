@@ -9,7 +9,7 @@ const GYM_LABELS = {
   dokarat: 'Fès Doukkarate',
   marjane: 'Fès Saiss',
   casa1:   'Casa Anfa',
-  casa2:   'Casa Lady Anfa',
+  casa2:   'Casa Lady',
 };
 
 // Shared transporter — created once, reused

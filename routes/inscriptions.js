@@ -313,7 +313,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         'dokarat':    'dokarat', 'dokkarat': 'dokarat', 'doukkarate': 'dokarat', 'fes dokkarat': 'dokarat', 'doukarat': 'dokarat',
         'marjane':    'marjane', 'saiss': 'marjane', 'fes saiss': 'marjane', 'marjan': 'marjane',
         'casa1':      'casa1',   'anfa': 'casa1', 'casa anfa': 'casa1', 'casablanca anfa': 'casa1',
-        'casa2':      'casa2',   'lady': 'casa2', 'casa lady': 'casa2', 'casa lady anfa': 'casa2', 'lady anfa': 'casa2',
+        'casa2':      'casa2',   'lady': 'casa2', 'casa lady': 'casa2', 'casa casa lady': 'casa2', 'casa lady': 'casa2',
       };
       const normalizedGymId = GYM_ALIAS_MAP[rawGymId] || null;
 
@@ -449,7 +449,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         LIMIT ${allGyms ? 10 : 5}
       `).all(searchTerm, searchTerm, searchTerm);
 
-      const GYM_NAMES = { dokarat: 'Fès Doukkarate', marjane: 'Fès Saïss', casa1: 'Casa Anfa', casa2: 'Casa Lady Anfa' };
+      const GYM_NAMES = { dokarat: 'Fès Doukkarate', marjane: 'Fès Saïss', casa1: 'Casa Anfa', casa2: 'Casa Lady' };
 
       res.json(rows.map(m => ({
         id: m.id,
