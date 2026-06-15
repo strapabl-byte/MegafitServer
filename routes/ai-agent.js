@@ -79,7 +79,7 @@ function compactMessages(messages) {
 
 async function groq(messages, useLarge = true) {
   const model = useLarge ? GROQ_LARGE : GROQ_SMALL;
-  const tokens = useLarge ? 2000 : 1000;
+  const tokens = useLarge ? 1200 : 800;
 
   const isRetryableError = (e) => e.message.includes('429') || e.message.includes('rate') || e.httpStatus === 413 || e.message.includes('413') || e.message.includes('Request too large');
 
@@ -710,54 +710,28 @@ function buildSysPrompt(snap, sig) {
       ).join('\n')}`
     : '';
 
-  return `Tu es AURALIX — l'agent IA opérationnel ultime de l'empire MegaFit (4 clubs au Maroc: Fès Doukkarate, Fès Saiss, Casa Anfa, Casa Lady).
-Tu es un OPÉRATEUR IMPITOYABLE. 20+ ans d'expérience en gestion de salles de sport, vente, finance, multi-sites.
-Tu vois TOUT. Tu analyses TOUT. Tu ne laisses RIEN passer.
+  return `Tu es AURALIX — IA tactique MegaFit (4 clubs: Doukkarate, Saiss, Casa Anfa, Casa Lady).
+OPÉRATEUR IMPITOYABLE. Direct, zéro bavardage.
 
-MODE: ANALYSE PROFONDE ACTIVÉ
-Tu as accès à TOUTES les données de l'empire en temps réel:
-- Revenus, paiements, dettes, décaissements
-- Abonnements vendus par formule et par club (avec tendances)
-- Performance de chaque commercial (inscriptions + appels + CA)
-- Taux de renouvellement vs nouvelles inscriptions
-- Pipeline d'inscriptions en attente
-- Membres expirants, anniversaires, réabonnements possibles
-- Incidents opérationnels
-- Trafic portes (capteurs Fès uniquement — Casa pas encore équipé)
+ÉTAT: ${sig.empire_status || 'INCONNU'}
+CA MOIS: ${rev.month.toLocaleString()} DH | OBJ: ${rev.monthly_goal.toLocaleString()} DH (${sig.goal_progress_pct||0}%)
+PRÉV: ${(sig.projected_month_end||0).toLocaleString()} DH | ÉCART: ${(sig.gap_to_goal||0).toLocaleString()} DH | REQ/J: ${(sig.required_daily||0).toLocaleString()} DH
+VS M-1 (j1-${meta.day_of_month}): ${rev.vs_prev_month_pct > 0 ? '+' : ''}${rev.vs_prev_month_pct}%
+DETTE: ${snap.debts.total_open.toLocaleString()} DH (${snap.debts.members_count} mbr) | DÉCAIS: ${dec.month_total.toLocaleString()} DH
+MBR ACTIFS: ${snap.members.active_total} | EXPIRENT 30j: ${snap.members.expiring_30d} | EXPIRÉS: ${snap.members.expired_not_renewed}
+INCIDENTS: ${snap.incidents.open_total} (${snap.incidents.critical} crit) | RESUB POSSIBLES: ${snap.members.resub?.possible_count || 0}
 
-ÉTAT EMPIRE: ${sig.empire_status || 'INCONNU'}
-CA MOIS: ${rev.month.toLocaleString()} DH | OBJECTIF: ${rev.monthly_goal.toLocaleString()} DH | AVANCEMENT: ${sig.goal_progress_pct||0}%
-PRÉVISION FIN MOIS: ${(sig.projected_month_end||0).toLocaleString()} DH | ÉCART: ${(sig.gap_to_goal||0).toLocaleString()} DH | REQUIS/JOUR: ${(sig.required_daily||0).toLocaleString()} DH
-CA VS MÊME PÉRIODE MOIS DERNIER (jour 1-${meta.day_of_month}): ${rev.vs_prev_month_pct > 0 ? '+' : ''}${rev.vs_prev_month_pct}% (${rev.prev_month_same_period?.toLocaleString() || 0} DH à même date)
-CA MOIS DERNIER COMPLET: ${rev.prev_month.toLocaleString()} DH (${rev.vs_prev_month_full_pct > 0 ? '+' : ''}${rev.vs_prev_month_full_pct}% brut — NE PAS comparer directement, le mois n'est pas fini)
-SORTIES ESPÈCES MOIS: ${dec.month_total.toLocaleString()} DH (${sig.decais_ratio_pct||0}% du CA)
-DETTE TOTALE: ${snap.debts.total_open.toLocaleString()} DH | ${snap.debts.members_count} membres | Ratio: ${sig.debt_ratio||0}%
-INCIDENTS OUVERTS: ${snap.incidents.open_total} (${snap.incidents.critical} critiques)
-MEMBRES ACTIFS: ${snap.members.active_total} | Expirent 30j: ${snap.members.expiring_30d} | Expirés non renouvelés: ${snap.members.expired_not_renewed}
-RÉABONNEMENTS POSSIBLES: ${snap.members.resub?.possible_count || 0}
-ANNIVERSAIRES CE MOIS: ${snap.members.birthdays_this_month} (opportunité engagement)
-INSCRIPTIONS EN ATTENTE: ${snap.pending_inscriptions_detailed?.length || snap.members.pending_inscriptions || 0}
+CALENDRIER: Ramadan 18fév-18mars | Eid Fitr 20mars | Eid Kbir 27mai | Juil-Août=creux | Sept=pic${subIntel}${topFormulas}${extRatio}${relanceBlock}${pendingBlock}
 
-CALENDRIER MAROCAIN — avant de qualifier une baisse, vérifier:
-- Ramadan 2026: 18 fév–18 mars | Eid Fitr 2026: 20 mars | Eid Kbir 2026: 27 mai
-- Janv = pic résolutions ★★★★★ | Sept = pic rentrée ★★★★★ | Juil-Août = creux ★★ | Juin = Eid+BAC ★★${subIntel}${topFormulas}${extRatio}${relanceBlock}${pendingBlock}
-
-CAPACITÉS D'ANALYSE PROFONDES:
-1. ABONNEMENTS: Tu sais quelles formules se vendent bien et lesquelles chutent. Tu peux recommander de pousser une formule sous-vendue ou d'arrêter une formule qui ne marche pas.
-2. COMMERCIAUX: Tu connais le CA, les inscriptions, le ticket moyen, ET le taux d'appels relance de chaque commercial. Tu identifies qui DORT et qui CHASSE.
-3. EXTENSIONS vs NOUVEAUX: Tu détectes si un club vit de renouvellements (stagnation) ou génère de la vraie croissance (nouvelles inscriptions).
-4. PIPELINE: Tu vois les inscriptions en attente de confirmation — argent potentiel qui dort.
-5. RELANCE: Tu sais quels commerciaux appellent vraiment les leads et lesquels ignorent leur liste.
-
-RÈGLES ABSOLUES:
-1. Français professionnel, direct, tactique — zéro bavardage.
-2. Jamais de chiffres inventés — données réelles uniquement.
-3. Expliquer la SIGNIFICATION BUSINESS derrière chaque chiffre.
-4. Terminer par des ACTIONS CONCRÈTES avec NOM du responsable, QUOI faire, QUAND le faire.
-5. Classifier: HEALTHY / WATCH / WARNING / CRITICAL.
-6. Quand tu détectes un problème, propose toujours une SOLUTION CONCRÈTE.
-7. Cross-référencer les données: si un commercial fait du CA mais ne rappelle pas ses leads relance → signaler.
-8. Si une formule chute dans un club mais monte dans un autre → recommander transfert de stratégie.${sensorNote}${mem}`;
+FORMAT OBLIGATOIRE:
+- ULTRA-CONCIS: bullet points courts, jamais de paragraphes
+- NE PAS RÉPÉTER les données brutes (noms, montants) que l'utilisateur voit déjà
+- SYNTHÉTISER: "Top 5 débiteurs: 33K DH" au lieu de lister chaque nom
+- CHIFFRES: toujours avec DH et % — jamais de texte générique
+- ACTIONS: format → QUI + QUOI + QUAND (1 ligne par action)
+- MAX 15 bullet points par réponse
+- Pas de scripts d'appel ni de modèles génériques — juste les directives
+- Classifier: ✅HEALTHY 👁WATCH ⚠️WARNING 🔴CRITICAL${sensorNote}${mem}`;
 }
 
 
@@ -1069,17 +1043,17 @@ module.exports = function aiAgentRouter({ lc }) {
 
   // ── POST /api/ai/quick/:mode ───────────────────────────────────────────────
   const QUICK_PROMPTS = {
-    'find-money':       'Analyse toutes les sources d\'argent non collecté: dettes impayées, réabonnements possibles, formules sous-vendues, membres expirés non relancés, inscriptions en attente. Donne un plan chiffré pour les 7 prochains jours avec responsable.',
-    'recover-debt':     'Analyse les créances ouvertes. Classe les débiteurs par priorité (montant + probabilité paiement). Génère un script d\'appel et propose une stratégie de recouvrement avec délais.',
-    'coach-commercial': 'Analyse chaque commercial ce mois: inscriptions, CA, ticket moyen, trend, taux d\'appels relance. Identifie qui DORT (pas d\'appels) et qui CHASSE (taux d\'appel élevé). Donne des directives de coaching précises.',
-    'renewals':         'Génère une campagne renouvellement pour les membres qui expirent dans 30 jours et les possibles RESUB. Script d\'appel, formule à pousser, timing optimal, offre de relance.',
-    'forecast':         'Analyse la vitesse CA actuelle. Projette la fin du mois. Si objectif en danger, calcule ce qu\'il faut faire PAR JOUR et PAR COMMERCIAL pour récupérer.',
-    'incidents':        'Analyse tous les incidents ouverts. Priorise par impact business. Suggère des actions correctives immédiates et préventives.',
-    'courses':          'Analyse les cours: taux de remplissage, cours populaires vs sous-fréquentés. Suggère des optimisations planning et marketing.',
-    'birthdays':        'Stratégie d\'engagement anniversaires: script WhatsApp, offre spéciale, timing optimal pour convertir ces contacts en renouvellements.',
-    'subscriptions':    'Analyse approfondie des formules d\'abonnement: quelles formules se vendent le mieux dans chaque club? Lesquelles chutent? Compare les prix moyens et le CA par formule. Identifie les formules sous-vendues à haute marge. Recommande quelles formules pousser et lesquelles abandonner.',
-    'commercial-activity': 'Analyse l\'activité de chaque commercial: combien d\'appels relance effectués vs assignés, taux de conversion, temps passé sur l\'app inscription. Qui est actif? Qui dort? Qui a le meilleur ROI?',
-    'pipeline':         'Analyse le pipeline d\'inscriptions en attente. Combien d\'argent dort? Quels commerciaux ont des inscriptions bloquées? Donne un plan pour débloquer chaque inscription dans les 48h.',
+    'find-money':       'Sources argent non collecté. Format STRICT:\n• DETTES: total + top 3 clubs — pas de liste de noms\n• RESUB: combien de membres récupérables + montant estimé\n• PIPELINE: inscriptions en attente (montant total)\n• PLAN 7J: 1 ligne par jour → action + responsable + objectif DH\nMax 12 bullet points.',
+    'recover-debt':     'Analyse créances. Format STRICT:\n• RÉSUMÉ: total DH, nb débiteurs, top 3 clubs\n• PRIORITÉ HAUTE: nb personnes > 5000 DH (montant total)\n• PRIORITÉ MOYENNE: nb personnes 2000-5000 DH\n• PRIORITÉ BASSE: nb personnes < 2000 DH\n• PLAN ACTION: 3 actions max → QUI + QUOI + QUAND\nNe PAS lister chaque débiteur individuellement. Max 10 bullets.',
+    'coach-commercial': 'Classement commerciaux. Format STRICT: 1 ligne par commercial:\n• NOM (club): CA DH | X inscrip | ticket moy | appels X% → verdict CHASSEUR/DORT/OK\nPuis 3 directives coaching max. Ne pas répéter les données brutes.',
+    'renewals':         'Campagne renouvellement. Format STRICT:\n• CIBLE: X membres expirent 30j + Y resub possibles = Z prospects\n• TOP CLUBS à cibler (1 ligne par club)\n• STRATÉGIE: 3 actions max → timing + formule à pousser + responsable\nPas de scripts d\'appel. Max 8 bullets.',
+    'forecast':         'Prévision fin mois. Format STRICT:\n• PROJECTION: X DH fin mois vs objectif Y DH = écart Z DH\n• REQUIS/JOUR: X DH (vs moyenne actuelle Y DH/j)\n• PAR COMMERCIAL: répartition objectif restant\n• RISQUES: 2-3 facteurs max\nMax 8 bullets.',
+    'incidents':        'Incidents ouverts. Format STRICT: 1 ligne par incident:\n• [CRIT/WARN] Club: titre → impact business + action\nMax 8 bullets.',
+    'courses':          'Analyse cours. Format STRICT:\n• REMPLISSAGE MOY: X% | COMPLETS: Y | SOUS-REMPLIS: Z\n• TOP 3 cours populaires (1 ligne chacun)\n• 3 optimisations max\nMax 8 bullets.',
+    'birthdays':        'Anniversaires. Format STRICT:\n• CE MOIS: X anniversaires → opportunité engagement\n• STRATÉGIE: 3 actions max → offre + timing + responsable\nMax 6 bullets.',
+    'subscriptions':    'Formules abonnement. Format STRICT: 1 ligne par formule:\n• FORMULE (club): X vendus | CA Y DH | trend ↑↓→\nPuis 3 recommandations max. Max 12 bullets.',
+    'commercial-activity': 'Activité commerciaux. Format STRICT: 1 ligne par personne:\n• NOM: appels X/Y (Z%) | intéressés: A | renouvelés: B → verdict\nPuis 2 directives. Max 10 bullets.',
+    'pipeline':         'Pipeline inscriptions. Format STRICT:\n• TOTAL: X inscriptions en attente = Y DH dormant\n• PAR CLUB: 1 ligne par club → nb + montant\n• ACTIONS: 3 max → QUI débloquer QUOI avant QUAND\nMax 8 bullets.',
   };
 
   router.post('/api/ai/quick/:mode', verifyAzureToken, requireAdmin, async (req, res) => {
