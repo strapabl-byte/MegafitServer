@@ -74,13 +74,32 @@ module.exports = function(deps) {
                 COALESCE(CAST(cheque AS REAL),0) AS cheque,
                 COALESCE(CAST(prix AS REAL),0) AS prix,
                 COALESCE(CAST(reste AS REAL),0) AS stored_reste,
-                COALESCE(source, '') AS source
+                COALESCE(source, '') AS source,
+                COALESCE(nom, '') AS nom,
+                COALESCE(contrat, '') AS contrat
          FROM register_cache WHERE gym_id=? AND date IN (${ph})`
       ).all(gymId, ...dates);
       const espece   = Math.round(rows.reduce((s, r) => s + (r.espece || 0), 0));
       const tpe      = Math.round(rows.reduce((s, r) => s + (r.tpe || 0), 0));
       const virement = Math.round(rows.reduce((s, r) => s + (r.virement || 0), 0));
       const cheque   = Math.round(rows.reduce((s, r) => s + (r.cheque || 0), 0));
+
+      // 🔧 FIX: Build settled member map to exclude already-paid debts
+      const settledRows = lc.db.prepare(
+        `SELECT nom, contrat, CAST(reste AS REAL) AS reste
+         FROM register_cache
+         WHERE gym_id = ? AND COALESCE(source, '') = 'reste_settlement'`
+      ).all(gymId);
+      const settledMap = new Map();
+      for (const s of settledRows) {
+        const key = (s.contrat && s.contrat.trim() && s.contrat.trim() !== '-')
+          ? `contrat:${s.contrat.trim()}`
+          : `nom:${(s.nom || '').trim().toUpperCase()}`;
+        const existing = settledMap.get(key);
+        if (!existing || (s.reste || 0) < existing) {
+          settledMap.set(key, s.reste || 0);
+        }
+      }
 
       // Smart reste calculation: recalculate from prix - paid (like frontend)
       // Exclude reste_settlement entries (they are payments, not debts)
@@ -89,11 +108,25 @@ module.exports = function(deps) {
         if (r.source === 'reste_settlement') continue; // skip payment entries
         const paid = (r.tpe || 0) + (r.espece || 0) + (r.virement || 0) + (r.cheque || 0);
         const prix = r.prix || 0;
+        let computedReste = 0;
         if (prix > 0) {
-          const computed = prix - paid;
-          if (computed > 0) { reste += computed; resteCount++; }
+          computedReste = prix - paid;
         } else if ((r.stored_reste || 0) > 0) {
-          reste += r.stored_reste; resteCount++;
+          computedReste = r.stored_reste;
+        }
+        if (computedReste > 0) {
+          // Check if this member's debt has been settled
+          const contratKey = (r.contrat && r.contrat.trim() && r.contrat.trim() !== '-')
+            ? `contrat:${r.contrat.trim()}`
+            : null;
+          const nomKey = `nom:${(r.nom || '').trim().toUpperCase()}`;
+          const settledReste = settledMap.get(contratKey) ?? settledMap.get(nomKey) ?? null;
+          if (settledReste !== null) {
+            if (settledReste > 0) { reste += settledReste; resteCount++; }
+            // settledReste === 0 → fully paid, skip
+          } else {
+            reste += computedReste; resteCount++;
+          }
         }
       }
       reste = Math.round(reste);

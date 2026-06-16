@@ -232,6 +232,43 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
         console.warn('[Settle/Public] Register update failed (non-blocking):', regErr.message);
       }
 
+      // 🔧 FIX: Update the ORIGINAL register entry's reste to newBalance
+      // Without this, the original entry keeps showing reste > 0 in KPI stats
+      try {
+        const contractNum = member.contractNumber || '';
+        const memberName = member.fullName || '';
+        let origRow = null;
+        if (contractNum && contractNum.trim() !== '' && contractNum.trim() !== '-') {
+          origRow = lc.db.prepare(
+            `SELECT id, gym_id, date FROM register_cache
+             WHERE contrat = ? AND COALESCE(source, '') != 'reste_settlement' AND CAST(reste AS REAL) > 0
+             ORDER BY date DESC LIMIT 1`
+          ).get(contractNum);
+        }
+        if (!origRow && memberName) {
+          origRow = lc.db.prepare(
+            `SELECT id, gym_id, date FROM register_cache
+             WHERE nom = ? AND gym_id = ? AND COALESCE(source, '') != 'reste_settlement' AND CAST(reste AS REAL) > 0
+             ORDER BY date DESC LIMIT 1`
+          ).get(memberName, gymId);
+        }
+        if (origRow) {
+          const noteUpdate = newBalance <= 0
+            ? `✅ Soldé — ${payAmount} DH payé le ${today}`
+            : `⚠️ Reste: ${newBalance} DH (${payAmount} DH payé le ${today})`;
+          lc.db.prepare('UPDATE register_cache SET reste = ?, note_reste = ? WHERE id = ? AND gym_id = ?')
+            .run(newBalance, noteUpdate, origRow.id, origRow.gym_id);
+          // Also update Firestore (non-blocking)
+          try {
+            db.collection('megafit_daily_register').doc(`${origRow.gym_id}_${origRow.date}`)
+              .collection('entries').doc(origRow.id)
+              .update({ reste: newBalance, note_reste: noteUpdate }).catch(() => {});
+          } catch (_) {}
+          console.log(`🔧 [Settle/Public] Updated original entry ${origRow.id} reste: ${newBalance} DH`);
+        }
+      } catch (origErr) {
+        console.warn('[Settle/Public] Original entry update failed (non-blocking):', origErr.message);
+      }
       console.log(`✅ [Settle/Public] ${member.fullName} | Paid: ${payAmount} DH | New balance: ${newBalance} DH`);
 
       // 🔔 Notification: payment received

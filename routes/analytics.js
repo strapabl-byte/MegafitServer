@@ -1175,6 +1175,28 @@ Reply ONLY with valid JSON (no markdown):
       }
 
       // 💳 Reste à Payer — unpaid balances from register_cache
+      // 🔧 FIX: Build a set of settled member keys (contrat or nom+gym) so we can
+      // exclude debts that have already been paid via reste_settlement entries.
+      const phSettled = gymIds.map(() => '?').join(',');
+      const settledRows = lc.db.prepare(
+        `SELECT gym_id, nom, contrat, CAST(reste AS REAL) AS reste
+         FROM register_cache
+         WHERE gym_id IN (${phSettled}) AND COALESCE(source, '') = 'reste_settlement'`
+      ).all(...gymIds);
+      // Map: memberKey -> latest settlement reste value
+      const settledMap = new Map();
+      for (const s of settledRows) {
+        // Use contract number if available, otherwise fall back to nom+gym
+        const key = (s.contrat && s.contrat.trim() && s.contrat.trim() !== '-')
+          ? `contrat:${s.contrat.trim()}`
+          : `nom:${(s.nom || '').trim().toUpperCase()}|${s.gym_id}`;
+        const existing = settledMap.get(key);
+        // Keep the lowest reste (most recent settlement usually has lower or zero reste)
+        if (!existing || (s.reste || 0) < existing) {
+          settledMap.set(key, s.reste || 0);
+        }
+      }
+
       const getResteAPayer = (fromDate, toDate = null) => {
         let totalReste = 0, count = 0;
         const cursor = new Date(fromDate);
@@ -1183,8 +1205,24 @@ Reply ONLY with valid JSON (no markdown):
           const dateStr = toLocalDateStr(cursor);
           for (const gid of gymIds) {
             lc.getRegister(gid, dateStr).forEach(e => {
+              // Skip reste_settlement entries — they are payments, not debts
+              if ((e.source || '') === 'reste_settlement') return;
               const reste = Number(e.reste) || 0;
-              if (reste > 0) { totalReste += reste; count++; }
+              if (reste > 0) {
+                // Check if this member's debt has been settled
+                const contratKey = (e.contrat && e.contrat.trim() && e.contrat.trim() !== '-')
+                  ? `contrat:${e.contrat.trim()}`
+                  : null;
+                const nomKey = `nom:${(e.nom || '').trim().toUpperCase()}|${gid}`;
+                const settledReste = settledMap.get(contratKey) ?? settledMap.get(nomKey) ?? null;
+                if (settledReste !== null) {
+                  // Member has a settlement — use the settlement's reste value instead
+                  if (settledReste > 0) { totalReste += settledReste; count++; }
+                  // If settledReste === 0, debt is fully paid — skip entirely
+                } else {
+                  totalReste += reste; count++;
+                }
+              }
             });
           }
           cursor.setDate(cursor.getDate() + 1);
@@ -1206,12 +1244,26 @@ Reply ONLY with valid JSON (no markdown):
       }
 
       // Top debtors (for display — all time, across selected gyms)
+      // 🔧 FIX: Exclude reste_settlement entries AND exclude members whose debt
+      // has been settled (same contrat or same nom+gym has a reste_settlement with reste=0)
       const phReste = gymIds.map(() => '?').join(',');
       const topDebtors = lc.db.prepare(
-        `SELECT gym_id, nom, CAST(reste AS REAL) AS reste, date, note_reste
-         FROM register_cache
-         WHERE gym_id IN (${phReste}) AND CAST(reste AS REAL) > 0
-         ORDER BY CAST(reste AS REAL) DESC LIMIT 10`
+        `SELECT r.gym_id, r.nom, CAST(r.reste AS REAL) AS reste, r.date, r.note_reste, r.contrat
+         FROM register_cache r
+         WHERE r.gym_id IN (${phReste})
+           AND CAST(r.reste AS REAL) > 0
+           AND COALESCE(r.source, '') != 'reste_settlement'
+           AND NOT EXISTS (
+             SELECT 1 FROM register_cache s
+             WHERE s.source = 'reste_settlement'
+               AND CAST(s.reste AS REAL) = 0
+               AND s.gym_id = r.gym_id
+               AND (
+                 (s.contrat = r.contrat AND s.contrat IS NOT NULL AND s.contrat != '' AND s.contrat != '-')
+                 OR (s.nom = r.nom AND s.nom IS NOT NULL AND s.nom != '')
+               )
+           )
+         ORDER BY CAST(r.reste AS REAL) DESC LIMIT 10`
       ).all(...gymIds).map(r => ({
         gym: r.gym_id, nom: r.nom, reste: Math.round(r.reste), date: r.date, note: r.note_reste || ''
       }));
