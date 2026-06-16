@@ -2338,23 +2338,75 @@ Sois brutal, précis, data-driven. Zéro généralité. Chaque point cité avec 
       const { gymId } = req.params;
       const gymString = gymId === 'all' ? 'dokarat,marjane,casa1,casa2' : gymId;
       const targetGyms = gymString.split(',').map(g => g.trim());
-      
+
       // Aggregate data for the deep scan
       const stats = targetGyms.map(gid => lc.getDailyStat(gid, new Date().toISOString().slice(0, 10)) || { count: 0, total: 0 });
       const totalUnique = stats.reduce((acc, s) => acc + (s.count || 0), 0);
-      
+
+      // ── Top subscription plans (current month, all selected gyms) ─────────────
+      const now = new Date();
+      const monthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+      const ph = targetGyms.map(() => '?').join(',');
+
+      let topPlans = [];
+      let topPlansByGym = {};
+      try {
+        // All-gym combined top 6
+        const planRows = lc.db.prepare(`
+          SELECT abonnement AS plan, COUNT(*) AS cnt,
+                 ROUND(SUM(CAST(tpe AS REAL) + CAST(espece AS REAL) + CAST(virement AS REAL) + CAST(cheque AS REAL)), 0) AS revenue
+          FROM register_cache
+          WHERE gym_id IN (${ph})
+            AND strftime('%Y-%m', date) = ?
+            AND COALESCE(source, '') != 'reste_settlement'
+            AND abonnement IS NOT NULL AND TRIM(abonnement) != '' AND TRIM(abonnement) != '-'
+          GROUP BY abonnement
+          ORDER BY cnt DESC
+          LIMIT 6
+        `).all(...targetGyms, monthStr);
+        topPlans = planRows.map(r => ({ plan: r.plan, count: r.cnt, revenue: r.revenue || 0 }));
+
+        // Per-gym top 3
+        const GYM_NAMES = { dokarat: 'Fès Doukkarate', marjane: 'Fès Saiss', casa1: 'Casa Anfa', casa2: 'Casa Lady' };
+        for (const gid of targetGyms) {
+          const gymPlanRows = lc.db.prepare(`
+            SELECT abonnement AS plan, COUNT(*) AS cnt,
+                   ROUND(SUM(CAST(tpe AS REAL) + CAST(espece AS REAL) + CAST(virement AS REAL) + CAST(cheque AS REAL)), 0) AS revenue
+            FROM register_cache
+            WHERE gym_id = ?
+              AND strftime('%Y-%m', date) = ?
+              AND COALESCE(source, '') != 'reste_settlement'
+              AND abonnement IS NOT NULL AND TRIM(abonnement) != '' AND TRIM(abonnement) != '-'
+            GROUP BY abonnement
+            ORDER BY cnt DESC
+            LIMIT 3
+          `).all(gid, monthStr);
+          topPlansByGym[gid] = {
+            gymId: gid,
+            gymName: GYM_NAMES[gid] || gid,
+            plans: gymPlanRows.map(r => ({ plan: r.plan, count: r.cnt, revenue: r.revenue || 0 }))
+          };
+        }
+      } catch (planErr) {
+        console.warn('[DeepScan] topPlans query failed:', planErr.message);
+      }
+
       res.json({
         ok: true,
         summary: `Analysis of ${targetGyms.length} sectors complete. Current empire footprint: ${totalUnique} active signals.`,
         score: 85 + Math.floor(Math.random() * 10),
         threatLevel: 'Low',
         anomalies: [],
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        month: monthStr,
+        topPlans,
+        topPlansByGym,
       });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
   });
+
 
   // ── Auralix Comparison — Multi-gym performance benchmark ──
   router.get('/api/analytics/auralix-comparison', verifyAzureToken, async (req, res) => {
