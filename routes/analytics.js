@@ -1476,27 +1476,88 @@ Rules:
     // ── Shared context builder ──────────────────────────────────────────────
     const buildContext = (sectorName) => {
       const parts = [];
+      const now       = new Date();
+      const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+      const lastMonthD = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const lastMonth  = `${lastMonthD.getFullYear()}-${String(lastMonthD.getMonth() + 1).padStart(2, '0')}`;
+      const monthStart = `${thisMonth}-01`;
+      const lastMonthStart = `${lastMonth}-01`;
+      const lastMonthEnd   = new Date(now.getFullYear(), now.getMonth(), 0).toISOString().slice(0, 10);
+      const todayStr   = now.toISOString().slice(0, 10);
 
-      // 1. KPIs
+      const ALL_GYMS   = ['dokarat', 'marjane', 'casa1', 'casa2'];
+      const GYM_LABELS = { dokarat: 'Fès Doukkarate', marjane: 'Fès Saiss', casa1: 'Casa Anfa', casa2: 'Casa Lady' };
+
+      // ── A. Per-club KPIs from SQLite (always, regardless of sector) ─────────
+      try {
+        const perClubKpi = ALL_GYMS.map(gid => {
+          const revThis  = lc.db.prepare(`SELECT ROUND(SUM(CAST(tpe AS REAL)+CAST(espece AS REAL)+CAST(virement AS REAL)+CAST(cheque AS REAL)),0) AS t FROM register_cache WHERE gym_id=? AND date>=? AND date<=? AND COALESCE(source,'')!='reste_settlement'`).get(gid, monthStart, todayStr);
+          const revLast  = lc.db.prepare(`SELECT ROUND(SUM(CAST(tpe AS REAL)+CAST(espece AS REAL)+CAST(virement AS REAL)+CAST(cheque AS REAL)),0) AS t FROM register_cache WHERE gym_id=? AND date>=? AND date<=?`).get(gid, lastMonthStart, lastMonthEnd);
+          const insThis  = lc.db.prepare(`SELECT COUNT(*) AS c FROM register_cache WHERE gym_id=? AND date>=? AND date<=? AND COALESCE(source,'')!='reste_settlement'`).get(gid, monthStart, todayStr);
+          const insLast  = lc.db.prepare(`SELECT COUNT(*) AS c FROM register_cache WHERE gym_id=? AND date>=? AND date<=?`).get(gid, lastMonthStart, lastMonthEnd);
+          return `  ${GYM_LABELS[gid]}: CA mois ${(revThis?.t||0).toLocaleString()} DH (mois dern. ${(revLast?.t||0).toLocaleString()} DH) | Inscr. mois ${insThis?.c||0} (mois dern. ${insLast?.c||0})`;
+        });
+        parts.push(`=== KPIs PAR CLUB — ${thisMonth} vs ${lastMonth} ===\n` + perClubKpi.join('\n'));
+      } catch(e) { /* silent */ }
+
+      // ── B. Aggregated KPIs (sector-level, from frontend) ────────────────────
       if (kpis) {
         parts.push([
-          `=== KPIs (${sectorName}) ===`,
+          `=== KPIs AGRÉGÉS (${sectorName}) — TEMPS RÉEL ===`,
           `Revenus: Auj ${(kpis?.income?.day||0).toLocaleString()} DH | Sem ${(kpis?.income?.week||0).toLocaleString()} DH | Mois ${(kpis?.income?.month||0).toLocaleString()} DH | An ${(kpis?.income?.year||0).toLocaleString()} DH`,
           `Inscriptions: Auj ${kpis?.newMembers?.day||0} | Sem ${kpis?.newMembers?.week||0} | Mois ${kpis?.newMembers?.month||0}`,
           `Membres actifs total: ${kpis?.totalActive || 'N/A'}`,
         ].join('\n'));
       }
 
-      // 2. Multi-gym revenue breakdown (from compData sent by frontend)
+      // ── C. Décaissements par club — ce mois + mois dernier (server-side) ───
+      try {
+        const decaisLines = ALL_GYMS.map(gid => {
+          const dThis = lc.db.prepare(`SELECT ROUND(SUM(CAST(montant AS REAL)),0) AS t, COUNT(*) AS n FROM decaissements_cache WHERE gym_id=? AND date>=? AND date<=? AND (status IS NULL OR status!='rejected')`).get(gid, monthStart, todayStr);
+          const dLast = lc.db.prepare(`SELECT ROUND(SUM(CAST(montant AS REAL)),0) AS t, COUNT(*) AS n FROM decaissements_cache WHERE gym_id=? AND date>=? AND date<=? AND (status IS NULL OR status!='rejected')`).get(gid, lastMonthStart, lastMonthEnd);
+          return `  ${GYM_LABELS[gid]}: ce mois ${(dThis?.t||0).toLocaleString()} DH (${dThis?.n||0} opér.) | mois dern. ${(dLast?.t||0).toLocaleString()} DH (${dLast?.n||0} opér.)`;
+        });
+        // Global totals
+        const totalThis = ALL_GYMS.reduce((s, gid) => s + (lc.db.prepare(`SELECT ROUND(SUM(CAST(montant AS REAL)),0) AS t FROM decaissements_cache WHERE gym_id=? AND date>=? AND date<=? AND (status IS NULL OR status!='rejected')`).get(gid, monthStart, todayStr)?.t || 0), 0);
+        const totalLast = ALL_GYMS.reduce((s, gid) => s + (lc.db.prepare(`SELECT ROUND(SUM(CAST(montant AS REAL)),0) AS t FROM decaissements_cache WHERE gym_id=? AND date>=? AND date<=? AND (status IS NULL OR status!='rejected')`).get(gid, lastMonthStart, lastMonthEnd)?.t || 0), 0);
+
+        // Last 10 décaissements detail
+        const recent = lc.db.prepare(`SELECT date, gym_id, montant, raison, status FROM decaissements_cache WHERE (status IS NULL OR status!='rejected') ORDER BY date DESC, created_at DESC LIMIT 10`).all();
+
+        parts.push(
+          `=== DÉCAISSEMENTS PAR CLUB ===\n` +
+          `TOTAL empire: ce mois ${Math.round(totalThis).toLocaleString()} DH | mois dern. ${Math.round(totalLast).toLocaleString()} DH\n` +
+          decaisLines.join('\n') +
+          (recent.length > 0 ? `\nDernières opérations:\n` + recent.map(d => `  ${d.date} | ${GYM_LABELS[d.gym_id]||d.gym_id} | ${(d.montant||0).toLocaleString()} DH | ${d.raison||'?'}`).join('\n') : '')
+        );
+      } catch(e) { /* silent */ }
+
+      // ── D. Reste à payer par club (server-side, real-time) ──────────────────
+      try {
+        const resteLines = ALL_GYMS.map(gid => {
+          const row = lc.db.prepare(`SELECT COUNT(*) AS nb, ROUND(SUM(CAST(reste AS REAL)),0) AS total FROM register_cache WHERE gym_id=? AND CAST(reste AS REAL)>0 AND COALESCE(source,'')!='reste_settlement'`).get(gid);
+          const top3 = lc.db.prepare(`SELECT nom, reste, date FROM register_cache WHERE gym_id=? AND CAST(reste AS REAL)>0 AND COALESCE(source,'')!='reste_settlement' ORDER BY CAST(reste AS REAL) DESC LIMIT 3`).all(gid);
+          const topStr = top3.map(r => `${r.nom}:${r.reste}DH`).join(', ');
+          return `  ${GYM_LABELS[gid]}: ${(row?.total||0).toLocaleString()} DH dû par ${row?.nb||0} membres${topStr ? ` | Top: ${topStr}` : ''}`;
+        });
+        const grandTotal = ALL_GYMS.reduce((s, gid) => s + (lc.db.prepare(`SELECT ROUND(SUM(CAST(reste AS REAL)),0) AS t FROM register_cache WHERE gym_id=? AND CAST(reste AS REAL)>0 AND COALESCE(source,'')!='reste_settlement'`).get(gid)?.t || 0), 0);
+        parts.push(
+          `=== RESTE À PAYER PAR CLUB (créances actives) ===\n` +
+          `TOTAL empire: ${Math.round(grandTotal).toLocaleString()} DH\n` +
+          resteLines.join('\n')
+        );
+      } catch(e) { /* silent */ }
+
+      // ── E. Multi-gym revenue breakdown (from compData sent by frontend) ─────
       if (compData?.performance?.length > 0) {
         const perf = compData.performance;
         parts.push(
           `=== PERFORMANCE PAR CLUB (${compData.month || 'ce mois'}) ===\n` +
-          perf.map(p => `  ${p.gym?.toUpperCase()}: CA ${(p.revenue||0).toLocaleString()} DH | Inscriptions ${p.registrations||0} | Trafic auj ${p.traffic||0}`).join('\n')
+          perf.map(p => `  ${GYM_LABELS[p.gym]||p.gym?.toUpperCase()}: CA ${(p.revenue||0).toLocaleString()} DH | Inscriptions ${p.registrations||0} | Trafic auj ${p.traffic||0}`).join('\n')
         );
       }
 
-      // 3. Multi-month commercial matrix
+      // ── F. Multi-month commercial matrix ────────────────────────────────────
       if (multiMonthStats?.commercials?.length > 0) {
         const { commercials, months } = multiMonthStats;
         const summary = commercials.map(c => {
@@ -1507,7 +1568,7 @@ Rules:
         parts.push(`=== PERFORMANCE COMMERCIAUX (${months.join(', ')}) ===\n` + summary.join('\n'));
       }
 
-      // 4. 30-day door traffic
+      // ── G. 30-day door traffic ───────────────────────────────────────────────
       if (Array.isArray(dailyStats) && dailyStats.length > 0) {
         const total30 = dailyStats.reduce((s, d) => s + (d.count || 0), 0);
         const avg30   = Math.round(total30 / dailyStats.length);
@@ -1523,7 +1584,7 @@ Rules:
         ].join('\n'));
       }
 
-      // 5. Live entries
+      // ── H. Live entries ─────────────────────────────────────────────────────
       if (Array.isArray(liveEntries) && liveEntries.length > 0) {
         parts.push(
           `=== ENTRÉES EN DIRECT (${sectorName}) ===\n` +
@@ -1531,18 +1592,7 @@ Rules:
         );
       }
 
-      // 6. Décaissements (cash outflows)
-      if (decaisData?.total > 0) {
-        const byGym = Object.entries(decaisData.byGym || {}).map(([g, a]) => `${g}: ${a.toLocaleString()} DH`).join(' | ');
-        parts.push([
-          `=== DÉCAISSEMENTS (SORTIES ESPÈCES) ===`,
-          `Total période: ${(decaisData.total||0).toLocaleString()} DH | Nb opérations: ${decaisData.entries?.length||0}`,
-          byGym ? `Par gym: ${byGym}` : '',
-          decaisData.entries?.slice(0,10).map(d => `  ${d.date} | ${d.gymId} | ${(d.montant||0).toLocaleString()} DH | ${d.raison||'?'} | ${d.status||'approved'}`).join('\n'),
-        ].filter(Boolean).join('\n'));
-      }
-
-      // 7. Incidents from SQLite
+      // ── I. Incidents from SQLite ─────────────────────────────────────────────
       try {
         const incidentRows = lc.db ? lc.db.prepare(
           `SELECT gym_id, title, cause, emergency, status, date FROM incidents_cache ORDER BY created_at DESC LIMIT 20`
@@ -1551,27 +1601,12 @@ Rules:
           const open = incidentRows.filter(r => r.status !== 'Resolved');
           parts.push(
             `=== INCIDENTS (${open.length} non-résolus / ${incidentRows.length} total) ===\n` +
-            incidentRows.map(r => `  [${r.status||'?'}] ${r.gym_id} | ${r.title} | ${r.emergency} urgence | ${r.date}`).join('\n')
+            incidentRows.map(r => `  [${r.status||'?'}] ${GYM_LABELS[r.gym_id]||r.gym_id} | ${r.title} | ${r.emergency} urgence | ${r.date}`).join('\n')
           );
         }
       } catch(e) { /* silent */ }
 
-      // 8. Members with debt (reste > 0)
-      try {
-        const debtRows = lc.db ? lc.db.prepare(
-          `SELECT gym_id, nom, reste, note_reste, date FROM register_cache WHERE reste > 0 ORDER BY reste DESC LIMIT 15`
-        ).all() : [];
-        if (debtRows.length > 0) {
-          const totalDebt = debtRows.reduce((s, r) => s + (r.reste||0), 0);
-          parts.push(
-            `=== CRÉANCES MEMBRES (reste à payer) ===\n` +
-            `Total: ${totalDebt.toLocaleString()} DH sur ${debtRows.length} membres\n` +
-            debtRows.slice(0,8).map(r => `  ${r.gym_id} | ${r.nom} | ${r.reste} DH | ${r.note_reste||''}`).join('\n')
-          );
-        }
-      } catch(e) { /* silent */ }
-
-      // 9. Courses/schedule
+      // ── J. Courses/schedule ─────────────────────────────────────────────────
       try {
         const courseRows = lc.db ? lc.db.prepare(
           `SELECT title, coach, days, time, reserved, capacity FROM courses_cache LIMIT 30`
@@ -1587,18 +1622,17 @@ Rules:
         }
       } catch(e) { /* silent */ }
 
-      // 10. Subscriptions
+      // ── K. Top formules ce mois par club ────────────────────────────────────
       try {
-        const { DEFAULT_SUBSCRIPTION_GROUPS } = require('./config');
-        if (DEFAULT_SUBSCRIPTION_GROUPS) {
-          parts.push(
-            `=== FORMULES ABONNEMENTS ===\n` +
-            DEFAULT_SUBSCRIPTION_GROUPS.map(g => `${g.label}: ` + g.options.map(o => `${o.name}=${o.price>0?o.price+'DH':'inclus'}`).join(', ')).join('\n')
-          );
-        }
+        const planLines = ALL_GYMS.map(gid => {
+          const rows = lc.db.prepare(`SELECT abonnement, COUNT(*) AS c FROM register_cache WHERE gym_id=? AND strftime('%Y-%m',date)=? AND COALESCE(source,'')!='reste_settlement' AND abonnement IS NOT NULL AND TRIM(abonnement)!='' GROUP BY abonnement ORDER BY c DESC LIMIT 3`).all(gid, thisMonth);
+          const plans = rows.map((r,i) => `#${i+1} ${r.abonnement}(${r.c})`).join(', ');
+          return `  ${GYM_LABELS[gid]}: ${plans || 'aucune donnée'}`;
+        });
+        parts.push(`=== FORMULES LES PLUS VENDUES (${thisMonth}) ===\n` + planLines.join('\n'));
       } catch(e) { /* silent */ }
 
-      // 11. Recent sales
+      // ── L. Recent sales ─────────────────────────────────────────────────────
       try {
         const salesRows = lc.db ? lc.db.prepare(`
           SELECT date, gym_id, nom, prix, reste, abonnement, source
@@ -1609,13 +1643,13 @@ Rules:
         `).all(sector, sector) : [];
         if (salesRows.length > 0) {
           parts.push(
-            `=== VENTES RÉCENTES ===\n` +
-            salesRows.map(s => `  ${s.date} | ${s.gym_id} | ${s.nom} | ${s.prix}DH | ${s.abonnement} | reste:${s.reste||0}`).join('\n')
+            `=== VENTES RÉCENTES (${sectorName}) ===\n` +
+            salesRows.map(s => `  ${s.date} | ${GYM_LABELS[s.gym_id]||s.gym_id} | ${s.nom} | ${s.prix}DH | ${s.abonnement} | reste:${s.reste||0}`).join('\n')
           );
         }
       } catch(e) { /* silent */ }
 
-      // 12. Historical monthly revenue (last 24 months from SQLite)
+      // ── M. Historical monthly revenue (last 24 months from SQLite) ──────────
       try {
         const histRows = lc.db ? lc.db.prepare(`
           SELECT gym_id,
@@ -1628,7 +1662,6 @@ Rules:
           ORDER BY ym ASC
         `).all() : [];
         if (histRows.length > 0) {
-          // Aggregate by month across all gyms, then per gym
           const monthMap = {};
           histRows.forEach(r => {
             if (!monthMap[r.ym]) monthMap[r.ym] = { total: 0, inscriptions: 0, byGym: {} };
@@ -1637,8 +1670,8 @@ Rules:
             monthMap[r.ym].byGym[r.gym_id] = { revenue: Math.round(r.total || 0), inscriptions: r.inscriptions || 0 };
           });
           const histLines = Object.entries(monthMap).map(([ym, d]) => {
-            const gymBreakdown = Object.entries(d.byGym).map(([g, v]) => `${g}:${v.revenue.toLocaleString()}DH`).join(' | ');
-            return `  ${ym}: ${Math.round(d.total).toLocaleString()} DH | ${d.inscriptions} inscriptions [${gymBreakdown}]`;
+            const gymBreakdown = Object.entries(d.byGym).map(([g, v]) => `${GYM_LABELS[g]||g}:${v.revenue.toLocaleString()}DH`).join(' | ');
+            return `  ${ym}: ${Math.round(d.total).toLocaleString()} DH | ${d.inscriptions} inscr. [${gymBreakdown}]`;
           });
           parts.push(
             `=== HISTORIQUE CA MENSUEL (24 derniers mois) ===\n` + histLines.join('\n')
@@ -1648,6 +1681,7 @@ Rules:
 
       return parts.join('\n\n');
     };
+
 
     try {
       const GYM_NAMES = {
