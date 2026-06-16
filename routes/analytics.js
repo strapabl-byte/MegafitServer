@@ -2407,8 +2407,84 @@ Sois brutal, précis, data-driven. Zéro généralité. Chaque point cité avec 
     }
   });
 
+  // ── Top Plans by Gym — dedicated endpoint with date range support ──
+  // GET /api/analytics/top-plans?gymId=all&startDate=2026-06-01&endDate=2026-06-30
+  router.get('/api/analytics/top-plans', verifyAzureToken, async (req, res) => {
+    try {
+      const { gymId = 'all' } = req.query;
+      const now = new Date();
 
-  // ── Auralix Comparison — Multi-gym performance benchmark ──
+      // Default: current month
+      const defaultStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+      const defaultEnd   = now.toISOString().slice(0, 10);
+      const startDate    = req.query.startDate || defaultStart;
+      const endDate      = req.query.endDate   || defaultEnd;
+
+      const gymString  = gymId === 'all' ? 'dokarat,marjane,casa1,casa2' : gymId;
+      const targetGyms = gymString.split(',').map(g => g.trim());
+      const ph         = targetGyms.map(() => '?').join(',');
+
+      const GYM_NAMES = { dokarat: 'Fès Doukkarate', marjane: 'Fès Saiss', casa1: 'Casa Anfa', casa2: 'Casa Lady' };
+
+      // All-gym combined top 10
+      const allRows = lc.db.prepare(`
+        SELECT abonnement AS plan, COUNT(*) AS cnt,
+               ROUND(SUM(CAST(tpe AS REAL) + CAST(espece AS REAL) + CAST(virement AS REAL) + CAST(cheque AS REAL)), 0) AS revenue
+        FROM register_cache
+        WHERE gym_id IN (${ph})
+          AND date >= ? AND date <= ?
+          AND COALESCE(source, '') != 'reste_settlement'
+          AND abonnement IS NOT NULL AND TRIM(abonnement) != '' AND TRIM(abonnement) != '-'
+        GROUP BY abonnement
+        ORDER BY cnt DESC
+        LIMIT 10
+      `).all(...targetGyms, startDate, endDate);
+
+      // Per-gym top 5
+      const topPlansByGym = {};
+      for (const gid of targetGyms) {
+        const gymRows = lc.db.prepare(`
+          SELECT abonnement AS plan, COUNT(*) AS cnt,
+                 ROUND(SUM(CAST(tpe AS REAL) + CAST(espece AS REAL) + CAST(virement AS REAL) + CAST(cheque AS REAL)), 0) AS revenue
+          FROM register_cache
+          WHERE gym_id = ?
+            AND date >= ? AND date <= ?
+            AND COALESCE(source, '') != 'reste_settlement'
+            AND abonnement IS NOT NULL AND TRIM(abonnement) != '' AND TRIM(abonnement) != '-'
+          GROUP BY abonnement
+          ORDER BY cnt DESC
+          LIMIT 5
+        `).all(gid, startDate, endDate);
+        topPlansByGym[gid] = {
+          gymId:   gid,
+          gymName: GYM_NAMES[gid] || gid,
+          plans:   gymRows.map(r => ({ plan: r.plan, count: r.cnt, revenue: r.revenue || 0 })),
+        };
+      }
+
+      // Total inscriptions across range for context
+      const totalRow = lc.db.prepare(`
+        SELECT COUNT(*) AS cnt FROM register_cache
+        WHERE gym_id IN (${ph}) AND date >= ? AND date <= ?
+          AND COALESCE(source, '') != 'reste_settlement'
+      `).get(...targetGyms, startDate, endDate);
+
+      res.json({
+        ok: true,
+        startDate,
+        endDate,
+        gymIds:      targetGyms,
+        topPlans:    allRows.map(r => ({ plan: r.plan, count: r.cnt, revenue: r.revenue || 0 })),
+        topPlansByGym,
+        totalInscriptions: totalRow?.cnt || 0,
+      });
+    } catch (err) {
+      console.error('[TOP-PLANS] error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+
   router.get('/api/analytics/auralix-comparison', verifyAzureToken, async (req, res) => {
     try {
       const gyms = ['dokarat', 'marjane', 'casa1', 'casa2'];
