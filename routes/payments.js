@@ -296,7 +296,45 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
       // 4. Update local cache
       const updatedMemberSnap = await memberRef.get();
       lc.upsertMembers(gymId, [{ id: memberId, ...updatedMemberSnap.data() }]);
-      // autoRegisterCA already handles SQLite register update
+
+      // 5. 🔧 FIX: Update the ORIGINAL register entry's reste to newBalance
+      // Without this, the original entry keeps showing reste > 0 in KPI stats
+      try {
+        const contractNum = member.contractNumber || '';
+        const memberName = member.fullName || '';
+        const today = new Date().toISOString().slice(0, 10);
+        let origRow = null;
+        if (contractNum && contractNum.trim() !== '' && contractNum.trim() !== '-') {
+          origRow = lc.db.prepare(
+            `SELECT id, gym_id, date FROM register_cache
+             WHERE contrat = ? AND COALESCE(source, '') != 'reste_settlement' AND CAST(reste AS REAL) > 0
+             ORDER BY date DESC LIMIT 1`
+          ).get(contractNum);
+        }
+        if (!origRow && memberName) {
+          origRow = lc.db.prepare(
+            `SELECT id, gym_id, date FROM register_cache
+             WHERE nom = ? AND gym_id = ? AND COALESCE(source, '') != 'reste_settlement' AND CAST(reste AS REAL) > 0
+             ORDER BY date DESC LIMIT 1`
+          ).get(memberName, gymId);
+        }
+        if (origRow) {
+          const noteUpdate = newBalance <= 0
+            ? `✅ Soldé — ${payAmount} DH payé le ${today}`
+            : `⚠️ Reste: ${newBalance} DH (${payAmount} DH payé le ${today})`;
+          lc.db.prepare('UPDATE register_cache SET reste = ?, note_reste = ? WHERE id = ? AND gym_id = ?')
+            .run(newBalance, noteUpdate, origRow.id, origRow.gym_id);
+          // Also update Firestore (non-blocking)
+          try {
+            db.collection('megafit_daily_register').doc(`${origRow.gym_id}_${origRow.date}`)
+              .collection('entries').doc(origRow.id)
+              .update({ reste: newBalance, note_reste: noteUpdate }).catch(() => {});
+          } catch (_) {}
+          console.log(`🔧 [Settle/Dashboard] Updated original entry ${origRow.id} reste: ${newBalance} DH`);
+        }
+      } catch (origErr) {
+        console.warn('[Settle/Dashboard] Original entry update failed (non-blocking):', origErr.message);
+      }
 
       res.json({ ok: true, paymentId: payRef.id, newBalance });
     } catch (err) {
