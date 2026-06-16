@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 // routes/sales.js — Commercial Performance, Goals, Multi-Stats & Re-Sub Intelligence
 // Re-Sub engine is extracted to lib/resubEngine.js (singleton) and imported here.
 
@@ -12,6 +12,10 @@ const {
 } = require('../lib/resubEngine');
 
 let _bdayCache = null;
+
+// 🔧 In-memory response cache for resub-matrix (avoids re-processing on every page load)
+const _resubResponseCache = new Map(); // key: gymId+dates → { timestamp, json }
+const RESUB_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 
 module.exports = function commercialsRouter({ db, admin, lc }) {
   const router = Router();
@@ -413,6 +417,14 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
         ? ['dokarat', 'marjane', 'casa1', 'casa2']
         : gymId.split(',').map(s => s.trim());
 
+      // 🔧 RESPONSE CACHE: Return cached result if still fresh (< 10 min)
+      const responseCacheKey = `${gymIds.sort().join(',')}|${startDate}|${endDate}`;
+      const cachedResponse = _resubResponseCache.get(responseCacheKey);
+      if (cachedResponse && (Date.now() - cachedResponse.timestamp) < RESUB_CACHE_TTL) {
+        console.log(`[ReSubCache] ⚡ Response cache hit (age: ${Math.round((Date.now() - cachedResponse.timestamp) / 1000)}s)`);
+        return res.json(cachedResponse.json);
+      }
+
       const placeholders = gymIds.map(() => '?').join(',');
 
       // Fetch all inscriptions in the date range across selected gyms
@@ -498,7 +510,9 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
       const classified = rows.map(row => {
         const cached = cacheMap.get(String(row.id));
         // Only trust the cache if it's a firm verdict, or if it was successfully AI-verified
-        if (cached && !(cached.type === 'POSSIBLE' && cached.ai_verified === 0)) {
+        if (cached) {
+          // Trust ALL cached verdicts — no re-analysis needed.
+          // Users can trigger Deep Scan manually for re-analysis of POSSIBLEs.
           // Return cached verdict — zero Groq cost
           return {
             id:            row.id,
@@ -659,7 +673,7 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
       const totalResub = classified.filter(c => c.type === 'RESUB').length;
       const totalPoss  = classified.filter(c => c.type === 'POSSIBLE').length;
 
-      res.json({
+      const responseJson = {
         ok: true,
         month: dateLabel,
         dateRange: { startDate, endDate },
@@ -673,7 +687,12 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
           misses: classified.length - cacheMap.size,
           total:  classified.length,
         },
-      });
+      };
+
+      // 🔧 Save to response cache for next page load
+      _resubResponseCache.set(responseCacheKey, { timestamp: Date.now(), json: responseJson });
+
+      res.json(responseJson);
     } catch (err) {
       console.error('GET /api/sales/resub-matrix error:', err.message, err.stack);
       res.status(500).json({ error: err.message });
@@ -686,6 +705,7 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
   // ─────────────────────────────────────────────────────────────────────────────
   router.delete('/resub-cache/clear', verifyAzureToken, (req, res) => {
     try {
+      _resubResponseCache.clear(); // Invalidate response cache
       const { gymId } = req.query;
       if (gymId && gymId !== 'all') {
         const result = lc.db.prepare('DELETE FROM resub_intelligence_cache WHERE gym_id = ?').run(gymId);
@@ -791,6 +811,7 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
       applyUpgrades([...deepScanMap.entries()]);
 
       const upgraded = [...deepScanMap.values()].filter(v => v.verdict === 'RESUB').length;
+      _resubResponseCache.clear(); // Invalidate response cache so deep scan results show immediately
       console.log(`[DeepScan] ✅ Completed: ${upgraded} hidden RESUB found out of ${targets.length} scanned`);
 
       res.json({
@@ -843,6 +864,7 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
         String(id)
       );
 
+      _resubResponseCache.clear(); // Invalidate response cache
       res.json({
         ok: true,
         type: aiResult.verdict === 'RESUB' ? 'RESUB' : (aiResult.verdict === 'POSSIBLE' ? 'POSSIBLE' : 'NEW'),
@@ -870,6 +892,7 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
         WHERE register_id = ?
       `).run(String(id));
 
+      _resubResponseCache.clear(); // Invalidate response cache
       res.json({ ok: true });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -947,6 +970,7 @@ module.exports = function commercialsRouter({ db, admin, lc }) {
         String(id)
       );
 
+      _resubResponseCache.clear(); // Invalidate response cache
       res.json({ ok: true });
     } catch (err) {
       res.status(500).json({ error: err.message });
