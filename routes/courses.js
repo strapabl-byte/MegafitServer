@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 // routes/courses.js — Courses, Coaches, Reservations, Bilans
 
 const { Router } = require('express');
@@ -275,16 +275,196 @@ module.exports = function coursesRouter({ db, admin }) {
 
   router.put('/api/coach-reservations/:id', verifyAzureToken, async (req, res) => {
     try {
-      const { status, coachNotes } = req.body;
+      const { status, coachNotes, coachId, coachName } = req.body;
       const ref = db.collection('coach_reservations').doc(req.params.id);
       const update = {};
       if (status) update.status = status;
       if (coachNotes !== undefined) update.coachNotes = coachNotes;
+      if (coachId !== undefined) update.coachId = coachId;
+      if (coachName !== undefined) update.coachName = coachName;
       update.updatedAt = admin.firestore.FieldValue.serverTimestamp();
       await ref.update(update);
       const snap = await ref.get();
       res.json({ id: snap.id, ...snap.data() });
     } catch (err) { res.status(500).json({ error: 'Failed to update bilan' }); }
+  });
+
+  // ── Coach Ratings & AI Programs (New) ──────────────────────────────────────
+
+  // 1. Submit Coach Rating (Used by mobile app/PWA and dashboard)
+  router.post('/api/coach-ratings', async (req, res) => {
+    try {
+      const { reservationId, coachId, coachName, rating, comment, memberId, memberName, courseTitle } = req.body;
+      if (!coachId || !rating || !memberId) {
+        return res.status(400).json({ error: 'coachId, rating and memberId are required' });
+      }
+
+      const ratingData = {
+        reservationId: reservationId || '',
+        coachId,
+        coachName: coachName || '',
+        rating: Number(rating),
+        comment: comment || '',
+        memberId,
+        memberName: memberName || '',
+        courseTitle: courseTitle || '',
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      };
+
+      const docRef = await db.collection('coach_ratings').add(ratingData);
+
+      if (reservationId) {
+        try {
+          await db.collection('reservations').doc(reservationId).update({
+            status: 'completed_rated',
+            ratedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+        } catch (err) {
+          console.warn(`[COACH RATINGS] Failed to update reservation ${reservationId}:`, err.message);
+        }
+      }
+
+      res.json({ ok: true, id: docRef.id });
+    } catch (err) {
+      console.error('Failed to submit coach rating:', err);
+      res.status(500).json({ error: 'Failed to submit coach rating' });
+    }
+  });
+
+  // 2. Fetch Average Rating (Used by mobile app and dashboard)
+  router.get('/api/coaches/average-rating/:coachName', async (req, res) => {
+    try {
+      const { coachName } = req.params;
+      const snap = await db.collection('coach_ratings').where('coachName', '==', coachName).get();
+      if (snap.empty) {
+        return res.json({ ok: true, averageRating: 0, totalRatings: 0 });
+      }
+      let sum = 0;
+      snap.docs.forEach(doc => {
+        sum += (Number(doc.data().rating) || 0);
+      });
+      const avg = Number((sum / snap.size).toFixed(1));
+      res.json({
+        ok: true,
+        averageRating: avg,
+        totalRatings: snap.size
+      });
+    } catch (err) {
+      console.error('Failed to fetch coach average rating:', err);
+      res.status(500).json({ error: 'Failed to fetch average rating' });
+    }
+  });
+
+  // 3. Fetch All Coach Ratings (Used by dashboard)
+  router.get('/api/coaches/ratings', verifyAzureToken, async (req, res) => {
+    try {
+      const snap = await db.collection('coach_ratings').orderBy('createdAt', 'desc').limit(1000).get();
+      res.json(snap.docs.map(doc => {
+        const d = doc.data();
+        let createdAt = null;
+        if (d.createdAt?.toDate) createdAt = d.createdAt.toDate().toISOString();
+        else if (d.createdAt?._seconds) createdAt = new Date(d.createdAt._seconds * 1000).toISOString();
+        return { id: doc.id, ...d, createdAt };
+      }));
+    } catch (err) {
+      console.error('Failed to fetch coach ratings:', err);
+      res.status(500).json({ error: 'Failed to fetch coach ratings' });
+    }
+  });
+
+  // 4. Fetch AI Program Summary for All Active Members (Used by dashboard)
+  router.get('/api/coaches/ai-programs-summary', verifyAzureToken, async (req, res) => {
+    try {
+      const snap = await db.collection('coach_reservations')
+        .where('aiGenerated', '==', true)
+        .get();
+
+      const memberMap = new Map();
+
+      snap.docs.forEach(doc => {
+        const d = doc.data();
+        const memberId = d.memberId;
+        if (!memberId) return;
+
+        let createdAt = null;
+        if (d.createdAt?.toDate) createdAt = d.createdAt.toDate().toISOString();
+        else if (d.createdAt?._seconds) createdAt = new Date(d.createdAt._seconds * 1000).toISOString();
+        else if (doc.createTime) createdAt = doc.createTime.toDate().toISOString();
+
+        // Calculate workouts completed
+        let totalWorkoutsCompleted = 0;
+        if (d.dailyProgress) {
+          Object.values(d.dailyProgress).forEach(log => {
+            if (log && log.workoutCompleted) {
+              totalWorkoutsCompleted++;
+            }
+          });
+        }
+
+        const memberData = {
+          memberId,
+          memberName: d.memberName || 'Unknown',
+          goal: d.goal || d.aiProfile?.goal || 'General Fitness',
+          level: d.level || d.aiProfile?.level || 'beginner',
+          daysPerWeek: d.daysPerWeek || d.aiProfile?.daysPerWeek || 3,
+          equipment: d.equipment || d.aiProfile?.equipment || 'none',
+          points: d.points || 0,
+          coachingLevel: d.coachingLevel || d.level || 1,
+          totalWorkoutsCompleted,
+          latestProgramDate: createdAt,
+          rawCreatedAt: createdAt ? new Date(createdAt).getTime() : 0
+        };
+
+        const existing = memberMap.get(memberId);
+        if (!existing || memberData.rawCreatedAt > existing.rawCreatedAt) {
+          memberMap.set(memberId, memberData);
+        }
+      });
+
+      const members = Array.from(memberMap.values()).sort((a, b) => b.rawCreatedAt - a.rawCreatedAt);
+      members.forEach(m => delete m.rawCreatedAt);
+
+      res.json({ ok: true, members });
+    } catch (err) {
+      console.error('Failed to fetch AI programs summary:', err);
+      res.status(500).json({ error: 'Failed to fetch AI programs summary' });
+    }
+  });
+
+  // 5. Fetch AI Programs & Progress for a Specific Member (Used by dashboard)
+  router.get('/api/coaches/member-ai-programs/:memberId', verifyAzureToken, async (req, res) => {
+    try {
+      const { memberId } = req.params;
+      const snap = await db.collection('coach_reservations')
+        .where('memberId', '==', memberId)
+        .where('aiGenerated', '==', true)
+        .get();
+
+      const programs = snap.docs.map(doc => {
+        const d = doc.data();
+        let createdAt = null;
+        if (d.createdAt?.toDate) createdAt = d.createdAt.toDate().toISOString();
+        else if (d.createdAt?._seconds) createdAt = new Date(d.createdAt._seconds * 1000).toISOString();
+        else if (doc.createTime) createdAt = doc.createTime.toDate().toISOString();
+
+        return {
+          id: doc.id,
+          ...d,
+          createdAt
+        };
+      });
+
+      programs.sort((a, b) => {
+        const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return timeB - timeA;
+      });
+
+      res.json({ ok: true, programs });
+    } catch (err) {
+      console.error(`Failed to fetch AI programs for member ${memberId}:`, err);
+      res.status(500).json({ error: 'Failed to fetch member AI programs' });
+    }
   });
 
   return router;
