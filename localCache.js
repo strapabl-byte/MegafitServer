@@ -954,6 +954,10 @@ function resolveIncidentCache(id) {
     .run(new Date().toISOString(), id);
 }
 
+function deleteIncident(id) {
+  db.prepare(`DELETE FROM incidents_cache WHERE id = ?`).run(id);
+}
+
 // ── KIDS COURSES ──────────────────────────────────────────────────────────────────────
 
 const { randomUUID } = require('crypto');
@@ -1298,7 +1302,7 @@ module.exports = {
   // pending (auralix)
   setPending, updatePendingStatus, updatePendingChequePhotos, getPending, getPendingWithPdf, getPendingById,
   // incidents cache
-  upsertIncidents, getIncidents, resolveIncidentCache,
+  upsertIncidents, getIncidents, resolveIncidentCache, deleteIncident,
   // kids courses
   upsertKidsCourse, getKidsCourses, updateKidsCourse, deleteKidsCourse,
   // recruitment
