@@ -467,5 +467,86 @@ module.exports = function coursesRouter({ db, admin }) {
     }
   });
 
+  // 6. Fetch Member Audit Logs (Used by dashboard)
+  router.get('/api/coaches/member-audit-logs/:memberId', verifyAzureToken, async (req, res) => {
+    try {
+      const { memberId } = req.params;
+      const limit = Number(req.query.limit) || 50;
+
+      // 1. Fetch push notifications sent to this member from Firestore push_notifications_history
+      const notifSnap = await db.collection('push_notifications_history')
+        .orderBy('timestamp', 'desc')
+        .limit(200)
+        .get();
+
+      const memberNotifs = [];
+      notifSnap.docs.forEach(doc => {
+        const data = doc.data();
+        const hasMember = (data.recipients || []).some(r => r.id === memberId);
+        if (hasMember) {
+          memberNotifs.push({
+            id: doc.id,
+            action: 'notification_sent',
+            memberId,
+            title: data.title || '',
+            timestamp: data.timestamp
+          });
+        }
+      });
+
+      // 2. Fetch NFC / Access Swipes for this member
+      const accessSnap = await db.collection('access_logs')
+        .where('memberId', '==', memberId)
+        .limit(100)
+        .get();
+
+      const memberAccess = accessSnap.docs.map(doc => {
+        const data = doc.data();
+        let timestamp = null;
+        if (data.usedAt?.toDate) timestamp = data.usedAt.toDate().toISOString();
+        else if (data.usedAt?._seconds) timestamp = new Date(data.usedAt._seconds * 1000).toISOString();
+        return {
+          id: doc.id,
+          action: data.type === 'nfc' ? 'nfc_access_granted' : 'qr_access_granted',
+          memberId,
+          timestamp
+        };
+      });
+
+      // 3. Fetch AI Coach Interactions / program generations from coach_reservations
+      const aiSnap = await db.collection('coach_reservations')
+        .where('memberId', '==', memberId)
+        .where('aiGenerated', '==', true)
+        .get();
+
+      const memberAi = aiSnap.docs.map(doc => {
+        const data = doc.data();
+        let timestamp = null;
+        if (data.createdAt?.toDate) timestamp = data.createdAt.toDate().toISOString();
+        else if (data.createdAt?._seconds) timestamp = new Date(data.createdAt._seconds * 1000).toISOString();
+        return {
+          id: doc.id,
+          action: 'ai_program_generated',
+          memberId,
+          title: `Programme IA (${data.goal || 'Remise en forme'})`,
+          timestamp
+        };
+      });
+
+      // Combine, sort descending, and limit
+      const allLogs = [...memberNotifs, ...memberAccess, ...memberAi];
+      allLogs.sort((a, b) => {
+        const tA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+        const tB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+        return tB - tA;
+      });
+
+      res.json({ ok: true, logs: allLogs.slice(0, limit) });
+    } catch (err) {
+      console.error(`Failed to fetch audit logs for member ${req.params.memberId}:`, err);
+      res.status(500).json({ error: 'Failed to fetch member audit logs' });
+    }
+  });
+
   return router;
 };
