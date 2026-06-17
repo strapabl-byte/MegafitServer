@@ -2023,6 +2023,25 @@ Sois brutal, précis, data-driven. Zéro généralité. Chaque point cité avec 
     }
   });
 
+  // DELETE /api/incidents/:id — Super Admin only: permanently delete an incident
+  router.delete('/api/incidents/:id', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      // Delete from SQLite cache
+      lc.deleteIncident(id);
+      // Delete from Firestore (fire-and-forget)
+      db.collection('incidents').doc(id).delete()
+        .catch(err => console.error('[INCIDENTS DELETE Firestore]', err.message));
+      // Invalidate cache so next fetch re-syncs
+      incidentsCachedAt = 0;
+      console.log(`[INCIDENTS DELETE] Admin ${req.user?.preferred_username || req.user?.upn || 'unknown'} deleted incident ${id}`);
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('[INCIDENTS DELETE] error:', err);
+      res.status(500).json({ error: 'Failed to delete incident' });
+    }
+  });
+
   // â”€â”€ KIDS COURSES (SQLite read, Firestore write-through on mutations) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // READ  â†’ always SQLite (zero Firestore reads)
   // WRITE â†’ SQLite immediately + Firestore fire-and-forget (backup/sync)
