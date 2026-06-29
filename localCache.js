@@ -397,6 +397,30 @@ try { db.exec(`
   CREATE INDEX IF NOT EXISTS idx_rc_member     ON relance_calls(member_id);
 `); } catch(e) {}
 
+// ── Activity Logs Cache ──────────────────────────────────────────────────────
+try { db.exec(`
+  CREATE TABLE IF NOT EXISTS activity_logs_cache (
+    id          TEXT PRIMARY KEY,
+    gym_id      TEXT,
+    user_email  TEXT,
+    user_name   TEXT,
+    user_role   TEXT,
+    action      TEXT,
+    page        TEXT,
+    method      TEXT,
+    club_id     TEXT,
+    club_name   TEXT,
+    club_color  TEXT,
+    source      TEXT,
+    created_at  TEXT NOT NULL,
+    date        TEXT NOT NULL,
+    synced_at   TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_activity_gym_date ON activity_logs_cache(gym_id, date);
+  CREATE INDEX IF NOT EXISTS idx_activity_role ON activity_logs_cache(user_role);
+  CREATE INDEX IF NOT EXISTS idx_activity_date ON activity_logs_cache(date);
+`); } catch(e) {}
+
 console.log(`💾 SQLite cache initialised → ${DB_PATH}`);
 
 
@@ -1214,6 +1238,94 @@ try {
     );
   `);
 } catch(e) {}
+
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS activity_logs_cache (
+      id TEXT PRIMARY KEY,
+      gym_id TEXT,
+      user_email TEXT,
+      user_name TEXT,
+      user_role TEXT,
+      action TEXT,
+      page TEXT,
+      method TEXT,
+      club_id TEXT,
+      club_name TEXT,
+      club_color TEXT,
+      source TEXT,
+      created_at TEXT,
+      date TEXT,
+      synced_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_activity_gym ON activity_logs_cache(gym_id);
+    CREATE INDEX IF NOT EXISTS idx_activity_date ON activity_logs_cache(date);
+  `);
+} catch(e) {}
+
+// ── ACTIVITY LOGS CACHE ──────────────────────────────────────────────────────
+
+const insertActivityLog = db.prepare(`
+  INSERT OR REPLACE INTO activity_logs_cache
+    (id, gym_id, user_email, user_name, user_role, action, page, method, club_id, club_name, club_color, source, created_at, date, synced_at)
+  VALUES
+    (@id, @gym_id, @user_email, @user_name, @user_role, @action, @page, @method, @club_id, @club_name, @club_color, @source, @created_at, @date, @synced_at)
+`);
+
+function upsertActivityLogs(logsArr) {
+  const upsert = db.transaction((rows) => {
+    for (const l of rows) insertActivityLog.run(l);
+  });
+  const now = new Date().toISOString();
+  upsert(logsArr.map(l => ({
+    id:         l.id,
+    gym_id:     l.gymId || l.gym_id || 'system',
+    user_email: l.userEmail || l.user_email || '',
+    user_name:  l.userName || l.user_name || '',
+    user_role:  l.userRole || l.user_role || 'unknown',
+    action:     l.action || '',
+    page:       l.page || 'Système',
+    method:     l.method || '',
+    club_id:    l.club?.id || l.club_id || 'system',
+    club_name:  l.club?.name || l.club_name || 'System',
+    club_color: l.club?.color || l.club_color || '#999',
+    source:     l.source || '',
+    created_at: l.createdAt || l.created_at || now,
+    date:       (l.createdAt || l.created_at || now).slice(0, 10),
+    synced_at:  now,
+  })));
+}
+
+function getActivityLogs({ gymId, role, startDate, endDate, limit = 200 } = {}) {
+  let sql = 'SELECT * FROM activity_logs_cache WHERE 1=1';
+  const params = [];
+
+  if (gymId && gymId !== 'all') {
+    sql += ' AND (gym_id = ? OR club_id = ?)';
+    params.push(gymId, gymId);
+  }
+  if (role && role !== 'all') {
+    sql += ' AND user_role = ?';
+    params.push(role);
+  }
+  if (startDate) {
+    sql += ' AND date >= ?';
+    params.push(startDate);
+  }
+  if (endDate) {
+    sql += ' AND date <= ?';
+    params.push(endDate);
+  }
+
+  sql += ' ORDER BY created_at DESC LIMIT ?';
+  params.push(limit);
+
+  return db.prepare(sql).all(...params);
+}
+
+function getActivityLogsCount() {
+  return db.prepare('SELECT COUNT(*) as cnt FROM activity_logs_cache').get()?.cnt || 0;
+}
 
 function getDistinctEmails(gymId) {
   // Collect from members_cache (active + archive)
