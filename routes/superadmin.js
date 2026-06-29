@@ -245,21 +245,29 @@ module.exports = function superadminRouter({ db, admin, lc }) {
              FROM register_cache WHERE gym_id=? AND date IN (${ph})`
           ).all(gid, ...dates);
 
+          const decsRows = lc.db.prepare(
+            `SELECT COALESCE(CAST(montant AS REAL),0) AS montant, status
+             FROM decaissements_cache WHERE gym_id=? AND date IN (${ph})`
+          ).all(gid, ...dates);
+
           const espece   = Math.round(rows.reduce((s, r) => s + (r.espece || 0), 0));
           const tpe      = Math.round(rows.reduce((s, r) => s + (r.tpe || 0), 0));
           const virement = Math.round(rows.reduce((s, r) => s + (r.virement || 0), 0));
           const cheque   = Math.round(rows.reduce((s, r) => s + (r.cheque || 0), 0));
           const revenue  = espece + tpe + virement + cheque;
+          const decaissement = Math.round(decsRows.filter(d => d.status !== 'rejected').reduce((s, r) => s + (r.montant || 0), 0));
+          const netRevenue = revenue - decaissement;
 
           return {
             id: gid,
             name: GYM_NAMES[gid],
             color: GYM_COLORS[gid],
             revenue, espece, tpe, virement, cheque,
+            decaissement, netRevenue,
             transactions: rows.length,
           };
         } catch (e) {
-          return { id: gid, name: GYM_NAMES[gid], color: GYM_COLORS[gid], revenue: 0, espece: 0, tpe: 0, virement: 0, cheque: 0, transactions: 0 };
+          return { id: gid, name: GYM_NAMES[gid], color: GYM_COLORS[gid], revenue: 0, decaissement: 0, netRevenue: 0, espece: 0, tpe: 0, virement: 0, cheque: 0, transactions: 0 };
         }
       });
 
@@ -295,11 +303,13 @@ module.exports = function superadminRouter({ db, admin, lc }) {
       // Grand total
       const total = gymSummaries.reduce((s, g) => ({
         revenue: s.revenue + g.revenue,
+        decaissement: s.decaissement + (g.decaissement || 0),
+        netRevenue: s.netRevenue + (g.netRevenue || 0),
         espece: s.espece + g.espece,
         tpe: s.tpe + g.tpe,
         virement: s.virement + g.virement,
         cheque: s.cheque + g.cheque,
-      }), { revenue: 0, espece: 0, tpe: 0, virement: 0, cheque: 0 });
+      }), { revenue: 0, decaissement: 0, netRevenue: 0, espece: 0, tpe: 0, virement: 0, cheque: 0 });
 
       res.json({ ok: true, gyms: gymSummaries, total, transactions, period });
     } catch (err) {
@@ -400,6 +410,170 @@ module.exports = function superadminRouter({ db, admin, lc }) {
     } catch (err) {
       console.error('[SuperAdmin] Decaissements feed error:', err);
       res.status(500).json({ error: 'Failed to fetch decaissements feed' });
+    }
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // 6. GET /api/superadmin/team-activity
+  //    Aggregated user activity: last seen, action counts, online status
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  router.get('/api/superadmin/team-activity', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const { gymId, role } = req.query;
+
+      // Fetch last 7 days of activity (capped at 500 docs)
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      let query = db.collection('manager_activity_logs')
+                    .where('createdAt', '>=', sevenDaysAgo)
+                    .orderBy('createdAt', 'desc')
+                    .limit(500);
+
+      if (gymId && gymId !== 'all') {
+        query = query.where('gymId', '==', gymId);
+      }
+
+      const snap = await query.get();
+      const now = Date.now();
+      const todayStr = todayDate();
+
+      // Aggregate by unique user email
+      const userMap = {};
+
+      snap.docs.forEach(doc => {
+        const d = doc.data();
+        const email = (d.userEmail || '').toLowerCase().trim();
+        if (!email || email === '' || email === 'admin@local.dev') return;
+
+        const ts = d.createdAt ? d.createdAt.toDate().getTime() : 0;
+        const dateStr = ts ? new Date(ts + 3600000).toISOString().slice(0, 10) : '';
+
+        // Determine role
+        let userRole = d.userRole || 'unknown';
+        if (d.source === 'inscription_pwa') {
+          userRole = 'commercial_pwa';
+        } else if (email.includes('megafitrh'))          userRole = 'rh';
+        else if (email.includes('performance'))          userRole = 'performance_manager';
+        else if (email.includes('megafitsaiss') || email.includes('megafitdokkarat') ||
+                 email.includes('megafitanfa') || email.includes('megafitlady'))
+                                                         userRole = 'manager';
+        else if (d.userId !== 'system_id' && d.userId !== 'pwa_inscription') userRole = 'admin';
+
+        // Derive gym from email if not set
+        let gid = d.gymId || 'system';
+        if (gid === 'system' && email.includes('megafitsaiss'))     gid = 'marjane';
+        if (gid === 'system' && email.includes('megafitdokkarat'))  gid = 'dokarat';
+        if (gid === 'system' && email.includes('megafitanfa'))      gid = 'casa1';
+        if (gid === 'system' && email.includes('megafitlady'))      gid = 'casa2';
+
+        // Determine page
+        let page = d.page || 'Système';
+        if (!d.page) {
+          const path = d.path || '';
+          if (path.includes('/register'))       page = 'Registre';
+          else if (path.includes('/payments'))  page = 'Paiements';
+          else if (path.includes('/inscriptions')) page = 'Inscriptions';
+          else if (path.includes('/members'))   page = 'Membres';
+          else if (path.includes('/courses'))   page = 'Cours';
+          else if (path.includes('/relance'))   page = 'Relance';
+        }
+
+        const source = d.source === 'inscription_pwa' ? 'pwa' : 'dashboard';
+        const userName = d.userName || d.commercialName || email.split('@')[0];
+
+        if (!userMap[email]) {
+          userMap[email] = {
+            email,
+            name: userName,
+            role: userRole,
+            gymId: gid,
+            gymName: GYM_NAMES[gid] || gid,
+            gymColor: GYM_COLORS[gid] || '#999',
+            lastSeen: ts,
+            lastAction: d.action || '',
+            lastPage: page,
+            source,
+            actionsToday: 0,
+            actionsWeek: 0,
+            sources: new Set(),
+          };
+        }
+
+        const u = userMap[email];
+        u.actionsWeek++;
+        if (dateStr === todayStr) u.actionsToday++;
+        u.sources.add(source);
+
+        // Keep the most recent info
+        if (ts > u.lastSeen) {
+          u.lastSeen = ts;
+          u.lastAction = d.action || u.lastAction;
+          u.lastPage = page;
+          u.name = userName || u.name;
+          u.source = source;
+          if (gid !== 'system') {
+            u.gymId = gid;
+            u.gymName = GYM_NAMES[gid] || gid;
+            u.gymColor = GYM_COLORS[gid] || '#999';
+          }
+        }
+      });
+
+      // Convert to array and compute relative times
+      let users = Object.values(userMap).map(u => {
+        const diffMs = now - u.lastSeen;
+        const diffMin = Math.floor(diffMs / 60000);
+        const diffH = Math.floor(diffMs / 3600000);
+        const diffD = Math.floor(diffMs / 86400000);
+
+        let lastSeenRelative;
+        if (diffMin < 1) lastSeenRelative = 'À l\'instant';
+        else if (diffMin < 60) lastSeenRelative = `Il y a ${diffMin} min`;
+        else if (diffH < 24) lastSeenRelative = `Il y a ${diffH}h`;
+        else if (diffD === 1) lastSeenRelative = 'Hier';
+        else lastSeenRelative = `Il y a ${diffD}j`;
+
+        const isOnline = diffMin <= 15;
+
+        return {
+          email: u.email,
+          name: u.name,
+          role: u.role,
+          gymId: u.gymId,
+          gymName: u.gymName,
+          gymColor: u.gymColor,
+          lastSeen: u.lastSeen ? new Date(u.lastSeen).toISOString() : null,
+          lastSeenRelative,
+          isOnline,
+          actionsToday: u.actionsToday,
+          actionsWeek: u.actionsWeek,
+          lastAction: u.lastAction,
+          lastPage: u.lastPage,
+          source: u.source,
+          sources: [...u.sources],
+        };
+      });
+
+      // Post-query role filter
+      if (role && role !== 'all') {
+        users = users.filter(u => u.role === role);
+      }
+
+      // Sort: online first, then by most recent activity
+      users.sort((a, b) => {
+        if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1;
+        return new Date(b.lastSeen) - new Date(a.lastSeen);
+      });
+
+      const summary = {
+        totalUsers: users.length,
+        onlineNow: users.filter(u => u.isOnline).length,
+        activeToday: users.filter(u => u.actionsToday > 0).length,
+      };
+
+      res.json({ ok: true, users, summary });
+    } catch (err) {
+      console.error('[SuperAdmin] Team activity error:', err);
+      res.status(500).json({ error: 'Failed to fetch team activity' });
     }
   });
 
