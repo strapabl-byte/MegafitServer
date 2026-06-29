@@ -2625,6 +2625,87 @@ Sois brutal, précis, data-driven. Zéro généralité. Chaque point cité avec 
     }
   });
 
+  // ── GET /api/analytics/manager-alerts ──────────────────────────────────────
+  // Unified live business alerts for dashboard notifications
+  // Returns counts of debtors, expiring members, open incidents, and revenue trends
+  // ─────────────────────────────────────────────────────────────────────────
+  router.get('/api/analytics/manager-alerts', verifyAzureToken, async (req, res) => {
+    try {
+      const gymId = req.query.gymId || 'all';
+
+      // 1. Debtors count & total amount
+      const debtors = lc.db.prepare(`
+        SELECT COUNT(*) as count, SUM(balance) as total
+        FROM members_cache
+        WHERE (gym_id = ? OR ? = 'all') AND balance > 0 AND is_archive = 0
+      `).get(gymId, gymId) || { count: 0, total: 0 };
+
+      // 2. Expiring subscriptions in next 7 days
+      const expiring = lc.db.prepare(`
+        SELECT COUNT(*) as count
+        FROM members_cache
+        WHERE (gym_id = ? OR ? = 'all')
+          AND expires_on >= date('now')
+          AND expires_on <= date('now', '+7 days')
+          AND is_archive = 0
+      `).get(gymId, gymId) || { count: 0 };
+
+      // 3. Unresolved incidents
+      const openIncidents = lc.db.prepare(`
+        SELECT COUNT(*) as count
+        FROM incidents_cache
+        WHERE (gym_id = ? OR ? = 'all') AND status != 'Resolved'
+      `).get(gymId, gymId) || { count: 0 };
+
+      // 4. Pending web inscriptions
+      const pendingInscriptions = lc.db.prepare(`
+        SELECT COUNT(*) as count
+        FROM pending_cache
+        WHERE (gym_id = ? OR ? = 'all') AND status = 'pending'
+      `).get(gymId, gymId) || { count: 0 };
+
+      // 5. Revenue trend (last 7 days vs previous 7 days)
+      const week1 = lc.db.prepare(`
+        SELECT SUM(tpe + espece + virement + cheque) as total
+        FROM register_cache
+        WHERE (gym_id = ? OR ? = 'all')
+          AND date >= date('now', '-7 days')
+      `).get(gymId, gymId) || { total: 0 };
+
+      const week2 = lc.db.prepare(`
+        SELECT SUM(tpe + espece + virement + cheque) as total
+        FROM register_cache
+        WHERE (gym_id = ? OR ? = 'all')
+          AND date >= date('now', '-14 days')
+          AND date < date('now', '-7 days')
+      `).get(gymId, gymId) || { total: 0 };
+
+      const w1Total = week1.total || 0;
+      const w2Total = week2.total || 0;
+      let revenueChangePct = 0;
+      if (w2Total > 0) {
+        revenueChangePct = Math.round(((w1Total - w2Total) / w2Total) * 100);
+      }
+
+      res.json({
+        ok: true,
+        alerts: {
+          debtorsCount: debtors.count || 0,
+          debtorsTotal: Math.round(debtors.total || 0),
+          expiringCount: expiring.count || 0,
+          openIncidentsCount: openIncidents.count || 0,
+          pendingInscriptionsCount: pendingInscriptions.count || 0,
+          revenueChangePct,
+          w1Total,
+          w2Total
+        }
+      });
+    } catch (err) {
+      console.error('[API MANAGER ALERTS] error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   router.identifyEntry = identifyEntry;
   router.fuzzyMatchMembers = fuzzyMatchMembers;
   router.groqIdentify = groqIdentify;
