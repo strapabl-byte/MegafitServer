@@ -33,6 +33,8 @@ const checkSecret = (req, res) => {
 // App Setup
 // ─────────────────────────────────────────────────────────────────────────────
 const app = express();
+const compression = require('compression');
+app.use(compression());
 app.use(helmet());
 
 // 🔒 CORS: only allow our own frontend origins
