@@ -70,11 +70,7 @@ module.exports = function superadminRouter({ db, admin, lc }) {
 
       let query = db.collection('manager_activity_logs')
                     .orderBy('createdAt', 'desc')
-                    .limit(limitNum);
-
-      if (gymId && gymId !== 'all') {
-        query = query.where('gymId', '==', gymId);
-      }
+                    .limit(500);
 
       const snap = await query.get();
       let logs = snap.docs.map(doc => {
@@ -134,13 +130,25 @@ module.exports = function superadminRouter({ db, admin, lc }) {
         };
       });
 
-      // Client-side filters for fields not indexed in Firestore
+      // Client-side filters (avoids Firestore composite index requirement)
+      if (gymId && gymId !== 'all') {
+        logs = logs.filter(l => {
+          // Match by gymId field or club.id
+          const logGym = (l.gymId || '').toLowerCase();
+          const clubId = (l.club?.id || '').toLowerCase();
+          const target = gymId.toLowerCase();
+          return logGym === target || clubId === target;
+        });
+      }
       if (userEmail) {
         logs = logs.filter(l => l.userEmail.toLowerCase().includes(userEmail.toLowerCase()));
       }
       if (role && role !== 'all') {
         logs = logs.filter(l => l.userRole === role);
       }
+
+      // Apply limit after client-side filters
+      logs = logs.slice(0, limitNum);
 
       res.json({ ok: true, logs, count: logs.length });
     } catch (err) {
@@ -426,11 +434,7 @@ module.exports = function superadminRouter({ db, admin, lc }) {
       let query = db.collection('manager_activity_logs')
                     .where('createdAt', '>=', sevenDaysAgo)
                     .orderBy('createdAt', 'desc')
-                    .limit(500);
-
-      if (gymId && gymId !== 'all') {
-        query = query.where('gymId', '==', gymId);
-      }
+                    .limit(1000);
 
       const snap = await query.get();
       const now = Date.now();
@@ -553,7 +557,10 @@ module.exports = function superadminRouter({ db, admin, lc }) {
         };
       });
 
-      // Post-query role filter
+      // Post-query filters (gym + role)
+      if (gymId && gymId !== 'all') {
+        users = users.filter(u => u.gymId === gymId);
+      }
       if (role && role !== 'all') {
         users = users.filter(u => u.role === role);
       }
