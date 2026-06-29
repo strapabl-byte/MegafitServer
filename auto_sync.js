@@ -339,54 +339,94 @@ async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => fals
     }
   }
 
-  // 3️⃣ Optimized Member/Pending Sync (Only if syncRegisterOnly)
-  if (syncRegisterOnly) {
-    console.log("  👥 Optimized Member/Pending Sync...");
-    try {
-      // Pull latest members (last 48 hours)
-      const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
-      const membersSnap = await db.collection('members').where('updatedAt', '>=', twoDaysAgo).get();
-      if (!membersSnap.empty) {
-        const gyms = {};
-        let skipped = 0;
-        membersSnap.docs.forEach(d => {
-          const m = { id: d.id, ...d.data() };
-          // 🏦 STRICT: Use canonical resolver — no silent fallback to dokarat
-          const gid = resolveGymId(m);
-          if (!gid) { skipped++; return; } // unknown gym — skip, do NOT contaminate
-          if (!gyms[gid]) gyms[gid] = [];
-          gyms[gid].push(m);
-        });
-        for (const [gid, list] of Object.entries(gyms)) {
-          getLC().upsertMembers(gid, list);
-        }
-        console.log(`  ✅ Synced ${membersSnap.size - skipped} recently updated members (${skipped} skipped — unknown gym).`);
+  // 3️⃣ Optimized Member/Pending Sync (Runs ALWAYS on hourly/nightly/manual syncs to keep SQLite updated)
+  console.log("  👥 Optimized Member/Pending Sync...");
+  try {
+    // Pull latest members (last 48 hours)
+    const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    const membersSnap = await db.collection('members').where('updatedAt', '>=', twoDaysAgo).get();
+    if (!membersSnap.empty) {
+      const gyms = {};
+      let skipped = 0;
+      membersSnap.docs.forEach(d => {
+        const m = { id: d.id, ...d.data() };
+        // 🏦 STRICT: Use canonical resolver — no silent fallback to dokarat
+        const gid = resolveGymId(m);
+        if (!gid) { skipped++; return; } // unknown gym — skip, do NOT contaminate
+        if (!gyms[gid]) gyms[gid] = [];
+        gyms[gid].push(m);
+      });
+      for (const [gid, list] of Object.entries(gyms)) {
+        getLC().upsertMembers(gid, list);
       }
-
-      // Pull latest pending inscriptions (last 48h)
-      // 🏦 STRICT: pending_members always have a canonical gymId from the web form POST.
-      // We trust it directly — no remapping needed.
-      const twoDaysAgoPending = new Date(Date.now() - 48 * 60 * 60 * 1000);
-      const pendingSnap = await db.collection('pending_members')
-        .where('createdAt', '>=', twoDaysAgoPending)
-        .get();
-      if (!pendingSnap.empty) {
-        let pendingSkipped = 0;
-        pendingSnap.docs.forEach(d => {
-          const data = { id: d.id, ...d.data() };
-          // Guard: skip pending inscriptions with invalid gymId
-          if (!CANONICAL_GYMS.includes(data.gymId)) {
-            console.warn(`[SYNC] ⚠️ Pending inscription ${d.id} has invalid gymId "${data.gymId}" — skipped.`);
-            pendingSkipped++;
-            return;
-          }
-          getLC().setPending(data);
-        });
-        console.log(`  ✅ Synced ${pendingSnap.size - pendingSkipped} recent pending inscriptions (${pendingSkipped} skipped — invalid gymId).`);
-      }
-    } catch (err) {
-      console.warn("  ⚠️ Optimized Member Sync failed:", err.message);
+      console.log(`  ✅ Synced ${membersSnap.size - skipped} recently updated members (${skipped} skipped — unknown gym).`);
     }
+
+    // 1. Fetch ALL currently active pending inscriptions from Firestore (status: pending, awaiting_payment, locked)
+    // This is a very small query (normally <10 docs total) and guarantees we stay up to date.
+    const activePendingSnap = await db.collection('pending_members')
+      .where('status', 'in', ['pending', 'awaiting_payment', 'locked'])
+      .get();
+
+    const activeIds = new Set();
+    if (!activePendingSnap.empty) {
+      let pendingSkipped = 0;
+      activePendingSnap.docs.forEach(d => {
+        const data = { id: d.id, ...d.data() };
+        activeIds.add(d.id);
+        // Guard: skip pending inscriptions with invalid gymId
+        if (!CANONICAL_GYMS.includes(data.gymId)) {
+          console.warn(`[SYNC] ⚠️ Pending inscription ${d.id} has invalid gymId "${data.gymId}" — skipped.`);
+          pendingSkipped++;
+          return;
+        }
+        getLC().setPending(data);
+      });
+      console.log(`  ✅ Synced ${activePendingSnap.size - pendingSkipped} active pending inscriptions (${pendingSkipped} skipped).`);
+    }
+
+    // 2. Also pull recently updated pending inscriptions (last 48h) to catch recently converted ones
+    const twoDaysAgoPending = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    const updatedPendingSnap = await db.collection('pending_members')
+      .where('updatedAt', '>=', twoDaysAgoPending)
+      .get();
+
+    if (!updatedPendingSnap.empty) {
+      updatedPendingSnap.docs.forEach(d => {
+        const data = { id: d.id, ...d.data() };
+        if (CANONICAL_GYMS.includes(data.gymId)) {
+          getLC().setPending(data);
+        }
+      });
+      console.log(`  ✅ Synced ${updatedPendingSnap.size} recently updated pending/converted inscriptions.`);
+    }
+
+    // 3. Mark any local pending cache records that are NOT in the active list (and were not recently updated to another active status) as 'converted' (or sync their firestore status)
+    const localActive = getLC().db.prepare(`
+      SELECT id FROM pending_cache WHERE status IN ('pending', 'awaiting_payment', 'locked')
+    `).all();
+
+    for (const row of localActive) {
+      if (!activeIds.has(row.id)) {
+        // It's no longer active in Firestore. Let's verify its actual status from Firestore, or just update it to converted
+        try {
+          const doc = await db.collection('pending_members').doc(row.id).get();
+          if (doc.exists) {
+            const status = doc.data().status || 'converted';
+            getLC().updatePendingStatus(row.id, status);
+          } else {
+            // Deleted in Firestore
+            getLC().db.prepare('DELETE FROM pending_cache WHERE id = ?').run(row.id);
+            console.log(`  🧹 Deleted stale inscription ${row.id} from local cache.`);
+          }
+        } catch (err) {
+          // Fallback: set to converted
+          getLC().updatePendingStatus(row.id, 'converted');
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("  ⚠️ Optimized Member/Pending Sync failed:", err.message);
   }
 
   console.log("✨ Sync complete.");

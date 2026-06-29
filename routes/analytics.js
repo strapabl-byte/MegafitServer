@@ -2631,7 +2631,13 @@ Sois brutal, précis, data-driven. Zéro généralité. Chaque point cité avec 
   // ─────────────────────────────────────────────────────────────────────────
   router.get('/api/analytics/manager-alerts', verifyAzureToken, async (req, res) => {
     try {
-      const gymId = req.query.gymId || 'all';
+      let gymId = req.query.gymId || 'all';
+
+      // 🔒 SECURITY: Restrict non-admins to their assigned gym
+      if (!req.isAdmin) {
+        const assigned = req.assignedGyms?.[0];
+        if (assigned && assigned !== 'all') gymId = assigned;
+      }
 
       // 1. Debtors count & total amount
       const debtors = lc.db.prepare(`
