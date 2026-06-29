@@ -393,6 +393,99 @@ async function syncGymCounts(db, apiCache, daysBack = 1, checkQuota = () => fals
 }
 
 /**
+ * Sync manager activity logs from Firestore → SQLite
+ * Incremental: only fetches docs since last sync timestamp
+ * Nightly: full 30-day backfill
+ */
+async function syncActivityLogs(db, daysBack = 1) {
+  try {
+    const lc = getLC();
+    const lastSync = lc.getMeta('activity_logs_last_sync');
+    const sinceDate = daysBack > 7
+      ? new Date(Date.now() - daysBack * 86400000)  // nightly: full backfill
+      : lastSync
+        ? new Date(lastSync)
+        : new Date(Date.now() - 24 * 60 * 60 * 1000); // default: last 24h
+
+    console.log(`  📋 [ACTIVITY] Syncing logs since ${sinceDate.toISOString().slice(0, 16)}...`);
+
+    const snap = await db.collection('manager_activity_logs')
+      .where('createdAt', '>=', sinceDate)
+      .orderBy('createdAt', 'desc')
+      .limit(2000)
+      .get();
+
+    if (snap.empty) {
+      console.log('  📋 [ACTIVITY] No new logs found.');
+      lc.setMeta('activity_logs_last_sync', new Date().toISOString());
+      return;
+    }
+
+    const GYM_NAMES_MAP = { dokarat: 'Doukkarate', marjane: 'Saïss', casa1: 'Casa Anfa', casa2: 'Casa Lady' };
+    const GYM_COLORS_MAP = { dokarat: '#a3ff12', marjane: '#3b82f6', casa1: '#f59e0b', casa2: '#ec4899' };
+
+    const logs = snap.docs.map(doc => {
+      const d = doc.data();
+      const email = (d.userEmail || '').toLowerCase();
+      const createdAt = d.createdAt?.toDate ? d.createdAt.toDate().toISOString() : new Date().toISOString();
+
+      // Derive page
+      let page = d.page || 'Système';
+      if (!d.page) {
+        const path = d.path || '';
+        if (path.includes('/register'))       page = 'Registre';
+        else if (path.includes('/payments'))  page = 'Paiements';
+        else if (path.includes('/inscriptions')) page = 'Inscriptions';
+        else if (path.includes('/members'))   page = 'Membres';
+        else if (path.includes('/courses'))   page = 'Cours';
+        else if (path.includes('/coaches'))   page = 'Coachs';
+        else if (path.includes('/sales'))     page = 'Commerciaux';
+        else if (path.includes('/relance'))   page = 'Relance';
+        else if (path.includes('/scan'))      page = 'Scanner';
+        else if (path.includes('/push'))      page = 'Notifications';
+        else if (path.includes('/auralix'))   page = 'Auralix';
+        else if (path.includes('/email'))     page = 'Email';
+        else if (path.includes('/config'))    page = 'Configuration';
+      }
+
+      // Derive role
+      let userRole = d.userRole || 'unknown';
+      if (d.source === 'inscription_pwa') {
+        userRole = 'commercial_pwa';
+      } else if (email.includes('megafitrh'))          userRole = 'rh';
+      else if (email.includes('performance'))           userRole = 'performance_manager';
+      else if (email.includes('megafitsaiss') || email.includes('megafitdokkarat') ||
+               email.includes('megafitanfa') || email.includes('megafitlady'))
+                                                        userRole = 'manager';
+      else if (d.userId !== 'system_id' && d.userId !== 'pwa_inscription') userRole = 'admin';
+
+      // Club info
+      const club = d.club || { id: d.gymId || 'system', name: GYM_NAMES_MAP[d.gymId] || 'System', color: GYM_COLORS_MAP[d.gymId] || '#999' };
+
+      return {
+        id: doc.id,
+        gymId: d.gymId || 'system',
+        userEmail: d.userEmail || email || '',
+        userName: d.userName || 'System',
+        userRole,
+        action: d.action || 'Unknown',
+        page,
+        method: d.method || '',
+        club,
+        source: d.source || '',
+        createdAt,
+      };
+    });
+
+    lc.upsertActivityLogs(logs);
+    lc.setMeta('activity_logs_last_sync', new Date().toISOString());
+    console.log(`  ✅ [ACTIVITY] Cached ${logs.length} activity logs to SQLite.`);
+  } catch (err) {
+    console.error('  ❌ [ACTIVITY] Sync failed:', err.message);
+  }
+}
+
+/**
  * Schedule: hourly during the day (08:00–23:00 Morocco) + nightly at 00:05
  */
 function scheduleNightlySync(db, apiCache, checkQuota = () => false) {
@@ -407,6 +500,8 @@ function scheduleNightlySync(db, apiCache, checkQuota = () => false) {
   setTimeout(() => {
     // Nightly sync uses forceManual=true to ensure we pull the FULL LIST of raw entries into SQLite
     syncGymCounts(db, apiCache, 7, checkQuota, true).catch(e => console.error("❌ Nightly sync error:", e));
+    // Nightly: full 30-day activity logs backfill
+    syncActivityLogs(db, 30).catch(e => console.error("❌ Nightly activity sync error:", e));
     scheduleNightlySync(db, apiCache, checkQuota); // reschedule for next night
   }, msToNight);
 
@@ -417,10 +512,16 @@ function scheduleNightlySync(db, apiCache, checkQuota = () => false) {
     if (h >= 7 && h <= 23) { // Only during gym hours
       console.log(`⏱️  Hourly sync triggered (${h}:xx Morocco)`);
       syncGymCounts(db, apiCache, 0, checkQuota).catch(e => console.error("❌ Hourly sync error:", e));
+      // Hourly: incremental activity logs sync (last 1 day)
+      syncActivityLogs(db, 1).catch(e => console.error("❌ Hourly activity sync error:", e));
     }
   }, 60 * 60 * 1000); // every 60 minutes
 
   console.log(`⏱️  Hourly sync active (every 60min, 07:00–23:00 Morocco)`);
+
+  // ── Startup: catch-up activity logs sync ─────────────────────────────────
+  syncActivityLogs(db, 7).catch(e => console.error("❌ Startup activity sync error:", e));
 }
 
-module.exports = { syncGymCounts, scheduleNightlySync };
+module.exports = { syncGymCounts, scheduleNightlySync, syncActivityLogs };
+

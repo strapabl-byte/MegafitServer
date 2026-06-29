@@ -61,13 +61,44 @@ module.exports = function superadminRouter({ db, admin, lc }) {
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // 1. GET /api/superadmin/activity-feed
-  //    Enhanced manager activity logs with page, role, email
+  //    Enhanced manager activity logs — reads from SQLite cache (zero Firebase reads)
+  //    Accepts: gymId, role, startDate, endDate, limit
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   router.get('/api/superadmin/activity-feed', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
-      const { gymId, userEmail, role, limit: rawLimit } = req.query;
-      const limitNum = Math.min(parseInt(rawLimit) || 100, 200);
+      const { gymId, role, startDate, endDate, limit: rawLimit } = req.query;
+      const limitNum = Math.min(parseInt(rawLimit) || 100, 500);
 
+      // Try SQLite first (zero Firebase reads)
+      const cachedCount = lc.getActivityLogsCount();
+      if (cachedCount > 0) {
+        const rows = lc.getActivityLogs({ gymId, role, startDate, endDate, limit: limitNum });
+        const logs = rows.map(r => {
+          let timeLabel = '';
+          let dateLabel = '';
+          if (r.created_at) {
+            const d = new Date(r.created_at);
+            timeLabel = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+            dateLabel = d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+          }
+          return {
+            id: r.id,
+            time: timeLabel,
+            date: dateLabel,
+            action: r.action || 'Unknown action',
+            page: r.page || 'Système',
+            method: r.method || '',
+            club: { id: r.club_id || 'system', name: r.club_name || 'System', color: r.club_color || '#999' },
+            user: r.user_name || 'System',
+            userEmail: r.user_email || '',
+            userRole: r.user_role || 'unknown',
+            gymId: r.gym_id || 'system',
+          };
+        });
+        return res.json({ ok: true, logs, count: logs.length, source: 'sqlite' });
+      }
+
+      // Fallback: Firestore (only on first run before sync)
       let query = db.collection('manager_activity_logs')
                     .orderBy('createdAt', 'desc')
                     .limit(500);
@@ -83,7 +114,6 @@ module.exports = function superadminRouter({ db, admin, lc }) {
           dateLabel = date.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' });
         }
 
-        // Derive page name — prefer explicit field (set by PWA logger), fall back to path-based
         let page = data.page || 'Système';
         if (!data.page) {
           const path = data.path || '';
@@ -102,18 +132,15 @@ module.exports = function superadminRouter({ db, admin, lc }) {
           else if (path.includes('/config'))    page = 'Configuration';
         }
 
-        // Determine user role
         let userRole = data.userRole || 'unknown';
         const email = (data.userEmail || '').toLowerCase();
-        // PWA inscription source gets its own role tag
-        if (data.source === 'inscription_pwa') {
-          userRole = 'commercial_pwa';
-        } else if (email.includes('megafitrh'))          userRole = 'rh';
-        else if (email.includes('performance'))   userRole = 'performance_manager';
+        if (data.source === 'inscription_pwa') userRole = 'commercial_pwa';
+        else if (email.includes('megafitrh'))          userRole = 'rh';
+        else if (email.includes('performance'))        userRole = 'performance_manager';
         else if (email.includes('megafitsaiss') || email.includes('megafitdokkarat') ||
                  email.includes('megafitanfa') || email.includes('megafitlady'))
-                                                  userRole = 'manager';
-        else if (data.userId !== 'system_id')     userRole = 'admin';
+                                                       userRole = 'manager';
+        else if (data.userId !== 'system_id')          userRole = 'admin';
 
         return {
           id: doc.id,
@@ -130,27 +157,21 @@ module.exports = function superadminRouter({ db, admin, lc }) {
         };
       });
 
-      // Client-side filters (avoids Firestore composite index requirement)
+      // Client-side filters (fallback path only)
       if (gymId && gymId !== 'all') {
         logs = logs.filter(l => {
-          // Match by gymId field or club.id
           const logGym = (l.gymId || '').toLowerCase();
           const clubId = (l.club?.id || '').toLowerCase();
           const target = gymId.toLowerCase();
           return logGym === target || clubId === target;
         });
       }
-      if (userEmail) {
-        logs = logs.filter(l => l.userEmail.toLowerCase().includes(userEmail.toLowerCase()));
-      }
       if (role && role !== 'all') {
         logs = logs.filter(l => l.userRole === role);
       }
-
-      // Apply limit after client-side filters
       logs = logs.slice(0, limitNum);
 
-      res.json({ ok: true, logs, count: logs.length });
+      res.json({ ok: true, logs, count: logs.length, source: 'firestore' });
     } catch (err) {
       console.error('[SuperAdmin] Activity feed error:', err);
       res.status(500).json({ error: 'Failed to fetch activity feed' });
@@ -423,78 +444,110 @@ module.exports = function superadminRouter({ db, admin, lc }) {
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // 6. GET /api/superadmin/team-activity
-  //    Aggregated user activity: last seen, action counts, online status
+  //    Aggregated user activity — reads from SQLite cache (zero Firebase reads)
+  //    Accepts: gymId, role, startDate, endDate
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   router.get('/api/superadmin/team-activity', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
-      const { gymId, role } = req.query;
-
-      // Fetch last 7 days of activity (capped at 500 docs)
-      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-      let query = db.collection('manager_activity_logs')
-                    .where('createdAt', '>=', sevenDaysAgo)
-                    .orderBy('createdAt', 'desc')
-                    .limit(1000);
-
-      const snap = await query.get();
+      const { gymId, role, startDate, endDate } = req.query;
       const now = Date.now();
       const todayStr = todayDate();
 
+      // Determine date range for query
+      const queryStartDate = startDate || new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+      const queryEndDate = endDate || todayStr;
+
+      // Try SQLite first
+      const cachedCount = lc.getActivityLogsCount();
+      let rawLogs;
+
+      if (cachedCount > 0) {
+        rawLogs = lc.getActivityLogs({ startDate: queryStartDate, endDate: queryEndDate, limit: 2000 });
+        rawLogs = rawLogs.map(r => ({
+          userEmail: r.user_email || '',
+          userName: r.user_name || '',
+          userRole: r.user_role || 'unknown',
+          gymId: r.gym_id || 'system',
+          action: r.action || '',
+          page: r.page || 'Système',
+          source: r.source === 'inscription_pwa' ? 'pwa' : 'dashboard',
+          createdAt: r.created_at,
+          date: r.date,
+        }));
+      } else {
+        // Fallback: Firestore
+        const sinceDate = new Date(queryStartDate);
+        const snap = await db.collection('manager_activity_logs')
+          .where('createdAt', '>=', sinceDate)
+          .orderBy('createdAt', 'desc')
+          .limit(1000)
+          .get();
+
+        rawLogs = snap.docs.map(doc => {
+          const d = doc.data();
+          const email = (d.userEmail || '').toLowerCase();
+          const ts = d.createdAt?.toDate ? d.createdAt.toDate() : new Date();
+
+          let userRole = d.userRole || 'unknown';
+          if (d.source === 'inscription_pwa') userRole = 'commercial_pwa';
+          else if (email.includes('megafitrh'))          userRole = 'rh';
+          else if (email.includes('performance'))        userRole = 'performance_manager';
+          else if (email.includes('megafitsaiss') || email.includes('megafitdokkarat') ||
+                   email.includes('megafitanfa') || email.includes('megafitlady'))
+                                                         userRole = 'manager';
+          else if (d.userId !== 'system_id' && d.userId !== 'pwa_inscription') userRole = 'admin';
+
+          let gid = d.gymId || 'system';
+          if (gid === 'system' && email.includes('megafitsaiss'))     gid = 'marjane';
+          if (gid === 'system' && email.includes('megafitdokkarat'))  gid = 'dokarat';
+          if (gid === 'system' && email.includes('megafitanfa'))      gid = 'casa1';
+          if (gid === 'system' && email.includes('megafitlady'))      gid = 'casa2';
+
+          let page = d.page || 'Système';
+          if (!d.page) {
+            const path = d.path || '';
+            if (path.includes('/register'))       page = 'Registre';
+            else if (path.includes('/payments'))  page = 'Paiements';
+            else if (path.includes('/inscriptions')) page = 'Inscriptions';
+            else if (path.includes('/members'))   page = 'Membres';
+            else if (path.includes('/courses'))   page = 'Cours';
+            else if (path.includes('/relance'))   page = 'Relance';
+          }
+
+          return {
+            userEmail: d.userEmail || email,
+            userName: d.userName || d.commercialName || email.split('@')[0],
+            userRole,
+            gymId: gid,
+            action: d.action || '',
+            page,
+            source: d.source === 'inscription_pwa' ? 'pwa' : 'dashboard',
+            createdAt: ts.toISOString(),
+            date: new Date(ts.getTime() + 3600000).toISOString().slice(0, 10),
+          };
+        });
+      }
+
       // Aggregate by unique user email
       const userMap = {};
-
-      snap.docs.forEach(doc => {
-        const d = doc.data();
+      rawLogs.forEach(d => {
         const email = (d.userEmail || '').toLowerCase().trim();
-        if (!email || email === '' || email === 'admin@local.dev') return;
+        if (!email || email === 'admin@local.dev') return;
 
-        const ts = d.createdAt ? d.createdAt.toDate().getTime() : 0;
-        const dateStr = ts ? new Date(ts + 3600000).toISOString().slice(0, 10) : '';
-
-        // Determine role
-        let userRole = d.userRole || 'unknown';
-        if (d.source === 'inscription_pwa') {
-          userRole = 'commercial_pwa';
-        } else if (email.includes('megafitrh'))          userRole = 'rh';
-        else if (email.includes('performance'))          userRole = 'performance_manager';
-        else if (email.includes('megafitsaiss') || email.includes('megafitdokkarat') ||
-                 email.includes('megafitanfa') || email.includes('megafitlady'))
-                                                         userRole = 'manager';
-        else if (d.userId !== 'system_id' && d.userId !== 'pwa_inscription') userRole = 'admin';
-
-        // Derive gym from email if not set
-        let gid = d.gymId || 'system';
-        if (gid === 'system' && email.includes('megafitsaiss'))     gid = 'marjane';
-        if (gid === 'system' && email.includes('megafitdokkarat'))  gid = 'dokarat';
-        if (gid === 'system' && email.includes('megafitanfa'))      gid = 'casa1';
-        if (gid === 'system' && email.includes('megafitlady'))      gid = 'casa2';
-
-        // Determine page
-        let page = d.page || 'Système';
-        if (!d.page) {
-          const path = d.path || '';
-          if (path.includes('/register'))       page = 'Registre';
-          else if (path.includes('/payments'))  page = 'Paiements';
-          else if (path.includes('/inscriptions')) page = 'Inscriptions';
-          else if (path.includes('/members'))   page = 'Membres';
-          else if (path.includes('/courses'))   page = 'Cours';
-          else if (path.includes('/relance'))   page = 'Relance';
-        }
-
-        const source = d.source === 'inscription_pwa' ? 'pwa' : 'dashboard';
-        const userName = d.userName || d.commercialName || email.split('@')[0];
+        const ts = new Date(d.createdAt).getTime();
+        const source = d.source;
 
         if (!userMap[email]) {
           userMap[email] = {
             email,
-            name: userName,
-            role: userRole,
-            gymId: gid,
-            gymName: GYM_NAMES[gid] || gid,
-            gymColor: GYM_COLORS[gid] || '#999',
+            name: d.userName,
+            role: d.userRole,
+            gymId: d.gymId,
+            gymName: GYM_NAMES[d.gymId] || d.gymId,
+            gymColor: GYM_COLORS[d.gymId] || '#999',
             lastSeen: ts,
-            lastAction: d.action || '',
-            lastPage: page,
+            lastAction: d.action,
+            lastPage: d.page,
             source,
             actionsToday: 0,
             actionsWeek: 0,
@@ -504,20 +557,19 @@ module.exports = function superadminRouter({ db, admin, lc }) {
 
         const u = userMap[email];
         u.actionsWeek++;
-        if (dateStr === todayStr) u.actionsToday++;
+        if (d.date === todayStr) u.actionsToday++;
         u.sources.add(source);
 
-        // Keep the most recent info
         if (ts > u.lastSeen) {
           u.lastSeen = ts;
           u.lastAction = d.action || u.lastAction;
-          u.lastPage = page;
-          u.name = userName || u.name;
+          u.lastPage = d.page;
+          u.name = d.userName || u.name;
           u.source = source;
-          if (gid !== 'system') {
-            u.gymId = gid;
-            u.gymName = GYM_NAMES[gid] || gid;
-            u.gymColor = GYM_COLORS[gid] || '#999';
+          if (d.gymId !== 'system') {
+            u.gymId = d.gymId;
+            u.gymName = GYM_NAMES[d.gymId] || d.gymId;
+            u.gymColor = GYM_COLORS[d.gymId] || '#999';
           }
         }
       });
