@@ -8,6 +8,39 @@
 
 const { Router } = require('express');
 const { verifyAzureToken } = require('../middleware/auth');
+const sharp = require('sharp');
+
+async function compressBase64Image(base64Str, type = 'profile') {
+  if (!base64Str || typeof base64Str !== 'string') return base64Str;
+  if (!base64Str.startsWith('data:image')) return base64Str;
+  
+  try {
+    const matches = base64Str.match(/^data:image\/(\w+);base64,(.+)$/);
+    if (!matches) return base64Str;
+    
+    const ext = matches[1];
+    const data = matches[2];
+    const buffer = Buffer.from(data, 'base64');
+    
+    let processed;
+    if (type === 'profile') {
+      processed = await sharp(buffer)
+        .resize(150, 150, { fit: 'cover' })
+        .jpeg({ quality: 80 })
+        .toBuffer();
+    } else {
+      processed = await sharp(buffer)
+        .resize(800, null, { withoutEnlargement: true })
+        .jpeg({ quality: 60 })
+        .toBuffer();
+    }
+    
+    return `data:image/jpeg;base64,${processed.toString('base64')}`;
+  } catch (err) {
+    console.warn(`[IMAGE COMPRESS] Warning: failed to compress base64 ${type} image (non-blocking):`, err.message);
+    return base64Str;
+  }
+}
 
 module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, uploadBase64ToStorage, invalidateCache }) {
   const router = Router();
@@ -311,7 +344,18 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
 
       // 🛑 Strip large base64 blobs FIRST — needed before dedup AND before Firestore write
       // ⚠️ MUST be here (outer scope) so profilePicture is accessible AFTER the transaction
-      const { profilePicture, memberSignature, chequePhoto, chequePhotoVerso, ...safeData } = data;
+      let { profilePicture, memberSignature, chequePhoto, chequePhotoVerso, ...safeData } = data;
+
+      // ⚡ Compress base64 images to save Render disk space and bandwidth
+      if (profilePicture) {
+        profilePicture = await compressBase64Image(profilePicture, 'profile');
+      }
+      if (chequePhoto) {
+        chequePhoto = await compressBase64Image(chequePhoto, 'cheque');
+      }
+      if (chequePhotoVerso) {
+        chequePhotoVerso = await compressBase64Image(chequePhotoVerso, 'cheque');
+      }
 
       // 🛡️ DEDUPLICATION CHECK
       const recentSnap = await db.collection('pending_members')
