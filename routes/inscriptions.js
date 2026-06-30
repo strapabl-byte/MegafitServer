@@ -450,6 +450,7 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
         profile_picture: data.profilePicture || data.photoUrl || null,
         chequePhoto: data.chequePhoto || null,
         chequePhotoVerso: data.chequePhotoVerso || null,
+        memberSignature: memberSignature || null,  // ✅ preserve signature for PDF regen
         createdAt: { _seconds: Math.floor(Date.now() / 1000) } 
       });
 
@@ -721,8 +722,6 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
 
       const data = allDocs.sort((a, b) => (b.createdAt?._seconds || 0) - (a.createdAt?._seconds || 0));
 
-      // 🖼️ Enrich with profilePicture from SQLite — base64 photos are NOT stored in Firestore
-      // (Firestore 1MB doc limit), but ARE in SQLite's pending_cache.profile_picture column.
       const enriched = data.map(ins => {
         const sqliteEntry = lc.getPendingById(ins.id);
         return {
@@ -731,6 +730,8 @@ module.exports = function inscriptionsRouter({ db, admin, lc, apiCache, uploadBa
           chequePhoto: ins.chequePhoto || sqliteEntry?.cheque_photo || null,
           chequePhotoVerso: ins.chequePhotoVerso || sqliteEntry?.cheque_photo_back || null,
           pdfUrl: ins.pdfUrl || sqliteEntry?.pdf_url || null,
+          // ✅ Restore member signature from SQLite (not stored in Firestore due to 1MB limit)
+          memberSignature: ins.memberSignature || sqliteEntry?.member_signature || null,
         };
       });
 
