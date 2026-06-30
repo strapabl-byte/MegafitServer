@@ -585,7 +585,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         }
       }
 
-      const payload = { ...member, inscription };
+      const payload = { ...member, inscription, pdfHistory: member.pdfHistory || [] };
       apiCache.profiles[memberId] = { data: payload, ts: Date.now() };
       res.json(payload);
 
@@ -840,33 +840,57 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       const snap = await memberRef.get();
       if (!snap.exists) return res.status(404).json({ error: 'Membre introuvable' });
 
-      const gymId = snap.data()?.location || snap.data()?.gymId || 'dokarat';
+      const currentData = snap.data();
+      const gymId = currentData?.location || currentData?.gymId || 'dokarat';
+      const editorName = req.user?.preferred_username || req.user?.name || contractEditedBy || 'Admin';
+
+      // 📜 Build PDF history — preserve old PDF before replacing
+      const existingHistory = currentData.pdfHistory || [];
+      const oldPdfUrl = currentData.pdfUrl;
+      let newHistory = existingHistory;
+
+      if (oldPdfUrl && pdfUrl && oldPdfUrl !== pdfUrl) {
+        // Push old PDF into history with context info
+        newHistory = [
+          ...existingHistory,
+          {
+            url: oldPdfUrl,
+            replacedAt: new Date().toISOString(),
+            replacedBy: editorName,
+            version: existingHistory.length + 1,
+            previousSubscription: currentData.subscriptionName || null,
+            previousPeriodFrom:   currentData.periodFrom || null,
+            previousPeriodTo:     currentData.periodTo   || currentData.expiresOn || null,
+          },
+        ];
+      }
 
       // Build update payload — only include defined values
       const updatePayload = {
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         contractCorrectedAt: admin.firestore.FieldValue.serverTimestamp(),
-        contractCorrectedBy: req.user?.preferred_username || req.user?.name || contractEditedBy || 'Admin',
+        contractCorrectedBy: editorName,
+        pdfHistory: newHistory, // always write (even if empty array, keeps it clean)
       };
 
-      if (fullName !== undefined)          updatePayload.fullName = fullName;
-      if (prenom !== undefined)            updatePayload.prenom = prenom;
-      if (nom !== undefined)               updatePayload.nom = nom;
-      if (phone !== undefined)             updatePayload.phone = phone;
-      if (cin !== undefined)               updatePayload.cin = cin;
-      if (birthday !== undefined)          updatePayload.birthday = birthday;
-      if (email !== undefined)             updatePayload.email = email;
-      if (adresse !== undefined)           updatePayload.adresse = adresse;
-      if (ville !== undefined)             updatePayload.ville = ville;
-      if (subscriptionName !== undefined)  updatePayload.subscriptionName = subscriptionName;
+      if (fullName !== undefined)           updatePayload.fullName = fullName;
+      if (prenom !== undefined)             updatePayload.prenom = prenom;
+      if (nom !== undefined)                updatePayload.nom = nom;
+      if (phone !== undefined)              updatePayload.phone = phone;
+      if (cin !== undefined)                updatePayload.cin = cin;
+      if (birthday !== undefined)           updatePayload.birthday = birthday;
+      if (email !== undefined)              updatePayload.email = email;
+      if (adresse !== undefined)            updatePayload.adresse = adresse;
+      if (ville !== undefined)              updatePayload.ville = ville;
+      if (subscriptionName !== undefined)   updatePayload.subscriptionName = subscriptionName;
       if (subscriptionAmount !== undefined) updatePayload.subscriptionAmount = Number(subscriptionAmount) || 0;
-      if (periodFrom !== undefined)        updatePayload.periodFrom = periodFrom;
-      if (periodTo !== undefined)          updatePayload.periodTo = periodTo;
-      if (expiresOn !== undefined)         updatePayload.expiresOn = expiresOn;
-      if (commercial !== undefined)        updatePayload.commercial = commercial;
-      if (payments !== undefined)          updatePayload.payments = payments;
+      if (periodFrom !== undefined)         updatePayload.periodFrom = periodFrom;
+      if (periodTo !== undefined)           updatePayload.periodTo = periodTo;
+      if (expiresOn !== undefined)          updatePayload.expiresOn = expiresOn;
+      if (commercial !== undefined)         updatePayload.commercial = commercial;
+      if (payments !== undefined)           updatePayload.payments = payments;
       if (mentionParticulier !== undefined) updatePayload.mentionParticulier = mentionParticulier;
-      if (pdfUrl !== undefined)            updatePayload.pdfUrl = pdfUrl;
+      if (pdfUrl !== undefined)             updatePayload.pdfUrl = pdfUrl;
 
       await memberRef.update(updatePayload);
 
@@ -881,14 +905,15 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
       // Invalidate profile API cache
       try { delete apiCache.profiles?.[memberId]; } catch (_) {}
 
-      console.log(`[CONTRACT FIX] Admin "${req.user?.name || 'Unknown'}" corrected contract for member ${memberId} (${fullName || snap.data()?.fullName})`);
+      console.log(`[CONTRACT FIX] Admin "${editorName}" corrected contract for member ${memberId} (${fullName || currentData?.fullName}). PDF history: ${newHistory.length} versions.`);
 
-      res.json({ ok: true, memberId, pdfUrl });
+      res.json({ ok: true, memberId, pdfUrl, historyCount: newHistory.length });
     } catch (err) {
       console.error('Contract Patch Error:', err);
       res.status(500).json({ error: 'Failed to update contract', detail: err.message });
     }
   });
+
 
   return router;
 };
