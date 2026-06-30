@@ -1429,5 +1429,7 @@ module.exports = {
   getDistinctEmails, upsertEmailCampaign, getEmailCampaigns, updateEmailCampaign,
   // info
   getCacheStats,
+  // activity logs
+  upsertActivityLogs, getActivityLogs, getActivityLogsCount,
 };
 
