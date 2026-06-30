@@ -387,6 +387,7 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
               profilePicture: profilePicture || data.photoUrl || null,
               chequePhoto: chequePhoto || null,
               chequePhotoVerso: chequePhotoVerso || null,
+              memberSignature: memberSignature || null,  // ✅ preserve signature for PDF regen
               createdAt: { _seconds: Math.floor(Date.now() / 1000) }
             });
           } catch (_) {}
@@ -453,6 +454,7 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
         profilePicture: profilePicture || data.photoUrl || null,  // ✅ camelCase — setPending reads data.profilePicture
         chequePhoto: chequePhoto || null,
         chequePhotoVerso: chequePhotoVerso || null,
+        memberSignature: memberSignature || null,  // ✅ preserve signature for dashboard PDF regen
         createdAt: { _seconds: Math.floor(Date.now() / 1000) }
       });
 

@@ -157,8 +157,11 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
           chequePhoto: ins.chequePhoto || sqliteEntry?.cheque_photo || null,
           chequePhotoVerso: ins.chequePhotoVerso || sqliteEntry?.cheque_photo_back || null,
           pdfUrl: ins.pdfUrl || sqliteEntry?.pdf_url || null,
+          // ✅ Restore member signature from SQLite (stripped from Firestore due to 1MB limit)
+          memberSignature: ins.memberSignature || sqliteEntry?.member_signature || null,
         };
       });
+
 
       apiCache.inscriptions[cacheKey] = { data: enriched, ts: Date.now() };
       res.json(enriched);

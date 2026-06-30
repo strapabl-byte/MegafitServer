@@ -86,6 +86,8 @@ const migrations = [
   'ALTER TABLE members_cache ADD COLUMN bonus_3months INTEGER DEFAULT 0',
   'ALTER TABLE members_cache ADD COLUMN inscription_id TEXT',
   'ALTER TABLE members_cache ADD COLUMN multiclub INTEGER DEFAULT 0',
+  // pending_cache migrations
+  'ALTER TABLE pending_cache ADD COLUMN member_signature TEXT',
 ];
 
 for (const m of migrations) {
@@ -186,7 +188,8 @@ db.exec(`
     status TEXT DEFAULT 'pending',
     pdf_url TEXT,
     cheque_photo TEXT,
-    cheque_photo_back TEXT
+    cheque_photo_back TEXT,
+    member_signature TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_pending_gym_date ON pending_cache(gym_id, date);
 
@@ -842,8 +845,8 @@ function setPending(data) {
   try {
     const stmt = db.prepare(`
       INSERT OR REPLACE INTO pending_cache 
-      (id, gym_id, date, nom, prenom, subscriptionName, total, paid, balance, status, pdf_url, totals, payments, cin, adresse, ville, email, commercial, contract_number, period_from, period_to, telephone, date_naissance, profile_picture, cheque_photo, cheque_photo_back)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, gym_id, date, nom, prenom, subscriptionName, total, paid, balance, status, pdf_url, totals, payments, cin, adresse, ville, email, commercial, contract_number, period_from, period_to, telephone, date_naissance, profile_picture, cheque_photo, cheque_photo_back, member_signature)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const ts = data.createdAt
       ? (data.createdAt._seconds ? new Date(data.createdAt._seconds * 1000) : new Date(data.createdAt))
@@ -876,7 +879,8 @@ function setPending(data) {
       data.dateNaissance || null,
       data.profilePicture || data.profile_picture || null,
       data.chequePhoto || data.cheque_photo || null,
-      data.chequePhotoVerso || data.cheque_photo_back || null
+      data.chequePhotoVerso || data.cheque_photo_back || null,
+      data.memberSignature || data.member_signature || null
     );
   } catch (err) {
     console.error('SQLite setPending error:', err.message);
