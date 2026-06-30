@@ -668,11 +668,14 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         return res.status(400).json({ error: 'Subscription is already frozen' });
       }
 
+      const durationDays = parseInt(req.body.durationDays) || 30; // default 1 month
+
       await ref.update({
         isFrozen: true,
         frozenAt: admin.firestore.FieldValue.serverTimestamp(),
         freezeReason: req.body.reason || null,
         freezeProofUrl: req.body.proofUrl || null,
+        freezeDuration: durationDays,
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
       delete apiCache.profiles[req.params.id]; // invalidate profile cache
@@ -698,10 +701,19 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         return res.status(400).json({ error: 'Subscription is not frozen' });
       }
 
+      // Use the pre-planned freeze duration if available, otherwise fall back to time-elapsed
+      let diffDays;
+      if (member.freezeDuration && member.freezeDuration > 0) {
+        diffDays = member.freezeDuration;
+      } else {
+        const frozenAtDate = member.frozenAt.toDate ? member.frozenAt.toDate() : new Date(member.frozenAt);
+        const now = new Date();
+        const diffTime = Math.abs(now - frozenAtDate);
+        diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      }
+
       const frozenAtDate = member.frozenAt.toDate ? member.frozenAt.toDate() : new Date(member.frozenAt);
       const now = new Date();
-      const diffTime = Math.abs(now - frozenAtDate);
-      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
       // Calculate new expiresOn date
       let newExpiresOn = member.expiresOn;
@@ -725,6 +737,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         frozenAt: null,
         freezeReason: null,
         freezeProofUrl: null,
+        freezeDuration: null,
         expiresOn: newExpiresOn,
         freezeLogs: admin.firestore.FieldValue.arrayUnion(freezeLog),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
