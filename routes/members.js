@@ -815,6 +815,81 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
     }
   });
 
+
+  // ── PATCH /api/members/:id/contract — Admin-only: Fix contract data + PDF ──
+  // Updates the confirmed member's contract fields and the stored PDF URL.
+  // Only accessible to full admins. Logs the edit for audit trail.
+  router.patch('/:id/contract', verifyAzureToken, async (req, res) => {
+    try {
+      const memberId = req.params.id;
+      const {
+        fullName, prenom, nom, phone, cin, birthday, email, adresse, ville,
+        subscriptionName, subscriptionAmount, periodFrom, periodTo, expiresOn,
+        commercial, payments, mentionParticulier, pdfUrl,
+        contractEditedBy, contractEditedAt,
+      } = req.body;
+
+      // 🛡️ Admin-only guard
+      if (!req.assignedGyms?.includes('all') && req.user?.role !== 'admin') {
+        return res.status(403).json({ error: 'Accès refusé — réservé aux administrateurs' });
+      }
+
+      if (!memberId) return res.status(400).json({ error: 'memberId required' });
+
+      const memberRef = db.collection('members').doc(memberId);
+      const snap = await memberRef.get();
+      if (!snap.exists) return res.status(404).json({ error: 'Membre introuvable' });
+
+      const gymId = snap.data()?.location || snap.data()?.gymId || 'dokarat';
+
+      // Build update payload — only include defined values
+      const updatePayload = {
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        contractCorrectedAt: admin.firestore.FieldValue.serverTimestamp(),
+        contractCorrectedBy: req.user?.preferred_username || req.user?.name || contractEditedBy || 'Admin',
+      };
+
+      if (fullName !== undefined)          updatePayload.fullName = fullName;
+      if (prenom !== undefined)            updatePayload.prenom = prenom;
+      if (nom !== undefined)               updatePayload.nom = nom;
+      if (phone !== undefined)             updatePayload.phone = phone;
+      if (cin !== undefined)               updatePayload.cin = cin;
+      if (birthday !== undefined)          updatePayload.birthday = birthday;
+      if (email !== undefined)             updatePayload.email = email;
+      if (adresse !== undefined)           updatePayload.adresse = adresse;
+      if (ville !== undefined)             updatePayload.ville = ville;
+      if (subscriptionName !== undefined)  updatePayload.subscriptionName = subscriptionName;
+      if (subscriptionAmount !== undefined) updatePayload.subscriptionAmount = Number(subscriptionAmount) || 0;
+      if (periodFrom !== undefined)        updatePayload.periodFrom = periodFrom;
+      if (periodTo !== undefined)          updatePayload.periodTo = periodTo;
+      if (expiresOn !== undefined)         updatePayload.expiresOn = expiresOn;
+      if (commercial !== undefined)        updatePayload.commercial = commercial;
+      if (payments !== undefined)          updatePayload.payments = payments;
+      if (mentionParticulier !== undefined) updatePayload.mentionParticulier = mentionParticulier;
+      if (pdfUrl !== undefined)            updatePayload.pdfUrl = pdfUrl;
+
+      await memberRef.update(updatePayload);
+
+      // ✅ Write-through to SQLite members_cache
+      try {
+        const updated = await memberRef.get();
+        lc.upsertMembers(gymId, [{ id: memberId, ...updated.data() }]);
+      } catch (cacheErr) {
+        console.warn('[contract-patch] SQLite sync failed:', cacheErr.message);
+      }
+
+      // Invalidate profile API cache
+      try { delete apiCache.profiles?.[memberId]; } catch (_) {}
+
+      console.log(`[CONTRACT FIX] Admin "${req.user?.name || 'Unknown'}" corrected contract for member ${memberId} (${fullName || snap.data()?.fullName})`);
+
+      res.json({ ok: true, memberId, pdfUrl });
+    } catch (err) {
+      console.error('Contract Patch Error:', err);
+      res.status(500).json({ error: 'Failed to update contract', detail: err.message });
+    }
+  });
+
   return router;
 };
 
