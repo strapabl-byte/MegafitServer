@@ -59,6 +59,22 @@ module.exports = function superadminRouter({ db, admin, lc }) {
     return dates;
   }
 
+  function getDatesInRange(startDate, endDate) {
+    const dates = [];
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) return [];
+    const diffTime = end.getTime() - start.getTime();
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    const limitDays = Math.max(0, Math.min(diffDays, 90));
+    for (let i = 0; i <= limitDays; i++) {
+      const d = new Date(start);
+      d.setDate(d.getDate() + i);
+      dates.push(d.toISOString().slice(0, 10));
+    }
+    return dates;
+  }
+
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // 1. GET /api/superadmin/activity-feed
   //    Enhanced manager activity logs — reads from SQLite cache (zero Firebase reads)
@@ -251,15 +267,25 @@ module.exports = function superadminRouter({ db, admin, lc }) {
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   router.get('/api/superadmin/payment-history', verifyAzureToken, requireAdmin, (req, res) => {
     try {
-      const period = req.query.period || 'today';
-      const gymId  = req.query.gymId;
+      const { startDate, endDate, period, gymId } = req.query;
       
       let dates;
-      if (period === 'today')      dates = [todayDate()];
-      else if (period === 'week')  dates = dateRange(7);
-      else if (period === 'month') dates = thisMonthDates();
-      else if (period === 'range' && req.query.days) dates = dateRange(Math.min(parseInt(req.query.days), 90));
-      else dates = [todayDate()];
+      if (startDate && endDate) {
+        dates = getDatesInRange(startDate, endDate);
+      } else {
+        const activePeriod = period || 'today';
+        if (activePeriod === 'today')      dates = [todayDate()];
+        else if (activePeriod === 'yesterday') {
+          const yest = new Date(Date.now() - 86400000 + 3600000);
+          dates = [yest.toISOString().slice(0, 10)];
+        }
+        else if (activePeriod === 'week')  dates = dateRange(7);
+        else if (activePeriod === 'month') dates = thisMonthDates();
+        else if (activePeriod === 'range' && req.query.days) dates = dateRange(Math.min(parseInt(req.query.days), 90));
+        else dates = [todayDate()];
+      }
+
+      if (!dates || dates.length === 0) dates = [todayDate()];
 
       const ph = dates.map(() => '?').join(',');
 
