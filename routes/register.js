@@ -4,6 +4,24 @@
 const { Router } = require('express');
 const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 
+// Fire-and-forget: tell the David WhatsApp agent to post a décaissement to its group.
+// Never blocks or fails the dashboard request. No-op if env is not configured.
+function notifyDavidDecaissement(payload) {
+  const url = process.env.DAVID_NOTIFY_URL;
+  const token = process.env.DAVID_NOTIFY_TOKEN;
+  if (!url || !token) return; // integration disabled
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4000);
+  fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-notify-token': token },
+    body: JSON.stringify(payload),
+    signal: controller.signal,
+  })
+    .catch((err) => console.warn('[david-notify] failed:', err.message))
+    .finally(() => clearTimeout(timer));
+}
+
 module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExceeded, getCachedOrFetch, invalidateCache, syncGymCounts }) {
   const router = Router();
 
@@ -907,7 +925,16 @@ Rules:
       
       const newDoc = await ref.get();
       lc.upsertDecaissements(gymId, date, [{ id: ref.id, ...newDoc.data() }]);
-      
+
+      notifyDavidDecaissement({
+        event: status === 'approved' ? 'approved' : 'created',
+        montant: decData.montant,
+        raison: decData.raison,
+        requestedBy: userName,
+        gymId,
+        status,
+      });
+
       res.json({ ok: true, id: ref.id, status });
     } catch (err) {
       console.error('POST /api/register/decaissement error:', err);
@@ -950,7 +977,17 @@ Rules:
 
       const updated = await docRef.get();
       lc.upsertDecaissements(gymId, date, [{ id: req.params.id, ...updated.data() }]);
-      
+
+      const d = updated.data() || {};
+      notifyDavidDecaissement({
+        event: 'approved',
+        montant: d.montant,
+        raison: d.raison,
+        requestedBy: d.requestedBy,
+        gymId,
+        status: 'approved',
+      });
+
       res.json({ ok: true });
     } catch (err) {
       console.error('Approve decaissement error:', err);
@@ -971,7 +1008,17 @@ Rules:
 
       const updated = await docRef.get();
       lc.upsertDecaissements(gymId, date, [{ id: req.params.id, ...updated.data() }]);
-      
+
+      const d = updated.data() || {};
+      notifyDavidDecaissement({
+        event: 'rejected',
+        montant: d.montant,
+        raison: d.raison,
+        requestedBy: d.requestedBy,
+        gymId,
+        status: 'rejected',
+      });
+
       res.json({ ok: true });
     } catch (err) {
       console.error('Reject decaissement error:', err);
