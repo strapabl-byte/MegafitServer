@@ -34,7 +34,7 @@ const checkSecret = (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const app = express();
 const compression = require('compression');
-app.use(compression());
+app.use(compression({ level: 6, threshold: 512 })); // 🗜️ gzip all responses >512B — bandwidth saver
 app.use(helmet());
 
 // 🔒 CORS: only allow our own frontend origins
