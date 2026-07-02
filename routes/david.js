@@ -11,8 +11,26 @@ const GYM_LABELS = {
   casa2: 'Casa Lady',
 };
 
-module.exports = function davidBridge({ lc }) {
+module.exports = function davidBridge({ db, lc }) {
   const router = Router();
+
+  // Live progress for a challenge/goal, computed from the register (same logic as /api/commercials/goals).
+  function challengeProgress(g) {
+    const hasRange = g.startDate && g.endDate;
+    if ((!hasRange && !g.period) || !lc || !lc.db) return { currentRevenue: 0, currentInscriptions: 0 };
+    const targetGyms = g.gymId === 'all' ? ['dokarat', 'marjane', 'casa1', 'casa2'] : [g.gymId];
+    const ph = targetGyms.map(() => '?').join(',');
+    const dateWhere = hasRange ? 'date >= ? AND date <= ?' : 'date LIKE ?';
+    const dateArgs = hasRange ? [g.startDate, g.endDate] : [`${g.period}%`];
+    const row = lc.db
+      .prepare(
+        `SELECT SUM(CASE WHEN COALESCE(source,'') != 'reste_settlement' THEN 1 ELSE 0 END) as inscriptions,
+                SUM(CAST(tpe AS NUMERIC) + CAST(espece AS NUMERIC) + CAST(virement AS NUMERIC) + CAST(cheque AS NUMERIC)) as revenue
+         FROM register_cache WHERE gym_id IN (${ph}) AND ${dateWhere}`,
+      )
+      .get(...targetGyms, ...dateArgs);
+    return { currentRevenue: Math.round(row?.revenue || 0), currentInscriptions: row?.inscriptions || 0 };
+  }
 
   function auth(req, res, next) {
     const token = process.env.DAVID_NOTIFY_TOKEN;
@@ -60,6 +78,52 @@ module.exports = function davidBridge({ lc }) {
       }));
 
       res.json({ ok: true, scope, count: incidents.length, incidents });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // GET /api/david/challenges?scope=ongoing|all&gymId=casa1
+  // Sales challenges (Défi hebdo/libre + objectif mensuel) with live progress per club.
+  router.get('/api/david/challenges', auth, async (req, res) => {
+    try {
+      if (!db) return res.json({ ok: true, count: 0, challenges: [] });
+      const scope = String(req.query.scope || 'ongoing').toLowerCase();
+      const gymId = String(req.query.gymId || '').toLowerCase().trim();
+      const today = new Date().toISOString().slice(0, 10);
+      const month = today.slice(0, 7);
+
+      const snap = await db.collection('commercial_goals').get();
+      const challenges = [];
+      snap.forEach((doc) => {
+        const g = { id: doc.id, ...doc.data() };
+        if (g.active === false) return;
+        if (gymId && GYM_LABELS[gymId] && g.gymId !== gymId && g.gymId !== 'all') return;
+
+        const hasRange = Boolean(g.startDate && g.endDate);
+        const ongoing = hasRange ? g.startDate <= today && today <= g.endDate : g.period === month;
+        if (scope === 'ongoing' && !ongoing) return;
+
+        const prog = challengeProgress(g);
+        const targetRev = Number(g.targetRevenue) || 0;
+        const targetIns = Number(g.targetInscriptions) || 0;
+        challenges.push({
+          gym: g.gymId === 'all' ? 'Tous les clubs' : GYM_LABELS[g.gymId] || g.gymId,
+          type: hasRange ? 'défi hebdo/libre' : 'objectif mensuel',
+          label: g.label || g.period || '',
+          period: hasRange ? `${g.startDate} → ${g.endDate}` : g.period,
+          ongoing,
+          targetRevenue: targetRev,
+          currentRevenue: prog.currentRevenue,
+          pctRevenue: targetRev > 0 ? Math.round((prog.currentRevenue / targetRev) * 100) : null,
+          targetInscriptions: targetIns,
+          currentInscriptions: prog.currentInscriptions,
+          reward: g.reward || '',
+        });
+      });
+
+      challenges.sort((a, b) => Number(b.ongoing) - Number(a.ongoing) || (b.pctRevenue || 0) - (a.pctRevenue || 0));
+      res.json({ ok: true, scope, count: challenges.length, challenges });
     } catch (err) {
       res.status(500).json({ ok: false, error: err.message });
     }
