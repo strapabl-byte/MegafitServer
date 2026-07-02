@@ -7,6 +7,7 @@ module.exports = function(deps) {
   const fsDb = admin.firestore();
   const router = express.Router();
   const { verifyAzureToken } = require('../middleware/auth');
+  const { notifyDavidDecaissement } = require('../services/david-notify');
 
   // Unified Auth Wrapper for Auralix
   function auth(req, res, next) {
@@ -295,6 +296,15 @@ module.exports = function(deps) {
                          .collection('decaissements').doc(id);
       await docRef.update({ status: 'approved', approvedAt: admin.firestore.FieldValue.serverTimestamp(), approvedBy: req.au?.email || 'auralix' });
       console.log(`[Auralix] Approved décaissement ${id} for ${gymId} on ${date}`);
+      const row = lc.db.prepare('SELECT * FROM decaissements_cache WHERE id=?').get(id) || {};
+      notifyDavidDecaissement({
+        event: 'approved',
+        montant: row.montant,
+        raison: row.raison,
+        requestedBy: row.requested_by,
+        gymId,
+        status: 'approved',
+      });
       res.json({ ok: true, id, status: 'approved' });
     } catch(e) {
       console.error('[Auralix] approve error:', e.message);
@@ -311,6 +321,15 @@ module.exports = function(deps) {
       const docRef = fsDb.collection('megafit_daily_register').doc(`${gymId}_${date}`)
                          .collection('decaissements').doc(id);
       await docRef.update({ status: 'rejected', rejectedAt: admin.firestore.FieldValue.serverTimestamp(), rejectedBy: req.au?.email || 'auralix' });
+      const row = lc.db.prepare('SELECT * FROM decaissements_cache WHERE id=?').get(id) || {};
+      notifyDavidDecaissement({
+        event: 'rejected',
+        montant: row.montant,
+        raison: row.raison,
+        requestedBy: row.requested_by,
+        gymId,
+        status: 'rejected',
+      });
       res.json({ ok: true, id, status: 'rejected' });
     } catch(e) { res.status(500).json({ error: e.message }); }
   });

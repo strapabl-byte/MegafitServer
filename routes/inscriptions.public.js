@@ -8,6 +8,7 @@
 
 const { Router } = require('express');
 const { verifyAzureToken } = require('../middleware/auth');
+const { notifyDavidDecaissement } = require('../services/david-notify');
 const sharp = require('sharp');
 
 async function compressBase64Image(base64Str, type = 'profile') {
@@ -929,6 +930,16 @@ Réponds UNIQUEMENT en JSON valide (pas de markdown):
           refId: ref.id,
         });
       } catch(_) {}
+
+      // 🔔 Notify David WhatsApp agent (fire-and-forget, no-op if env unset)
+      notifyDavidDecaissement({
+        event: 'created',
+        montant: Number(montant),
+        raison: raison.trim(),
+        requestedBy: verifiedManagerName,
+        gymId,
+        status: 'pending',
+      });
 
       res.json({ ok: true, id: ref.id, status: 'pending' });
 

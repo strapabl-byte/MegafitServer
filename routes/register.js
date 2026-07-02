@@ -3,24 +3,7 @@
 
 const { Router } = require('express');
 const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
-
-// Fire-and-forget: tell the David WhatsApp agent to post a décaissement to its group.
-// Never blocks or fails the dashboard request. No-op if env is not configured.
-function notifyDavidDecaissement(payload) {
-  const url = process.env.DAVID_NOTIFY_URL;
-  const token = process.env.DAVID_NOTIFY_TOKEN;
-  if (!url || !token) return; // integration disabled
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 4000);
-  fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-notify-token': token },
-    body: JSON.stringify(payload),
-    signal: controller.signal,
-  })
-    .catch((err) => console.warn('[david-notify] failed:', err.message))
-    .finally(() => clearTimeout(timer));
-}
+const { notifyDavidDecaissement } = require('../services/david-notify');
 
 module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExceeded, getCachedOrFetch, invalidateCache, syncGymCounts }) {
   const router = Router();

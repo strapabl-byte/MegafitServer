@@ -717,6 +717,7 @@ app.use('/',                require('./routes/scan')(deps));          // /public
 app.use('/',                require('./routes/email')(deps));         // /api/send-contract-email, /api/save-member-email
 app.use('/',                require('./routes/email-bulk')(deps));    // /api/emails/* Bulk email campaigns
 
+app.use('/',                require('./routes/david')(deps));     // /api/david/* token-protected read bridge for the WhatsApp agent
 app.use('/',                require('./routes/auralix')(deps));   // /api/auralix/*
 app.use('/',                require('./routes/ai-agent')(deps));   // /api/ai/* AURALIX 24/7 Agent (Firebase token auth)
 app.use('/',                require('./routes/superadmin')(deps)); // /api/superadmin/* Super Admin Command Center
