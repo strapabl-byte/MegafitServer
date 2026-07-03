@@ -156,11 +156,19 @@ module.exports = function davidBridge({ db, admin, lc }) {
     try {
       const gymId = String(req.query.gymId || '').toLowerCase().trim();
       const status = String(req.query.status || 'pending').toLowerCase();
-      const days = status === 'pending' ? 30 : 2;
+      const date = String(req.query.date || '').trim();
       let sql =
         `SELECT id, gym_id, date, montant, raison, status, requested_by, beneficiaire, categorie
-         FROM decaissements_cache WHERE date >= date('now', ?)`;
-      const params = [`-${days} days`];
+         FROM decaissements_cache WHERE 1=1`;
+      const params = [];
+      if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        sql += ' AND date = ?';
+        params.push(date);
+      } else {
+        const days = status === 'pending' ? 30 : 2;
+        sql += " AND date >= date('now', ?)";
+        params.push(`-${days} days`);
+      }
       if (gymId && GYM_LABELS[gymId]) { sql += ' AND gym_id = ?'; params.push(gymId); }
       if (status === 'pending') sql += " AND status = 'pending'";
       sql += ' ORDER BY date DESC, rowid DESC LIMIT 40';
