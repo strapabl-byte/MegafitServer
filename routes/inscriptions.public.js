@@ -934,10 +934,12 @@ Réponds UNIQUEMENT en JSON valide (pas de markdown):
       // 🔔 Notify David WhatsApp agent (fire-and-forget, no-op if env unset)
       notifyDavidDecaissement({
         event: 'created',
+        id: ref.id,
+        gymId,
+        date: today,
         montant: Number(montant),
         raison: raison.trim(),
         requestedBy: verifiedManagerName,
-        gymId,
         status: 'pending',
       });
 

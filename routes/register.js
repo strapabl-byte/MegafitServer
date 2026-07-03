@@ -911,10 +911,12 @@ Rules:
 
       notifyDavidDecaissement({
         event: status === 'approved' ? 'approved' : 'created',
+        id: ref.id,
+        gymId,
+        date,
         montant: decData.montant,
         raison: decData.raison,
         requestedBy: userName,
-        gymId,
         status,
       });
 

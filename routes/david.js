@@ -2,7 +2,8 @@
 // routes/david.js — token-protected read bridge for the David WhatsApp agent.
 // David authenticates with the shared secret (DAVID_NOTIFY_TOKEN) via x-notify-token.
 
-const { Router } = require('express');
+const express = require('express');
+const { Router } = express;
 
 const GYM_LABELS = {
   dokarat: 'Fès Dukkarate',
@@ -11,7 +12,7 @@ const GYM_LABELS = {
   casa2: 'Casa Lady',
 };
 
-module.exports = function davidBridge({ db, lc }) {
+module.exports = function davidBridge({ db, admin, lc }) {
   const router = Router();
 
   // Live progress for a challenge/goal, computed from the register (same logic as /api/commercials/goals).
@@ -124,6 +125,72 @@ module.exports = function davidBridge({ db, lc }) {
 
       challenges.sort((a, b) => Number(b.ongoing) - Number(a.ongoing) || (b.pctRevenue || 0) - (a.pctRevenue || 0));
       res.json({ ok: true, scope, count: challenges.length, challenges });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // GET /api/david/decaissements?gymId=casa2&status=pending|all
+  // List décaissements (from SQLite cache) so David can number them for approval.
+  router.get('/api/david/decaissements', auth, (req, res) => {
+    try {
+      const gymId = String(req.query.gymId || '').toLowerCase().trim();
+      const status = String(req.query.status || 'pending').toLowerCase();
+      const days = status === 'pending' ? 30 : 2;
+      let sql =
+        `SELECT id, gym_id, date, montant, raison, status, requested_by, beneficiaire, categorie
+         FROM decaissements_cache WHERE date >= date('now', ?)`;
+      const params = [`-${days} days`];
+      if (gymId && GYM_LABELS[gymId]) { sql += ' AND gym_id = ?'; params.push(gymId); }
+      if (status === 'pending') sql += " AND status = 'pending'";
+      sql += ' ORDER BY date DESC, rowid DESC LIMIT 40';
+
+      const rows = lc && lc.db ? lc.db.prepare(sql).all(...params) : [];
+      const decaissements = rows.map((r) => ({
+        id: r.id,
+        gymId: r.gym_id,
+        gym: GYM_LABELS[r.gym_id] || r.gym_id,
+        date: r.date,
+        montant: r.montant,
+        raison: r.raison,
+        status: r.status,
+        requestedBy: r.requested_by,
+        beneficiaire: r.beneficiaire,
+        categorie: r.categorie,
+      }));
+      res.json({ ok: true, status, count: decaissements.length, decaissements });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // POST /api/david/decaissement/decision  { id, gymId, date, action: 'approve'|'reject', by }
+  // David (single authorized approver) approves/declines a real décaissement from WhatsApp.
+  router.post('/api/david/decaissement/decision', auth, express.json(), async (req, res) => {
+    try {
+      const { id, gymId, date, action, by } = req.body || {};
+      if (!id || !gymId || !date) return res.status(400).json({ ok: false, error: 'id, gymId, date requis' });
+      if (!['approve', 'reject'].includes(action)) return res.status(400).json({ ok: false, error: 'action invalide' });
+      const status = action === 'approve' ? 'approved' : 'rejected';
+
+      if (lc && lc.db) lc.db.prepare('UPDATE decaissements_cache SET status=? WHERE id=?').run(status, id);
+
+      if (db) {
+        const docRef = db.collection('megafit_daily_register').doc(`${gymId}_${date}`).collection('decaissements').doc(id);
+        const snap = await docRef.get();
+        if (!snap.exists) return res.status(404).json({ ok: false, error: 'décaissement introuvable' });
+        const update = { status };
+        const stamp = admin ? admin.firestore.FieldValue.serverTimestamp() : new Date().toISOString();
+        if (action === 'approve') { update.approvedBy = `whatsapp:${by || 'david'}`; update.approvedAt = stamp; }
+        else { update.rejectedBy = `whatsapp:${by || 'david'}`; update.rejectedAt = stamp; }
+        await docRef.update(update);
+        const fresh = await docRef.get();
+        if (lc) lc.upsertDecaissements(gymId, date, [{ id, ...fresh.data() }]);
+        const d = fresh.data() || {};
+        return res.json({ ok: true, id, status, montant: d.montant, raison: d.raison, requestedBy: d.requestedBy });
+      }
+
+      res.json({ ok: true, id, status });
     } catch (err) {
       res.status(500).json({ ok: false, error: err.message });
     }
