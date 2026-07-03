@@ -3,6 +3,7 @@
 // David authenticates with the shared secret (DAVID_NOTIFY_TOKEN) via x-notify-token.
 
 const express = require('express');
+const crypto = require('node:crypto');
 const { Router } = express;
 
 const GYM_LABELS = {
@@ -11,6 +12,14 @@ const GYM_LABELS = {
   casa1: 'Casa Anfa',
   casa2: 'Casa Lady',
 };
+
+// Constant-time comparison (avoids leaking token via response timing).
+function safeEqual(a, b) {
+  const bufA = Buffer.from(String(a || ''));
+  const bufB = Buffer.from(String(b || ''));
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
 
 module.exports = function davidBridge({ db, admin, lc }) {
   const router = Router();
@@ -33,10 +42,21 @@ module.exports = function davidBridge({ db, admin, lc }) {
     return { currentRevenue: Math.round(row?.revenue || 0), currentInscriptions: row?.inscriptions || 0 };
   }
 
+  // Read/list/notify auth: shared token.
   function auth(req, res, next) {
     const token = process.env.DAVID_NOTIFY_TOKEN;
     if (!token) return res.status(503).json({ ok: false, error: 'bridge disabled (no token)' });
-    if (String(req.headers['x-notify-token'] || '') !== token) {
+    if (!safeEqual(req.headers['x-notify-token'], token)) {
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+    next();
+  }
+
+  // Money-write auth: SEPARATE token, required only for approve/reject decisions.
+  function decisionAuth(req, res, next) {
+    const token = process.env.DAVID_DECISION_TOKEN;
+    if (!token) return res.status(503).json({ ok: false, error: 'decisions disabled (no DAVID_DECISION_TOKEN)' });
+    if (!safeEqual(req.headers['x-decision-token'], token)) {
       return res.status(401).json({ ok: false, error: 'unauthorized' });
     }
     next();
@@ -80,7 +100,7 @@ module.exports = function davidBridge({ db, admin, lc }) {
 
       res.json({ ok: true, scope, count: incidents.length, incidents });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err.message });
+      console.error('[david-bridge]', err.message); res.status(500).json({ ok: false, error: 'internal error' });
     }
   });
 
@@ -126,7 +146,7 @@ module.exports = function davidBridge({ db, admin, lc }) {
       challenges.sort((a, b) => Number(b.ongoing) - Number(a.ongoing) || (b.pctRevenue || 0) - (a.pctRevenue || 0));
       res.json({ ok: true, scope, count: challenges.length, challenges });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err.message });
+      console.error('[david-bridge]', err.message); res.status(500).json({ ok: false, error: 'internal error' });
     }
   });
 
@@ -160,15 +180,16 @@ module.exports = function davidBridge({ db, admin, lc }) {
       }));
       res.json({ ok: true, status, count: decaissements.length, decaissements });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err.message });
+      console.error('[david-bridge]', err.message); res.status(500).json({ ok: false, error: 'internal error' });
     }
   });
 
   // POST /api/david/decaissement/decision  { id, gymId, date, action: 'approve'|'reject', by }
   // David (single authorized approver) approves/declines a real décaissement from WhatsApp.
-  router.post('/api/david/decaissement/decision', auth, express.json(), async (req, res) => {
+  router.post('/api/david/decaissement/decision', decisionAuth, express.json(), async (req, res) => {
     try {
       const { id, gymId, date, action, by } = req.body || {};
+      console.log(`[david-decision] ${action} decaissement ${id} (${gymId}/${date}) by whatsapp:${by || '?'}`);
       if (!id || !gymId || !date) return res.status(400).json({ ok: false, error: 'id, gymId, date requis' });
       if (!['approve', 'reject'].includes(action)) return res.status(400).json({ ok: false, error: 'action invalide' });
       const status = action === 'approve' ? 'approved' : 'rejected';
@@ -192,7 +213,7 @@ module.exports = function davidBridge({ db, admin, lc }) {
 
       res.json({ ok: true, id, status });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err.message });
+      console.error('[david-bridge]', err.message); res.status(500).json({ ok: false, error: 'internal error' });
     }
   });
 
