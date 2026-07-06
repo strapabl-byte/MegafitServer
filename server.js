@@ -1270,6 +1270,12 @@ async function seedSQLiteHistoricalStats() {
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ API running on port ${PORT}`);
+  console.log("SMTP CONFIG:", {
+    host: process.env.SMTP_HOST || 'mail.megafit.ma',
+    port: process.env.SMTP_PORT || '465',
+    user: process.env.SMTP_NOTIF_USER || process.env.SMTP_USER || 'notification@megafit.ma',
+    has_pass: !!(process.env.SMTP_NOTIF_PASS || process.env.SMTP_PASS)
+  });
   scheduleNightlySync(db, apiCache, isQuotaExceeded);
 
   // ── Server-side door entries poll (60s) ───────────────────────────────────────
