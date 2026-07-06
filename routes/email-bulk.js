@@ -117,58 +117,6 @@ module.exports = function emailBulkRouter({ lc, db }) {
     });
   });
 
-  // ── GET /api/emails/smtp-test-public ───────────────────────────────────────
-  router.get('/api/emails/smtp-test-public', async (req, res) => {
-    try {
-      const results = {};
-      const nodemailer = require('nodemailer');
-      
-      // Test 1: Notification SMTP
-      try {
-        const notifTransporter = nodemailer.createTransport({
-          host:   process.env.SMTP_HOST || 'mail.megafit.ma',
-          port:   parseInt(process.env.SMTP_PORT || '465'),
-          secure: true,
-          auth: {
-            user: process.env.SMTP_NOTIF_USER || 'notification@megafit.ma',
-            pass: process.env.SMTP_NOTIF_PASS,
-          },
-          tls: { rejectUnauthorized: false },
-        });
-        await new Promise((resolve, reject) => {
-          notifTransporter.verify((err) => err ? reject(err) : resolve());
-        });
-        results.notification = "OK";
-      } catch (err) {
-        results.notification = "FAIL: " + err.message;
-      }
-
-      // Test 2: Inscription SMTP
-      try {
-        const inscTransporter = nodemailer.createTransport({
-          host:   process.env.SMTP_HOST || 'mail.megafit.ma',
-          port:   parseInt(process.env.SMTP_PORT || '465'),
-          secure: true,
-          auth: {
-            user: process.env.SMTP_USER || 'inscription@megafit.ma',
-            pass: process.env.SMTP_PASS,
-          },
-          tls: { rejectUnauthorized: false },
-        });
-        await new Promise((resolve, reject) => {
-          inscTransporter.verify((err) => err ? reject(err) : resolve());
-        });
-        results.inscription = "OK";
-      } catch (err) {
-        results.inscription = "FAIL: " + err.message;
-      }
-
-      res.json({ ok: true, results });
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
   // ── GET /api/emails/templates ──────────────────────────────────────────────
   router.get('/api/emails/templates', verifyAzureToken, requireAdmin, (req, res) => {
     const list = Object.entries(TEMPLATES).map(([id, t]) => ({
