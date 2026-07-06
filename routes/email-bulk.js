@@ -99,6 +99,24 @@ module.exports = function emailBulkRouter({ lc, db }) {
     }
   });
 
+  // ── GET /api/emails/smtp-diagnostic ───────────────────────────────────────
+  router.get('/api/emails/smtp-diagnostic', verifyAzureToken, requireAdmin, (req, res) => {
+    res.json({
+      has_host: !!process.env.SMTP_HOST,
+      host_val: process.env.SMTP_HOST || 'default: mail.megafit.ma',
+      has_port: !!process.env.SMTP_PORT,
+      port_val: process.env.SMTP_PORT || 'default: 465',
+      has_user: !!process.env.SMTP_USER,
+      user_val: process.env.SMTP_USER || 'not set',
+      has_notif_user: !!process.env.SMTP_NOTIF_USER,
+      notif_user_val: process.env.SMTP_NOTIF_USER || 'not set',
+      has_pass: !!process.env.SMTP_PASS,
+      pass_len: process.env.SMTP_PASS ? process.env.SMTP_PASS.length : 0,
+      has_notif_pass: !!process.env.SMTP_NOTIF_PASS,
+      notif_pass_len: process.env.SMTP_NOTIF_PASS ? process.env.SMTP_NOTIF_PASS.length : 0,
+    });
+  });
+
   // ── GET /api/emails/templates ──────────────────────────────────────────────
   router.get('/api/emails/templates', verifyAzureToken, requireAdmin, (req, res) => {
     const list = Object.entries(TEMPLATES).map(([id, t]) => ({
