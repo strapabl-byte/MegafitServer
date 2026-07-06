@@ -242,9 +242,27 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
                 const paid = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
                 ca += paid;
                 if ((e.source || '') === 'reste_settlement') return; // skip — payment, not debt
-                const prix = Number(e.prix) || 0;
-                if (prix > 0 && prix > paid) reste += prix - paid;
-                else if (prix <= 0) { const sr = Number(e.reste) || 0; if (sr > 0) reste += sr; }
+                
+                // Resolve the latest recorded remainder for this member from cache
+                const latest = lc.db.prepare(`
+                  SELECT reste FROM register_cache
+                  WHERE gym_id = ?
+                    AND (
+                      (nom = ? AND nom != '') 
+                      OR (cin = ? AND cin != '' AND cin != '-')
+                    )
+                  ORDER BY date DESC, created_at DESC
+                  LIMIT 1
+                `).get(gid, e.nom, e.cin);
+
+                const currentReste = latest ? (Number(latest.reste) || 0) : (() => {
+                  const prix = Number(e.prix) || 0;
+                  if (prix > 0 && prix > paid) return prix - paid;
+                  if (prix <= 0) return Number(e.reste) || 0;
+                  return 0;
+                })();
+
+                reste += currentReste;
               });
 
               // Subtract all décaissements except rejected ones
@@ -287,9 +305,27 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
                     const paid = (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
                     ca += paid;
                     if ((e.source || '') === 'reste_settlement') return; // skip — payment, not debt
-                    const prix = Number(e.prix) || 0;
-                    if (prix > 0 && prix > paid) reste += prix - paid;
-                    else if (prix <= 0) { const sr = Number(e.reste) || 0; if (sr > 0) reste += sr; }
+                    
+                    // Resolve the latest recorded remainder for this member from cache
+                    const latest = lc.db.prepare(`
+                      SELECT reste FROM register_cache
+                      WHERE gym_id = ?
+                        AND (
+                          (nom = ? AND nom != '') 
+                          OR (cin = ? AND cin != '' AND cin != '-')
+                        )
+                      ORDER BY date DESC, created_at DESC
+                      LIMIT 1
+                    `).get(gid, e.nom, e.cin);
+
+                    const currentReste = latest ? (Number(latest.reste) || 0) : (() => {
+                      const prix = Number(e.prix) || 0;
+                      if (prix > 0 && prix > paid) return prix - paid;
+                      if (prix <= 0) return Number(e.reste) || 0;
+                      return 0;
+                    })();
+
+                    reste += currentReste;
                   });
                   if (ca > 0) calendarData[dateStr] = (calendarData[dateStr] || 0) + ca;
                   if (reste > 0) resteData[dateStr] = (resteData[dateStr] || 0) + reste;
