@@ -221,11 +221,54 @@ function buildHtmlEmail(subject, bodyHtml, recipientName, options = {}) {
 </html>`;
 }
 
+// ─── Send Via Brevo HTTP API ──────────────────────────────────────────────────
+async function sendViaBrevo({ sender, to, subject, htmlContent, attachment }) {
+  const apiKey = process.env.BREVO_API_KEY;
+  if (!apiKey) throw new Error('BREVO_API_KEY is not configured');
+
+  const body = {
+    sender,
+    to,
+    subject,
+    htmlContent
+  };
+  if (attachment) {
+    body.attachment = attachment;
+  }
+
+  const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'accept': 'application/json',
+      'api-key': apiKey,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.message || `Brevo API error: ${res.status}`);
+  }
+  return data;
+}
+
 // ─── Send Single Email ────────────────────────────────────────────────────────
 async function sendEmail(to, subject, htmlBody, recipientName, options = {}) {
-  const transport = getTransporter();
   const html = buildHtmlEmail(subject, htmlBody, recipientName, options);
 
+  if (process.env.BREVO_API_KEY) {
+    const senderEmail = process.env.SMTP_USER || 'inscription@megafit.ma';
+    const result = await sendViaBrevo({
+      sender: { name: 'MegaFit', email: senderEmail },
+      to: [{ email: to, name: recipientName || '' }],
+      subject,
+      htmlContent: html
+    });
+    return { messageId: result.messageId, accepted: [to], rejected: [] };
+  }
+
+  const transport = getTransporter();
   const info = await transport.sendMail({
     from: SMTP_FROM,
     to,
@@ -242,6 +285,47 @@ async function sendEmail(to, subject, htmlBody, recipientName, options = {}) {
 
 // ─── Bulk Sender ──────────────────────────────────────────────────────────────
 async function sendBulkEmails(recipients, subject, htmlBody, onProgress, options = {}) {
+  if (process.env.BREVO_API_KEY) {
+    const senderEmail = process.env.SMTP_USER || 'inscription@megafit.ma';
+    let sent = 0, failed = 0, errors = [];
+    const total = recipients.length;
+
+    for (let i = 0; i < total; i += BATCH_SIZE) {
+      const batch = recipients.slice(i, i + BATCH_SIZE);
+
+      for (const r of batch) {
+        try {
+          const html = buildHtmlEmail(subject, htmlBody, r.name, options);
+          const personalSubject = subject
+            .replace(/\{firstname\}/gi, (r.name || 'Membre').split(' ')[0])
+            .replace(/\[firstname\]/gi, (r.name || 'Membre').split(' ')[0]);
+
+          await sendViaBrevo({
+            sender: { name: 'MegaFit', email: senderEmail },
+            to: [{ email: r.email, name: r.name || '' }],
+            subject: personalSubject,
+            htmlContent: html
+          });
+          sent++;
+        } catch (err) {
+          failed++;
+          errors.push({ email: r.email, error: err.message });
+          if (err.message.includes('429') || err.message.includes('timeout') || err.message.includes('limit')) {
+            return { sent, failed, errors, remaining: recipients.slice(i + batch.indexOf(r) + 1), rateLimited: true };
+          }
+        }
+      }
+
+      if (onProgress) onProgress({ sent, failed, total, batch: Math.floor(i / BATCH_SIZE) + 1 });
+
+      if (i + BATCH_SIZE < total) {
+        await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
+      }
+    }
+
+    return { sent, failed, errors, remaining: [], rateLimited: false };
+  }
+
   const transport = getTransporter();
   let sent = 0, failed = 0, errors = [];
   const total = recipients.length;

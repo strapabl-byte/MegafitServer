@@ -109,22 +109,57 @@ module.exports = function router(deps = {}) {
     const safeName   = (memberName || 'membre').replace(/[^a-zA-Z0-9\s]/g, '').replace(/\s+/g, '_');
 
     try {
-      const transporter = createTransporter();
+      const recipientEmail = to.trim();
+      const subject = `Votre contrat MegaFit — ${gymName}`;
+      const html = emailHtml(firstName, memberName, gymName, contractNumber || '');
+      const filename = `Contrat_${safeName}_${contractNumber || ''}.pdf`;
 
-      await transporter.sendMail({
-        from:    `"MegaFit Inscription" <${process.env.SMTP_USER || 'inscription@megafit.ma'}>`,
-        to:      to.trim(),
-        subject: `Votre contrat MegaFit — ${gymName}`,
-        html:    emailHtml(firstName, memberName, gymName, contractNumber || ''),
-        attachments: [{
-          filename:    `Contrat_${safeName}_${contractNumber || ''}.pdf`,
-          content:     pdfBase64,
-          encoding:    'base64',
-          contentType: 'application/pdf',
-        }],
-      });
+      if (process.env.BREVO_API_KEY) {
+        const senderEmail = process.env.SMTP_USER || 'inscription@megafit.ma';
+        const body = {
+          sender: { name: 'MegaFit Inscription', email: senderEmail },
+          to: [{ email: recipientEmail, name: memberName || '' }],
+          subject: subject,
+          htmlContent: html,
+          attachment: [
+            {
+              content: pdfBase64,
+              name: filename
+            }
+          ]
+        };
 
-      console.log(`[email] ✅ Contract sent → ${to} | ${memberName} | ${contractNumber}`);
+        const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+          method: 'POST',
+          headers: {
+            'accept': 'application/json',
+            'api-key': process.env.BREVO_API_KEY,
+            'content-type': 'application/json'
+          },
+          body: JSON.stringify(body)
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.message || `Brevo API error: ${res.status}`);
+        }
+      } else {
+        const transporter = createTransporter();
+        await transporter.sendMail({
+          from:    `"MegaFit Inscription" <${process.env.SMTP_USER || 'inscription@megafit.ma'}>`,
+          to:      recipientEmail,
+          subject: subject,
+          html:    html,
+          attachments: [{
+            filename:    filename,
+            content:     pdfBase64,
+            encoding:    'base64',
+            contentType: 'application/pdf',
+          }],
+        });
+      }
+
+      console.log(`[email] ✅ Contract sent → ${recipientEmail} | ${memberName} | ${contractNumber}`);
 
       // Optionally save email to inscription record
       if (inscriptionId && db) {
