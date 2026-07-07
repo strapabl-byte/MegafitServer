@@ -117,58 +117,6 @@ module.exports = function emailBulkRouter({ lc, db }) {
     });
   });
 
-  // ── GET /api/emails/smtp-test-public ───────────────────────────────────────
-  router.get('/api/emails/smtp-test-public', async (req, res) => {
-    try {
-      const results = {};
-      const nodemailer = require('nodemailer');
-      
-      const testConfigs = [
-        { name: "notif_465", user: process.env.SMTP_NOTIF_USER || 'notification@megafit.ma', pass: process.env.SMTP_NOTIF_PASS, port: 465, secure: true },
-        { name: "notif_587", user: process.env.SMTP_NOTIF_USER || 'notification@megafit.ma', pass: process.env.SMTP_NOTIF_PASS, port: 587, secure: false },
-        { name: "insc_465", user: process.env.SMTP_USER || 'inscription@megafit.ma', pass: process.env.SMTP_PASS, port: 465, secure: true },
-        { name: "insc_587", user: process.env.SMTP_USER || 'inscription@megafit.ma', pass: process.env.SMTP_PASS, port: 587, secure: false },
-      ];
-
-      for (const config of testConfigs) {
-        try {
-          const transporter = nodemailer.createTransport({
-            host:   process.env.SMTP_HOST || 'mail.megafit.ma',
-            port:   config.port,
-            secure: config.secure,
-            auth: {
-              user: config.user,
-              pass: config.pass,
-            },
-            tls: { rejectUnauthorized: false },
-            connectionTimeout: 5000, // 5 seconds timeout for fast response
-          });
-          
-          await new Promise((resolve, reject) => {
-            transporter.verify((err) => err ? reject(err) : resolve());
-          });
-          results[config.name] = "OK";
-        } catch (err) {
-          results[config.name] = "FAIL: " + err.message + " (code: " + (err.code || 'N/A') + ")";
-        }
-      }
-
-      res.json({ ok: true, results });
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // ── GET /api/emails/campaigns-public ───────────────────────────────────────
-  router.get('/api/emails/campaigns-public', (req, res) => {
-    try {
-      const campaigns = lc.getEmailCampaigns(10);
-      res.json({ ok: true, campaigns });
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
   // ── GET /api/emails/templates ──────────────────────────────────────────────
   router.get('/api/emails/templates', verifyAzureToken, requireAdmin, (req, res) => {
     const list = Object.entries(TEMPLATES).map(([id, t]) => ({
