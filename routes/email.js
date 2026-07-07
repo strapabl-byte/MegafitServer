@@ -14,10 +14,11 @@ const GYM_LABELS = {
 
 // Shared transporter — created once, reused
 function createTransporter() {
+  const port = parseInt(process.env.SMTP_PORT || '465');
   return nodemailer.createTransport({
     host:   process.env.SMTP_HOST || 'mail.megafit.ma',
-    port:   parseInt(process.env.SMTP_PORT || '465'),
-    secure: true,                         // SSL on port 465
+    port:   port,
+    secure: port === 465,                 // SSL on port 465, TLS/STARTTLS on port 587
     auth: {
       user: process.env.SMTP_USER || 'inscription@megafit.ma',
       pass: process.env.SMTP_PASS,
@@ -115,7 +116,7 @@ module.exports = function router(deps = {}) {
       const filename = `Contrat_${safeName}_${contractNumber || ''}.pdf`;
 
       if (process.env.BREVO_API_KEY) {
-        const senderEmail = process.env.SMTP_USER || 'inscription@megafit.ma';
+        const senderEmail = process.env.SMTP_FROM_INSCRIPTION || 'inscription@megafit.ma';
         const body = {
           sender: { name: 'MegaFit Inscription', email: senderEmail },
           to: [{ email: recipientEmail, name: memberName || '' }],
@@ -146,7 +147,7 @@ module.exports = function router(deps = {}) {
       } else {
         const transporter = createTransporter();
         await transporter.sendMail({
-          from:    `"MegaFit Inscription" <${process.env.SMTP_USER || 'inscription@megafit.ma'}>`,
+          from:    `"MegaFit Inscription" <${process.env.SMTP_FROM_INSCRIPTION || 'inscription@megafit.ma'}>`,
           to:      recipientEmail,
           subject: subject,
           html:    html,

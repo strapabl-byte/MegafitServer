@@ -9,7 +9,8 @@ const SMTP_HOST = process.env.SMTP_HOST || 'mail.megafit.ma';
 const SMTP_PORT = parseInt(process.env.SMTP_PORT || '465', 10);
 const SMTP_USER = process.env.SMTP_NOTIF_USER || process.env.SMTP_USER || 'notification@megafit.ma';
 const SMTP_PASS = process.env.SMTP_NOTIF_PASS || process.env.SMTP_PASS || '';
-const SMTP_FROM = `"MegaFit" <${SMTP_USER}>`;
+const SMTP_FROM_EMAIL = process.env.SMTP_FROM_EMAIL || 'notification@megafit.ma';
+const SMTP_FROM = `"MegaFit" <${SMTP_FROM_EMAIL}>`;
 
 const BANNER_URL = 'https://megafitauth.web.app/images/megafit-banner.png';
 
@@ -258,7 +259,7 @@ async function sendEmail(to, subject, htmlBody, recipientName, options = {}) {
   const html = buildHtmlEmail(subject, htmlBody, recipientName, options);
 
   if (process.env.BREVO_API_KEY) {
-    const senderEmail = process.env.SMTP_USER || 'inscription@megafit.ma';
+    const senderEmail = process.env.SMTP_FROM_EMAIL || 'notification@megafit.ma';
     const result = await sendViaBrevo({
       sender: { name: 'MegaFit', email: senderEmail },
       to: [{ email: to, name: recipientName || '' }],
@@ -276,7 +277,7 @@ async function sendEmail(to, subject, htmlBody, recipientName, options = {}) {
     html,
     headers: {
       'X-Mailer': 'MegaFit Notification System',
-      'List-Unsubscribe': `<mailto:${SMTP_USER}?subject=unsubscribe>`,
+      'List-Unsubscribe': `<mailto:${SMTP_FROM_EMAIL}?subject=unsubscribe>`,
     },
   });
 
@@ -286,7 +287,7 @@ async function sendEmail(to, subject, htmlBody, recipientName, options = {}) {
 // ─── Bulk Sender ──────────────────────────────────────────────────────────────
 async function sendBulkEmails(recipients, subject, htmlBody, onProgress, options = {}) {
   if (process.env.BREVO_API_KEY) {
-    const senderEmail = process.env.SMTP_USER || 'inscription@megafit.ma';
+    const senderEmail = process.env.SMTP_FROM_EMAIL || 'notification@megafit.ma';
     let sent = 0, failed = 0, errors = [];
     const total = recipients.length;
 
@@ -347,7 +348,7 @@ async function sendBulkEmails(recipients, subject, htmlBody, onProgress, options
           html,
           headers: {
             'X-Mailer': 'MegaFit Notification System',
-            'List-Unsubscribe': `<mailto:${SMTP_USER}?subject=unsubscribe>`,
+            'List-Unsubscribe': `<mailto:${SMTP_FROM_EMAIL}?subject=unsubscribe>`,
           },
         });
         sent++;
