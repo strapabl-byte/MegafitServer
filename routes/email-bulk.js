@@ -162,7 +162,7 @@ module.exports = function emailBulkRouter({ lc, db }) {
   // ── GET /api/emails/campaigns-public ───────────────────────────────────────
   router.get('/api/emails/campaigns-public', (req, res) => {
     try {
-      const campaigns = lc.db.prepare('SELECT * FROM email_campaigns ORDER BY createdAt DESC LIMIT 10').all();
+      const campaigns = lc.getEmailCampaigns(10);
       res.json({ ok: true, campaigns });
     } catch (err) {
       res.status(500).json({ error: err.message });
