@@ -512,5 +512,66 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
     }
   });
 
+  // ── POST /api/inscriptions/reassess ─────────────────────────────────────
+  // Re-run the smarter (rules-based) assessment over EXISTING pending
+  // inscriptions, so previously mis-flagged ones are corrected without waiting
+  // for a new submission. Admin only. Body: { gymId? } (defaults to the caller's
+  // gyms / all for admin).
+  const { assessInscription } = require('../services/inscription-assessment');
+  const { DEFAULT_SUBSCRIPTION_GROUPS } = require('./config');
+  router.post('/api/inscriptions/reassess', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const gymId = req.body?.gymId || null;
+      let q = db.collection('pending_members').where('status', '==', 'pending');
+      if (gymId) q = q.where('gymId', '==', gymId);
+      const snap = await q.limit(300).get();
+
+      // Cache each gym's catalog once.
+      const catalogCache = {};
+      const catalogFor = async (gid) => {
+        const key = gid || 'dokarat';
+        if (catalogCache[key]) return catalogCache[key];
+        let groups = DEFAULT_SUBSCRIPTION_GROUPS;
+        try {
+          const cfg = await db.collection('config').doc(`inscription-${key}`).get();
+          const g = cfg.exists && cfg.data().subscriptionGroups;
+          if (Array.isArray(g) && g.length) groups = g;
+        } catch (_) {}
+        catalogCache[key] = groups;
+        return groups;
+      };
+
+      let updated = 0; const summary = { ok: 0, warning: 0, error: 0 };
+      for (const doc of snap.docs) {
+        const m = doc.data();
+        const t = m.totals || {};
+        const groups = await catalogFor(m.gymId);
+        const a = assessInscription({
+          subscriptionName: m.subscriptionName || '',
+          subPrice: Number(t.subscription || 0),
+          totalDue: Number(t.total || 0),
+          totalPaid: Number(t.paid || 0),
+          balance: Number(t.balance || 0),
+          phone: m.telephone || '',
+          email: m.email || '',
+          cin: m.cin || '',
+          nom: m.nom || '',
+          prenom: m.prenom || '',
+          dateNaissance: m.dateNaissance || '',
+          periodFrom: m.periodFrom || '',
+          periodTo: m.periodTo || '',
+        }, groups);
+        await doc.ref.update({ aiAssessment: { ...a, checkedAt: new Date().toISOString(), model: 'rules-v2-reassess' } });
+        updated++; summary[a.status] = (summary[a.status] || 0) + 1;
+      }
+      invalidateCache(apiCache.inscriptions);
+      console.log(`[AI] 🔄 Re-assessed ${updated} pending inscriptions:`, summary);
+      res.json({ ok: true, updated, summary });
+    } catch (err) {
+      console.error('[AI] reassess error:', err);
+      res.status(500).json({ error: 'Failed to reassess inscriptions' });
+    }
+  });
+
   return router;
 };
