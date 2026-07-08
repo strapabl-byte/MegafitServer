@@ -336,6 +336,24 @@ module.exports = function walletRouter(deps) {
   // ═══════════════════════════════════════════════════════════════════════════
   const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
   const adminOnly = [verifyAzureToken, requireAdmin];
+  // Recharge desk is run by managers too — allow admin OR manager on recharge and
+  // the member-balance read, but scope managers to their assigned gym.
+  const requireAdminOrManager = (req, res, next) =>
+    (req.isAdmin || req.isManager) ? next() : res.status(403).json({ error: 'FORBIDDEN' });
+  const adminOrManager = [verifyAzureToken, requireAdminOrManager];
+
+  // Load a member's gym for scoping. exists:false = no member; exists:null = lookup failed.
+  const getMemberGym = async (memberId) => {
+    try {
+      const s = await db.collection('members').doc(String(memberId)).get();
+      if (!s.exists) return { exists: false };
+      const d = s.data() || {};
+      return { exists: true, gymId: d.gymId || d.gym_id || d.location || null };
+    } catch { return { exists: null }; }
+  };
+  // Admin → any gym. Manager → only their assigned gym (fail-open if gym unknown).
+  const managerCanTouch = (req, gymId) =>
+    req.isAdmin || !gymId || (typeof req.hasAccessToGym === 'function' && req.hasAccessToGym(gymId));
 
   // Signed credit/refund helper — append-only + materialized balance, atomic, idempotent.
   // Returns { replay } if the idem key already resolved this exact request.
@@ -383,14 +401,8 @@ module.exports = function walletRouter(deps) {
     return { response: r.response };
   };
 
-  // Confirm a memberId maps to a real member document (referential integrity).
-  const memberExists = async (memberId) => {
-    try { return (await db.collection('members').doc(String(memberId)).get()).exists; }
-    catch { return null; } // null = lookup failed (don't assume absence)
-  };
-
   // POST /admin/wallet/recharge  { memberId, amountCentimes, method, note, confirm }  + Idempotency-Key
-  router.post('/admin/wallet/recharge', ...adminOnly, async (req, res) => {
+  router.post('/admin/wallet/recharge', ...adminOrManager, async (req, res) => {
     const idemKey = (req.headers['idempotency-key'] || '').trim();
     if (!idemKey) return res.status(400).json({ error: 'IDEMPOTENCY_KEY_REQUIRED' });
     const { memberId, amountCentimes, method, note, confirm } = req.body || {};
@@ -401,8 +413,9 @@ module.exports = function walletRouter(deps) {
     // Large recharges require a second confirmation step.
     if (amt > BIG_RECHARGE_CENTIMES && !confirm) return res.status(409).json({ error: 'CONFIRM_REQUIRED', thresholdCentimes: BIG_RECHARGE_CENTIMES });
 
-    const exists = await memberExists(memberId);
-    if (exists === false) return res.status(404).json({ error: 'MEMBER_NOT_FOUND' });
+    const mg = await getMemberGym(memberId);
+    if (mg.exists === false) return res.status(404).json({ error: 'MEMBER_NOT_FOUND' });
+    if (!managerCanTouch(req, mg.gymId)) return res.status(403).json({ error: 'FORBIDDEN_GYM' });
 
     const reqHash = fingerprint(['recharge', memberId, amt, method]);
     const r = applyCredit({
@@ -476,8 +489,13 @@ module.exports = function walletRouter(deps) {
     res.json({ payload: signPayload(p), product: { id: p.id, name: p.name, priceCentimes: p.price_centimes } });
   });
 
-  // GET /admin/wallet/members/:id/transactions  (support view, full ledger)
-  router.get('/admin/wallet/members/:id/transactions', ...adminOnly, (req, res) => {
+  // GET /admin/wallet/members/:id/transactions  (support view + recharge-screen balance)
+  router.get('/admin/wallet/members/:id/transactions', ...adminOrManager, async (req, res) => {
+    if (!req.isAdmin) {
+      const mg = await getMemberGym(req.params.id);
+      if (mg.exists === false) return res.status(404).json({ error: 'MEMBER_NOT_FOUND' });
+      if (!managerCanTouch(req, mg.gymId)) return res.status(403).json({ error: 'FORBIDDEN_GYM' });
+    }
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500);
     const rows = stmtTxnByMember.all(req.params.id, limit);
     res.json({
