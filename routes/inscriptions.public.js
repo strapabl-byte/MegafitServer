@@ -9,6 +9,8 @@
 const { Router } = require('express');
 const { verifyAzureToken } = require('../middleware/auth');
 const { notifyDavidDecaissement } = require('../services/david-notify');
+const { assessInscription } = require('../services/inscription-assessment');
+const { DEFAULT_SUBSCRIPTION_GROUPS } = require('./config');
 const sharp = require('sharp');
 
 async function compressBase64Image(base64Str, type = 'profile') {
@@ -479,111 +481,71 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
 
       res.json({ id, ok: true, contractNumber: finalContractNumber });
 
-      // ── 🤖 NON-BLOCKING AI Smart Assessment ───────────────────────────────
+      // ── 🤖 NON-BLOCKING Smart Assessment (deterministic rules + optional LLM) ─
       // Runs AFTER the response is sent — never slows down the PWA.
-      // Loads official prices from config, validates payment/phone/email/CIN.
-      // Stores result in aiAssessment field so dashboard never re-checks.
+      // Rules decide status+issues reliably; the LLM (if a key exists) only
+      // rephrases the human message. Works with NO LLM key. Prices are read from
+      // the config's `price` field OR parsed from the formula name.
       (async () => {
         try {
-          const GROQ_KEY = process.env.GROQ_API_KEY;
-          if (!GROQ_KEY) return;
-
-          // 1. Load official subscription prices for this gym
-          let officialPrices = '';
+          // 1. Load this gym's catalog; fall back to defaults so a missing config
+          //    doc never makes every subscription look "unknown".
+          let groups = DEFAULT_SUBSCRIPTION_GROUPS;
           try {
             const cfgDoc = await db.collection('config').doc(`inscription-${normalizedGymId}`).get();
-            if (cfgDoc.exists) {
-              const groups = cfgDoc.data().subscriptionGroups || [];
-              const priceLines = [];
-              groups.forEach(g => {
-                (g.options || []).forEach(o => {
-                  if (o.name && o.price > 0) priceLines.push(`  ${o.name}: ${o.price} DH`);
-                });
-              });
-              if (priceLines.length > 0) officialPrices = `\nOfficial subscription prices for this gym:\n${priceLines.join('\n')}`;
-            }
+            const g = cfgDoc.exists && cfgDoc.data().subscriptionGroups;
+            if (Array.isArray(g) && g.length) groups = g;
           } catch (_) {}
 
-          // 2. Build comprehensive validation prompt
-          const subName = safeData.subscriptionName || 'N/A';
-          const totalDue = Number(safeData.totals?.total || 0);
-          const totalPaid = Number(safeData.totals?.paid || 0);
-          const balance = Number(safeData.totals?.balance || 0);
-          const subPrice = Number(safeData.totals?.subscription || 0);
-          const phone = safeData.telephone || '';
-          const email = safeData.email || '';
-          const cin = safeData.cin || '';
-          const nom = safeData.nom || '';
+          const t = safeData.totals || {};
           const prenom = safeData.prenom || '';
-          const dateNaissance = safeData.dateNaissance || '';
-          const periodFrom = safeData.periodFrom || '';
-          const periodTo = safeData.periodTo || '';
+          const nom = safeData.nom || '';
 
-          const prompt = `Tu es une IA de contrôle qualité pour les inscriptions en salle de sport MEGA FIT au Maroc.
-Analyse cette inscription et donne un verdict STRICT en JSON:
-${officialPrices}
+          // 2. Deterministic assessment — authoritative for status + issues.
+          const assessment = assessInscription({
+            subscriptionName: safeData.subscriptionName || '',
+            subPrice: Number(t.subscription || 0),
+            totalDue: Number(t.total || 0),
+            totalPaid: Number(t.paid || 0),
+            balance: Number(t.balance || 0),
+            phone: safeData.telephone || '',
+            email: safeData.email || '',
+            cin: safeData.cin || '',
+            nom, prenom,
+            dateNaissance: safeData.dateNaissance || '',
+            periodFrom: safeData.periodFrom || '',
+            periodTo: safeData.periodTo || '',
+          }, groups);
 
-Inscription soumise:
-- Membre: ${prenom} ${nom}
-- Abonnement: ${subName}
-- Prix abonnement: ${subPrice} DH
-- Total dû: ${totalDue} DH
-- Montant payé: ${totalPaid} DH
-- Reste: ${balance} DH
-- Téléphone: "${phone}"
-- Email: "${email}"
-- CIN: "${cin}"
-- Date naissance: "${dateNaissance}"
-- Période: ${periodFrom} → ${periodTo}
-
-Vérifie TOUT:
-1. PAIEMENT: Le prix payé est-il cohérent avec le prix officiel de cet abonnement? Un paiement partiel (50%+) est acceptable. Moins de 40% du prix = suspect.
-2. TELEPHONE: Format marocain valide? (06/07/05 + 8 chiffres = 10 chiffres total)
-3. EMAIL: Présent ou manquant? Format valide?
-4. CIN: Format marocain? (1-2 lettres + 5-7 chiffres, ex: AB123456)
-5. CHAMPS MANQUANTS: Nom, prénom, date naissance, période?
-6. PRIX vs OFFICIEL: Si le prix officiel existe dans la liste, le montant correspond-il?
-
-Réponds UNIQUEMENT en JSON valide (pas de markdown):
-{"status":"ok|warning|error","message":"Résumé court en 1 phrase","issues":[]}
-- status "ok": tout est bon
-- status "warning": problème mineur (email manquant, petit écart de prix)
-- status "error": problème grave (gros écart de prix, téléphone invalide, données manquantes critiques)
-- issues: liste des problèmes détectés (strings courts)
-- message: résumé humain en français, max 20 mots`;
-
-          const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              model: 'llama-3.3-70b-versatile',
-              messages: [{ role: 'user', content: prompt }],
-              temperature: 0.1,
-              max_tokens: 200,
-            }),
-          });
-
-          if (!groqRes.ok) throw new Error(`Groq HTTP ${groqRes.status}`);
-          const groqData = await groqRes.json();
-          const rawText = groqData.choices?.[0]?.message?.content || '';
-          const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-
-          let assessment = { status: 'ok', message: 'Analyse IA indisponible', issues: [] };
-          if (jsonMatch) {
-            try { assessment = JSON.parse(jsonMatch[0]); } catch (_) {}
+          // 3. Optional: let the LLM refine the human MESSAGE only (never status).
+          let model = 'rules-v2';
+          const LLM_KEY = process.env.OPENAI_API_KEY || process.env.GROQ_API_KEY;
+          if (LLM_KEY) {
+            try {
+              const useOpenAI = !!process.env.OPENAI_API_KEY;
+              const url = useOpenAI ? 'https://api.openai.com/v1/chat/completions' : 'https://api.groq.com/openai/v1/chat/completions';
+              const mdl = useOpenAI ? 'gpt-4o-mini' : 'llama-3.3-70b-versatile';
+              const refinePrompt = `Reformule en UNE phrase française claire (max 18 mots), pour un responsable de salle de sport, ce résumé d'inscription. Statut: ${assessment.status}. Points: ${assessment.issues.join('; ') || 'aucun problème'}. Réponds uniquement par la phrase, sans guillemets.`;
+              const r = await fetch(url, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${LLM_KEY}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: mdl, messages: [{ role: 'user', content: refinePrompt }], temperature: 0.2, max_tokens: 60 }),
+              });
+              if (r.ok) {
+                const j = await r.json();
+                const txt = (j.choices?.[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '');
+                if (txt) { assessment.message = txt; model = mdl; }
+              }
+            } catch (_) { /* keep the deterministic message */ }
           }
 
-          // 3. Store on the inscription document (non-blocking)
+          // 4. Store on the inscription document (non-blocking)
           await db.collection('pending_members').doc(id).update({
-            aiAssessment: {
-              ...assessment,
-              checkedAt: new Date().toISOString(),
-              model: 'llama-3.3-70b',
-            },
+            aiAssessment: { ...assessment, checkedAt: new Date().toISOString(), model },
           });
           console.log(`[AI] ✅ Assessment for ${prenom} ${nom}: ${assessment.status} — ${assessment.message}`);
 
-          // 🔔 Notification: AI flagged an issue
+          // 🔔 Notification: only on genuine warning/error
           if (assessment.status === 'warning' || assessment.status === 'error') {
             try {
               lc.addNotification({
