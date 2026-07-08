@@ -721,6 +721,7 @@ app.use('/',                require('./routes/david')(deps));     // /api/david/
 app.use('/',                require('./routes/auralix')(deps));   // /api/auralix/*
 app.use('/',                require('./routes/ai-agent')(deps));   // /api/ai/* AURALIX 24/7 Agent (Firebase token auth)
 app.use('/',                require('./routes/superadmin')(deps)); // /api/superadmin/* Super Admin Command Center
+app.use('/',                require('./routes/wallet')(deps));     // /wallet/* (member, gated) + /admin/wallet/* (admin) — MegaFit Solde
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUSH NOTIFICATIONS HELPERS
