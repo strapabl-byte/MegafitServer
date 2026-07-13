@@ -920,6 +920,67 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
   });
 
 
+  // ── POST /api/members/backfill-photos ─────────────────────────────────────
+  // One-time repair: for every member with no photo, re-pull the picture from
+  // their inscription (SQLite cache base64 OR Firestore pending doc), upload to
+  // Storage if it's base64, and save the URL on the member. Admin only.
+  router.post('/backfill-photos', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const gymId = req.body?.gymId && req.body.gymId !== 'all' ? req.body.gymId : null;
+      const rows = lc.db.prepare(
+        `SELECT id, inscription_id, contract_number FROM members_cache
+         WHERE (photo IS NULL OR photo = '') ${gymId ? 'AND gym_id = ?' : ''}
+         LIMIT 300`
+      ).all(...(gymId ? [gymId] : []));
+
+      // Find a usable photo source for a member (base64 or an existing URL).
+      const findPhoto = async (insId, contract) => {
+        if (insId) {
+          const p = lc.getPendingById(insId);
+          if (p?.profile_picture) return p.profile_picture;
+          try {
+            const d = await db.collection('pending_members').doc(insId).get();
+            if (d.exists) { const x = d.data(); if (x.profilePicture || x.photoUrl) return x.profilePicture || x.photoUrl; }
+          } catch (_) {}
+        }
+        if (contract) {
+          try {
+            const q = await db.collection('pending_members').where('contractNumber', '==', contract).limit(1).get();
+            if (!q.empty) {
+              const x = q.docs[0].data();
+              if (x.profilePicture || x.photoUrl) return x.profilePicture || x.photoUrl;
+              const p = lc.getPendingById(q.docs[0].id);
+              if (p?.profile_picture) return p.profile_picture;
+            }
+          } catch (_) {}
+        }
+        return null;
+      };
+
+      let scanned = 0, fixed = 0, noSource = 0, errors = 0;
+      for (const m of rows) {
+        scanned++;
+        try {
+          let raw = await findPhoto(m.inscription_id, m.contract_number);
+          if (!raw) { noSource++; continue; }
+          const url = raw.startsWith('data:')
+            ? await uploadBase64ToStorage(raw, `members/${m.id}/profile_repair_${Date.now()}.jpg`)
+            : raw;
+          await db.collection('members').doc(m.id).update({ photo: url, photoRepairedAt: admin.firestore.FieldValue.serverTimestamp() });
+          try { lc.db.prepare('UPDATE members_cache SET photo = ? WHERE id = ?').run(url, m.id); } catch (_) {}
+          if (apiCache?.profiles) delete apiCache.profiles[m.id];
+          fixed++;
+        } catch (e) { errors++; console.warn('[backfill-photos] failed for', m.id, e.message); }
+      }
+      console.log(`[backfill-photos] scanned=${scanned} fixed=${fixed} noSource=${noSource} errors=${errors}`);
+      res.json({ ok: true, scanned, fixed, noSource, errors });
+    } catch (err) {
+      console.error('[backfill-photos] error:', err);
+      res.status(500).json({ error: 'Failed to backfill photos' });
+    }
+  });
+
+
   return router;
 };
 
