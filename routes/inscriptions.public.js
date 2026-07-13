@@ -360,6 +360,20 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
         chequePhotoVerso = await compressBase64Image(chequePhotoVerso, 'cheque');
       }
 
+      // 🖼️ Persist the profile photo to Firebase Storage so it SURVIVES Render
+      // redeploys. Previously it lived only as base64 in SQLite (/var/data,
+      // ephemeral) and was stripped from Firestore — so after a redeploy the
+      // dashboard showed a placeholder even though the PDF (a complete file on
+      // Storage) still had it. Storing a small URL in Firestore fixes this.
+      let profilePhotoUrl = null;
+      if (profilePicture && profilePicture.startsWith('data:')) {
+        try {
+          profilePhotoUrl = await uploadBase64ToStorage(profilePicture, `inscriptions/${normalizedGymId || 'gym'}/profile_${Date.now()}.jpg`);
+        } catch (e) { console.warn('[inscription] profile photo upload failed (non-blocking):', e.message); }
+      } else if (profilePicture) {
+        profilePhotoUrl = profilePicture; // already a URL
+      }
+
       // 🛡️ DEDUPLICATION CHECK
       const recentSnap = await db.collection('pending_members')
         .where('gymId', '==', normalizedGymId)
@@ -422,9 +436,10 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
           gymId: normalizedGymId,
           source: 'web',
           status: autoStatus,
+          profilePicture: profilePhotoUrl || null,   // ✅ Storage URL — persists in Firestore
           lockedBy: isOffreOrFree ? 'AUTO — Offre/0 DH' : null,
           lockedAt: isOffreOrFree ? admin.firestore.FieldValue.serverTimestamp() : null,
-          hasPhoto: !!(profilePicture || data.photoUrl),
+          hasPhoto: !!(profilePhotoUrl || profilePicture || data.photoUrl),
           createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
 
@@ -454,7 +469,7 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
         commercial: data.commercial || null,
         telephone: data.telephone || null,
         dateNaissance: data.dateNaissance || null,
-        profilePicture: profilePicture || data.photoUrl || null,  // ✅ camelCase — setPending reads data.profilePicture
+        profilePicture: profilePhotoUrl || profilePicture || data.photoUrl || null,  // ✅ prefer the persistent Storage URL
         chequePhoto: chequePhoto || null,
         chequePhotoVerso: chequePhotoVerso || null,
         memberSignature: memberSignature || null,  // ✅ preserve signature for dashboard PDF regen
