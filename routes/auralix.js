@@ -143,6 +143,31 @@ module.exports = function(deps) {
     } catch(e) { return { revenue: 0, members: 0, entries: 0, decaissement: 0, net: 0, espece: 0, tpe: 0, virement: 0, cheque: 0, reste: 0, resteCount: 0 }; }
   }
 
+  // Real DOOR entries (physical turnstile scans) for a gym over a date range —
+  // the same live door feed the main dashboard shows, from daily_stats.count.
+  function doorEntries(gymId, dates) {
+    try {
+      if (!dates.length) return 0;
+      const ph = dates.map(() => '?').join(',');
+      const r = lc.db.prepare(
+        `SELECT COALESCE(SUM(CAST(count AS INTEGER)),0) AS c FROM daily_stats WHERE gym_id=? AND date IN (${ph})`
+      ).get(gymId, ...dates);
+      return r?.c || 0;
+    } catch { return 0; }
+  }
+
+  // The equal-length window immediately BEFORE the given dates (for trend arrows).
+  function previousWindow(dates) {
+    if (!dates.length) return [];
+    const earliest = new Date([...dates].sort()[0] + 'T00:00:00Z');
+    const prev = [];
+    for (let i = 1; i <= dates.length; i++) {
+      const d = new Date(earliest); d.setUTCDate(d.getUTCDate() - i);
+      prev.push(d.toISOString().slice(0, 10));
+    }
+    return prev;
+  }
+
   // GET /api/auralix/summary?period=today|week|month
   router.get('/api/auralix/summary', auth, (req, res) => {
     const p = req.query.period || 'today';
@@ -160,11 +185,12 @@ module.exports = function(deps) {
     } else {
       dates = [todayDate()];
     }
-    const gyms = GYMS.map(id => ({ id, name: NAMES[id], ...gymRevenue(id, dates) }));
+    const gyms = GYMS.map(id => ({ id, name: NAMES[id], ...gymRevenue(id, dates), doorEntries: doorEntries(id, dates) }));
     const total = gyms.reduce((s, g) => ({
       revenue: s.revenue + g.revenue,
       members: s.members + g.members,
       entries: s.entries + g.entries,
+      doorEntries: s.doorEntries + (g.doorEntries || 0),
       decaissement: s.decaissement + g.decaissement,
       net: s.net + g.net,
       espece: s.espece + (g.espece || 0),
@@ -173,8 +199,17 @@ module.exports = function(deps) {
       cheque: s.cheque + (g.cheque || 0),
       reste: s.reste + (g.reste || 0),
       resteCount: s.resteCount + (g.resteCount || 0),
-    }), { revenue: 0, members: 0, entries: 0, decaissement: 0, net: 0, espece: 0, tpe: 0, virement: 0, cheque: 0, reste: 0, resteCount: 0 });
-    res.json({ gyms, total, period: p });
+    }), { revenue: 0, members: 0, entries: 0, doorEntries: 0, decaissement: 0, net: 0, espece: 0, tpe: 0, virement: 0, cheque: 0, reste: 0, resteCount: 0 });
+
+    // Previous equal-length period (per gym) so the PWA can draw trend arrows,
+    // correctly even when a single gym is selected.
+    const prevDates = previousWindow(dates);
+    const prevGyms = GYMS.map(id => {
+      const r = gymRevenue(id, prevDates);
+      return { id, revenue: r.revenue, net: r.net, members: r.members, doorEntries: doorEntries(id, prevDates) };
+    });
+
+    res.json({ gyms, total, prevGyms, period: p });
   });
 
   // GET /api/auralix/transactions?period=today|week|month
