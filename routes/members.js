@@ -3,6 +3,7 @@
 
 const { Router } = require('express');
 const crypto     = require('crypto');
+const sharp      = require('sharp');
 const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 
 module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuotaExceeded, uploadBase64ToStorage, upload }) {
@@ -921,59 +922,113 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
 
 
   // ── POST /api/members/backfill-photos ─────────────────────────────────────
-  // One-time repair: for every member with no photo, re-pull the picture from
-  // their inscription (SQLite cache base64 OR Firestore pending doc), upload to
-  // Storage if it's base64, and save the URL on the member. Admin only.
+  // One-click repair for BOTH confirmed members AND pending inscriptions that
+  // show a placeholder. Photo sources, in order: existing base64/URL from the
+  // inscription cache → the Firestore pending doc → and finally EXTRACTED FROM
+  // THE PDF (the photo is embedded as a DCTDecode JPEG stream, so it survives
+  // even when every other copy was wiped from Render's ephemeral disk). Admin only.
   router.post('/backfill-photos', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
       const gymId = req.body?.gymId && req.body.gymId !== 'all' ? req.body.gymId : null;
-      const rows = lc.db.prepare(
-        `SELECT id, inscription_id, contract_number FROM members_cache
-         WHERE (photo IS NULL OR photo = '') ${gymId ? 'AND gym_id = ?' : ''}
-         LIMIT 300`
+
+      const isUrl = (s) => typeof s === 'string' && /^https?:\/\//.test(s);
+      const isData = (s) => typeof s === 'string' && s.startsWith('data:');
+
+      // Pull the first embedded JPEG (profile photo) out of a jsPDF file and
+      // re-upload it as a clean Storage image. Returns a URL or null.
+      const photoFromPdf = async (pdfUrl, destPath) => {
+        if (!isUrl(pdfUrl)) return null;
+        try {
+          const r = await fetch(pdfUrl);
+          if (!r.ok) return null;
+          const buf = Buffer.from(await r.arrayBuffer());
+          const hay = buf.toString('latin1');
+          const re = /DCTDecode[\s\S]*?stream\r?\n/g;
+          let m;
+          while ((m = re.exec(hay)) !== null) {
+            const start = m.index + m[0].length;
+            const end = hay.indexOf('endstream', start);
+            if (end < 0) continue;
+            const bytes = buf.subarray(start, end);
+            if (bytes[0] === 0xff && bytes[1] === 0xd8) { // JPEG SOI — the profile photo
+              const clean = await sharp(bytes).resize(320, 320, { fit: 'cover' }).jpeg({ quality: 78 }).toBuffer();
+              return await uploadBase64ToStorage('data:image/jpeg;base64,' + clean.toString('base64'), destPath);
+            }
+          }
+        } catch (e) { console.warn('[backfill] pdf extract failed:', e.message); }
+        return null;
+      };
+
+      // Turn any raw source (base64 / url) into a Storage URL.
+      const toUrl = async (raw, destPath) => {
+        if (isUrl(raw)) return raw;
+        if (isData(raw)) return await uploadBase64ToStorage(raw, destPath);
+        return null;
+      };
+
+      let scanned = 0, fixed = 0, fromPdf = 0, noSource = 0, errors = 0;
+
+      // ── 1) Confirmed members with no photo ──────────────────────────────────
+      const memberRows = lc.db.prepare(
+        `SELECT id, inscription_id, contract_number, pdf_url FROM members_cache
+         WHERE (photo IS NULL OR photo = '') ${gymId ? 'AND gym_id = ?' : ''} LIMIT 400`
       ).all(...(gymId ? [gymId] : []));
 
-      // Find a usable photo source for a member (base64 or an existing URL).
-      const findPhoto = async (insId, contract) => {
+      const findInscriptionPhoto = async (insId, contract) => {
         if (insId) {
           const p = lc.getPendingById(insId);
-          if (p?.profile_picture) return p.profile_picture;
-          try {
-            const d = await db.collection('pending_members').doc(insId).get();
-            if (d.exists) { const x = d.data(); if (x.profilePicture || x.photoUrl) return x.profilePicture || x.photoUrl; }
-          } catch (_) {}
+          if (p?.profile_picture) return { raw: p.profile_picture, pdf: p.pdf_url };
+          try { const d = await db.collection('pending_members').doc(insId).get(); if (d.exists) { const x = d.data(); return { raw: x.profilePicture || x.photoUrl, pdf: x.pdfUrl }; } } catch (_) {}
         }
         if (contract) {
           try {
             const q = await db.collection('pending_members').where('contractNumber', '==', contract).limit(1).get();
-            if (!q.empty) {
-              const x = q.docs[0].data();
-              if (x.profilePicture || x.photoUrl) return x.profilePicture || x.photoUrl;
-              const p = lc.getPendingById(q.docs[0].id);
-              if (p?.profile_picture) return p.profile_picture;
-            }
+            if (!q.empty) { const x = q.docs[0].data(); const p = lc.getPendingById(q.docs[0].id); return { raw: x.profilePicture || x.photoUrl || p?.profile_picture, pdf: x.pdfUrl || p?.pdf_url }; }
           } catch (_) {}
         }
-        return null;
+        return { raw: null, pdf: null };
       };
 
-      let scanned = 0, fixed = 0, noSource = 0, errors = 0;
-      for (const m of rows) {
+      for (const m of memberRows) {
         scanned++;
         try {
-          let raw = await findPhoto(m.inscription_id, m.contract_number);
-          if (!raw) { noSource++; continue; }
-          const url = raw.startsWith('data:')
-            ? await uploadBase64ToStorage(raw, `members/${m.id}/profile_repair_${Date.now()}.jpg`)
-            : raw;
+          const src = await findInscriptionPhoto(m.inscription_id, m.contract_number);
+          let url = await toUrl(src.raw, `members/${m.id}/profile_repair_${Date.now()}.jpg`);
+          if (!url) { // last resort: extract from the PDF
+            url = await photoFromPdf(src.pdf || m.pdf_url, `members/${m.id}/profile_frompdf_${Date.now()}.jpg`);
+            if (url) fromPdf++;
+          }
+          if (!url) { noSource++; continue; }
           await db.collection('members').doc(m.id).update({ photo: url, photoRepairedAt: admin.firestore.FieldValue.serverTimestamp() });
           try { lc.db.prepare('UPDATE members_cache SET photo = ? WHERE id = ?').run(url, m.id); } catch (_) {}
           if (apiCache?.profiles) delete apiCache.profiles[m.id];
           fixed++;
-        } catch (e) { errors++; console.warn('[backfill-photos] failed for', m.id, e.message); }
+        } catch (e) { errors++; console.warn('[backfill] member', m.id, e.message); }
       }
-      console.log(`[backfill-photos] scanned=${scanned} fixed=${fixed} noSource=${noSource} errors=${errors}`);
-      res.json({ ok: true, scanned, fixed, noSource, errors });
+
+      // ── 2) Pending inscriptions with no photo but a PDF ─────────────────────
+      const pendRows = lc.db.prepare(
+        `SELECT id, pdf_url, profile_picture FROM pending_cache
+         WHERE (profile_picture IS NULL OR profile_picture = '') AND pdf_url IS NOT NULL AND pdf_url != ''
+         ${gymId ? 'AND gym_id = ?' : ''} LIMIT 400`
+      ).all(...(gymId ? [gymId] : []));
+
+      for (const p of pendRows) {
+        scanned++;
+        try {
+          let pdf = p.pdf_url;
+          if (!isUrl(pdf)) { try { const d = await db.collection('pending_members').doc(p.id).get(); if (d.exists) pdf = d.data().pdfUrl; } catch (_) {} }
+          const url = await photoFromPdf(pdf, `inscriptions/repair/${p.id}_${Date.now()}.jpg`);
+          if (!url) { noSource++; continue; }
+          try { await db.collection('pending_members').doc(p.id).update({ profilePicture: url }); } catch (_) {}
+          try { lc.db.prepare('UPDATE pending_cache SET profile_picture = ? WHERE id = ?').run(url, p.id); } catch (_) {}
+          fixed++; fromPdf++;
+        } catch (e) { errors++; console.warn('[backfill] pending', p.id, e.message); }
+      }
+      if (apiCache?.inscriptions) apiCache.inscriptions = {}; // force fresh pending list
+
+      console.log(`[backfill-photos] scanned=${scanned} fixed=${fixed} fromPdf=${fromPdf} noSource=${noSource} errors=${errors}`);
+      res.json({ ok: true, scanned, fixed, fromPdf, noSource, errors });
     } catch (err) {
       console.error('[backfill-photos] error:', err);
       res.status(500).json({ error: 'Failed to backfill photos' });
