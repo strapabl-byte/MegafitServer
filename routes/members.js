@@ -499,6 +499,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           return {
             cin: diskIns.cin, adresse: diskIns.adresse, ville: diskIns.ville, email: diskIns.email,
             commercial: diskIns.commercial,
+            profilePicture: diskIns.profile_picture || diskIns.profilePicture || null,
             subscriptionName: diskIns.subscriptionName || diskIns.subscription_name,
             contractNumber: diskIns.contractNumber || diskIns.contract_number || member.contractNumber,
             pdfUrl: diskIns.pdfUrl || diskIns.pdf_url || member.pdfUrl,
@@ -525,6 +526,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
             return {
               cin: ins.cin, adresse: ins.adresse, ville: ins.ville, email: ins.email,
               commercial: ins.commercial, subscriptionName: ins.subscriptionName,
+              profilePicture: ins.profilePicture || ins.photoUrl || null,
               contractNumber: ins.contractNumber || member.contractNumber,
               pdfUrl: ins.pdfUrl || member.pdfUrl,
               gymId: ins.gymId || member.location,
@@ -585,7 +587,10 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         }
       }
 
-      const payload = { ...member, inscription, pdfHistory: member.pdfHistory || [] };
+      // Photo fallback: if the member doc has no photo (e.g. a base64 blob was
+      // dropped at confirm), use the linked inscription's photo so the panel shows it.
+      const photoFallback = member.photo || member.image || inscription?.profilePicture || null;
+      const payload = { ...member, photo: photoFallback, image: photoFallback, inscription, pdfHistory: member.pdfHistory || [] };
       apiCache.profiles[memberId] = { data: payload, ts: Date.now() };
       res.json(payload);
 

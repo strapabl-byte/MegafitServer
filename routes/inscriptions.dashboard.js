@@ -258,6 +258,29 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
   router.post('/api/inscriptions/:id/confirm', verifyAzureToken, async (req, res) => {
     try {
       const insId = req.params.id;
+
+      // 🖼️ Resolve the profile photo to a Storage URL BEFORE the transaction —
+      // uploads can't run inside a Firestore transaction, and a base64 blob can
+      // exceed the inline limit and get dropped (member ends up photo-less while
+      // the inscription PDF still has it).
+      let resolvedPhoto = null;
+      try {
+        const preDoc = await db.collection('pending_members').doc(insId).get();
+        const preIns = preDoc.exists ? preDoc.data() : {};
+        const preSql = lc.getPendingById ? lc.getPendingById(insId) : null;
+        const raw = preIns.photoUrl || preIns.profilePicture || preSql?.profile_picture || null;
+        if (raw && typeof raw === 'string') {
+          if (raw.startsWith('data:')) {
+            try {
+              resolvedPhoto = await uploadBase64ToStorage(raw, `members/${insId}/profile_${Date.now()}.jpg`);
+              try { lc.db.prepare('UPDATE pending_cache SET profile_picture = ? WHERE id = ?').run(resolvedPhoto, insId); } catch (_) {}
+            } catch (e) { console.warn('[confirm] photo upload failed, keeping base64:', e.message); resolvedPhoto = raw; }
+          } else {
+            resolvedPhoto = raw; // already a Storage URL
+          }
+        }
+      } catch (e) { console.warn('[confirm] photo pre-resolve failed:', e.message); }
+
       const result = await db.runTransaction(async (t) => {
         const insRef = db.collection('pending_members').doc(insId);
         const insDoc = await t.get(insRef);
@@ -334,10 +357,12 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
         const newMemberRef = db.collection('members').doc();
         const qrToken = crypto.randomBytes(16).toString('hex');
 
-        // 🖼️ Photo: prefer Storage URL, fall back to base64 from SQLite cache, then Firestore
-        const memberPhoto = ins.photoUrl ||
+        // 🖼️ Photo: prefer the pre-resolved Storage URL (uploaded above), then any
+        // existing URL, then a small inline base64 as a last resort.
+        const memberPhoto = resolvedPhoto ||
+          ins.photoUrl ||
           sqliteEntry?.profile_picture ||
-          (ins.profilePicture && ins.profilePicture.length < 200000 ? ins.profilePicture : null) || 
+          (ins.profilePicture && ins.profilePicture.length < 200000 ? ins.profilePicture : null) ||
           null;
 
         t.set(newMemberRef, { ...memberData, qrToken, status: 'Active', photo: memberPhoto });
