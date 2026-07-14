@@ -8,7 +8,8 @@
 //  exactly one succeeds · insufficient funds → 409 · deactivated product → 410 ·
 //  recharge appears in ledger · (append-only enforced structurally in wallet.js).
 
-process.env.NODE_ENV = 'test';           // enables demo-token admin bypass
+process.env.NODE_ENV = 'test';           // non-production
+process.env.ALLOW_DEMO_TOKEN = 'true';   // explicit opt-in for the demo-token admin bypass
 process.env.WALLET_ENABLED = 'true';
 process.env.WALLET_QR_SECRET = 'testsecret_do_not_use_in_prod';
 process.env.WALLET_CURRENCY = 'MGD';

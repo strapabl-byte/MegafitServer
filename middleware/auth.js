@@ -7,6 +7,13 @@ const jwksClient = require('jwks-rsa');
 
 const tenantId = process.env.TENANT_ID;
 
+// 🚨 Fail-open guard rail: in production, TENANT_ID + CLIENT_ID MUST be set,
+// otherwise the tenant/audience checks below become no-ops and any validly
+// signed Azure token (from ANY tenant) is accepted. Warn loudly at boot.
+if (process.env.NODE_ENV === 'production' && (!process.env.TENANT_ID || !process.env.CLIENT_ID)) {
+  console.error('🚨 SECURITY: TENANT_ID and/or CLIENT_ID missing in production — Azure tenant/audience verification is WEAKENED (auth may fail open). Set both env vars.');
+}
+
 const jwks = jwksClient({
   // Use 'common' when TENANT_ID is not set (local dev without .env) so JWT
   // signature verification still works against Azure's public keys.
@@ -46,19 +53,19 @@ function verifyAzureToken(req, res, next) {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
 
-  // 🛠️ DEVELOPMENT BYPASS — disabled in production
-  if (token === 'demo-token' && process.env.NODE_ENV !== 'production') {
-    console.warn('⚠️ [DEV ONLY] demo-token bypass active.');
+  // 🛠️ DEVELOPMENT BYPASS — fail-closed. Requires BOTH a non-production
+  // NODE_ENV AND an explicit opt-in flag, so a blank/misconfigured NODE_ENV on
+  // a deployed host can never silently grant admin via a guessable static token.
+  if (token === 'demo-token') {
+    const demoAllowed = process.env.NODE_ENV !== 'production' && process.env.ALLOW_DEMO_TOKEN === 'true';
+    if (!demoAllowed) return res.status(401).json({ error: 'demo-token not allowed' });
+    console.warn('⚠️ [DEV ONLY] demo-token bypass active (ALLOW_DEMO_TOKEN).');
     req.user = { name: 'Super Admin (Bypass)', oid: 'demo-admin-oid', roles: ['Admin'], preferred_username: 'admin@local.dev' };
     req.isAdmin   = true;
     req.isManager = false;
     req.assignedGyms   = ['all'];
     req.hasAccessToGym = () => true;
     return next();
-  }
-
-  if (token === 'demo-token' && process.env.NODE_ENV === 'production') {
-    return res.status(401).json({ error: 'demo-token not allowed in production' });
   }
 
   if (!token) return res.status(401).json({ error: 'Missing token' });

@@ -226,6 +226,10 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
 
       const oldBalance = Number(member.balance || 0);
       const payAmount = Number(amount);
+      // 🔒 Amount validation — reject negative / NaN / overpay so the balance and
+      // the CA ledger can't be corrupted (negative would INCREASE the balance).
+      if (!Number.isFinite(payAmount) || payAmount <= 0) return res.status(400).json({ error: 'Montant invalide' });
+      if (payAmount > oldBalance + 0.5) return res.status(400).json({ error: 'Montant supérieur au reste dû', reste: oldBalance });
       const newBalance = Math.max(0, oldBalance - payAmount);
 
       // Upload images
@@ -792,9 +796,17 @@ module.exports = function paymentsRouter({ db, admin, lc, apiCache, invalidateCa
   router.post('/complete-inscription', verifyAzureToken, async (req, res) => {
     try {
       const { inscriptionId, amount, plan, method, fullName, phone, note } = req.body;
+      if (!inscriptionId) return res.status(400).json({ error: 'inscriptionId requis' });
       const inscriptionRef = db.collection('pending_members').doc(inscriptionId);
       const insDoc = await inscriptionRef.get();
       const insData = insDoc.exists ? insDoc.data() : { telephone: phone };
+
+      // 🔒 SECURITY: amount sanity + gym-scope (a manager must not book a payment
+      // against another club's CA, and the amount can't be negative/NaN/absurd).
+      const gymId = insData.gymId || 'dokarat';
+      if (!req.hasAccessToGym(gymId)) return res.status(403).json({ error: 'Access Denied: You do not have access to this gym' });
+      const amt = Number(amount);
+      if (!Number.isFinite(amt) || amt < 0 || amt > 1000000) return res.status(400).json({ error: 'Montant invalide' });
 
       // 🛡️ ANTI-DUP: Check if payment already recorded for this inscription
       const existingPay = await db.collection('payments').where('inscriptionId', '==', inscriptionId).limit(1).get();
