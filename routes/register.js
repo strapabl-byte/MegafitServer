@@ -5,8 +5,11 @@ const { Router } = require('express');
 const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
 const { notifyDavidDecaissement } = require('../services/david-notify');
 
+const { logActivity, userFromReq } = require('../services/activity-logger');
+
 module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExceeded, getCachedOrFetch, invalidateCache, syncGymCounts }) {
   const router = Router();
+  const actLog = (opts) => logActivity({ db, admin, lc }, opts);
 
   // ── GET /api/register ─────────────────────────────────────────────────────
   router.get('/', verifyAzureToken, async (req, res) => {
@@ -103,7 +106,7 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
   // ── POST /api/register/entry ──────────────────────────────────────────────
   router.post('/entry', verifyAzureToken, async (req, res) => {
     try {
-      const { date, gymId = 'dokarat', ...entry } = req.body;
+      const { date, gymId = 'dokarat', viaPin, ...entry } = req.body;
       if (!date) return res.status(400).json({ error: 'date required' });
       const docId = `${gymId}_${date}`;
 
@@ -137,6 +140,16 @@ module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExcee
       lc.upsertRegister(gymId, date, [{ id: ref.id, ...newDoc.data() }]);
       
       invalidateCache(apiCache.calendar, `${gymId}_${new Date(date).getFullYear()}`);
+
+      // 🔒 AUDIT: attribute the register add (who + what), and flag if it was
+      // done through the manager code (viaPin) — so nobody can add silently.
+      actLog({
+        action: `Registre — « ${entry.nom || 'inscription'} » ajouté${entry.prix ? ` (${Number(entry.prix).toLocaleString('fr-FR')} DH)` : ''}${viaPin ? ' — via CODE responsable' : ''}`,
+        page: 'Registre', gymId, method: 'POST',
+        source: viaPin ? 'register_add_pin' : 'register_add',
+        user: userFromReq(req),
+      });
+
       res.json({ ok: true, id: ref.id });
     } catch (err) {
       console.error('POST /api/register/entry error:', err);
@@ -1132,12 +1145,26 @@ Rules:
   // ── POST /api/register/verify-manager-pin ────────────────────────────────
   router.post('/verify-manager-pin', verifyAzureToken, async (req, res) => {
     try {
-      const { gymId, pin } = req.body;
+      const { gymId, pin, purpose } = req.body;
       if (!gymId || !pin) return res.status(400).json({ ok: false });
       const snap = await db.collection('megafit_config').doc('manager_pins').get();
       const data = snap.exists ? snap.data() : {};
       const stored = String(data[gymId] || '');
-      res.json({ ok: stored !== '' && stored === String(pin) });
+      const ok = stored !== '' && stored === String(pin);
+
+      // 🔒 AUDIT: record every use of the manager code — success AND failed
+      // attempts — so a super admin can see who unlocked the register and why.
+      const purposeLabel = { addRow: 'ajouter une inscription', editRow: 'modifier une ligne', commercial: 'changer le commercial' }[purpose] || (purpose || 'accès registre');
+      actLog({
+        action: ok ? `Code responsable utilisé — ${purposeLabel}` : `Code responsable INCORRECT (tentative) — ${purposeLabel}`,
+        page: 'Registre',
+        gymId,
+        method: 'PIN',
+        source: ok ? 'pin_unlock' : 'pin_fail',
+        user: userFromReq(req),
+      });
+
+      res.json({ ok });
     } catch (err) {
       res.status(500).json({ ok: false, error: 'Verification failed' });
     }

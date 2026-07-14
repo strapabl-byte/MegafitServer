@@ -187,8 +187,11 @@ const auditLogger = (req, res, next) => {
     if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method) && [200, 201].includes(res.statusCode)) {
       
       const path = req.originalUrl || req.path;
-      // Skip auth/config routes
-      if (path.includes('/config') || path.includes('/chat')) return;
+      // Skip auth/config routes + routes that write their own richer audit log
+      // (register entry/PIN, page-visit beacon) to avoid mislabeled duplicates.
+      if (path.includes('/config') || path.includes('/chat') ||
+          path.includes('/verify-manager-pin') || path.includes('/manager-pin') ||
+          path.includes('/activity/track') || path.includes('/register/entry')) return;
       
       let action = 'System Activity';
       

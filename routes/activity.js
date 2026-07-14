@@ -1,5 +1,6 @@
 const express = require('express');
 const { verifyAzureToken } = require('../middleware/auth');
+const { logActivity, userFromReq } = require('../services/activity-logger');
 
 module.exports = function (deps) {
   const router = express.Router();
@@ -146,6 +147,30 @@ module.exports = function (deps) {
     } catch (err) {
       console.error('[PWA-Log] Error:', err);
       res.status(500).json({ error: 'Failed to log activity' });
+    }
+  });
+
+  // ── POST /api/activity/track ──────────────────────────────────────────────
+  // Page-visit beacon fired by the dashboard on every route change. Records
+  // WHO (admin/manager/RH…) viewed WHICH page — the "which page he visited"
+  // half of the audit trail (the auditLogger only catches mutations, never GETs).
+  router.post('/api/activity/track', verifyAzureToken, (req, res) => {
+    try {
+      const { page, path, gymId } = req.body || {};
+      if (!page) return res.status(400).json({ error: 'page required' });
+      logActivity(deps, {
+        action: `A consulté « ${String(page).slice(0, 60)} »`,
+        page: String(page).slice(0, 60),
+        gymId: gymId || req.assignedGyms?.[0] || 'system',
+        method: 'VIEW',
+        source: 'page_visit',
+        user: userFromReq(req, path),
+      });
+      activityCache = {};
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('[activity/track] Error:', err.message);
+      res.status(500).json({ error: 'Failed to track page' });
     }
   });
 

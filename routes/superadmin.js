@@ -109,6 +109,7 @@ module.exports = function superadminRouter({ db, admin, lc }) {
             userEmail: r.user_email || '',
             userRole: r.user_role || 'unknown',
             gymId: r.gym_id || 'system',
+            eventType: r.source || 'mutation',
           };
         });
         return res.json({ ok: true, logs, count: logs.length, source: 'sqlite' });
@@ -170,6 +171,7 @@ module.exports = function superadminRouter({ db, admin, lc }) {
           userEmail: data.userEmail || email || '',
           userRole,
           gymId: data.gymId || 'system',
+          eventType: data.source || 'mutation',
         };
       });
 
