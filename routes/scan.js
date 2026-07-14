@@ -740,20 +740,31 @@ function router(deps = {}) {
         } catch (_) { /* use original on error */ }
       }
 
-      // Recto: CIN number, nom, prénom, date naissance (4 fields only)
+      // ⚠️ NO filled-in example values in these prompts: when the photo is blurry the
+      // model used to echo the sample ("BELLALA OMAR / CD608153") verbatim instead of
+      // returning null. We now describe the KEYS only + force JSON mode, and null-out
+      // any residual echo in the backstop below.
       const rectoPrompt =
-        'Moroccan CIN card front. Return ONLY this JSON (no text, no markdown):\n' +
-        '{"cin":"CD608153","nom":"BELLALA","prenom":"OMAR","dateNaissance":"YYYY-MM-DD","lieuNaissance":"BIR TALEB SIDI KACEM","ville":null,"adresse":null}\n' +
-        'CIN=top-left letters+digits. NOM=family name. PRENOM=first name. Date as YYYY-MM-DD. null if unreadable.';
+        'You are reading the FRONT (recto) of a Moroccan national ID card (CIN).\n' +
+        'Extract ONLY the text actually printed on THIS image. Never invent, guess, or reuse example values.\n' +
+        'Return a JSON object with EXACTLY these keys: cin, nom, prenom, dateNaissance, lieuNaissance, ville, adresse.\n' +
+        '  cin           = ID number, top-left, uppercase letters + digits\n' +
+        '  nom           = family name (NOM)\n' +
+        '  prenom        = first name (PRENOM)\n' +
+        '  dateNaissance = date of birth, formatted YYYY-MM-DD\n' +
+        '  lieuNaissance = place of birth\n' +
+        '  ville         = null (not printed on the front)\n' +
+        '  adresse       = null (not printed on the front)\n' +
+        'If any field is blurry, cropped, or unreadable, set it to null. Do NOT fill it with a placeholder name.';
 
-      // Verso: address line starting with "Adresse" label + extract city
       const versoPrompt =
-        'Moroccan CIN card back (verso). Read the full address after the label "Adresse".\n' +
-        'Extract the CITY (ville) from the address text — it is usually a Moroccan city like Fès, Casablanca, Rabat, Meknès, Marrakech, Tanger, Oujda, Kénitra, Tétouan, Safi, etc.\n' +
-        'IMPORTANT: Do NOT copy the example below. Extract the REAL city from the actual card image.\n' +
-        'Return ONLY this JSON (no text, no markdown):\n' +
-        '{"cin":null,"nom":null,"prenom":null,"dateNaissance":null,"lieuNaissance":null,"ville":"Fès","adresse":"ROUTE IMMOUZER HAY NARJISS FES"}\n' +
-        'ville = the city name extracted from the address. adresse = full address text. null if unreadable.';
+        'You are reading the BACK (verso) of a Moroccan national ID card (CIN).\n' +
+        'Extract ONLY the text actually printed on THIS image. Never invent, guess, or reuse example values.\n' +
+        'Return a JSON object with EXACTLY these keys: cin, nom, prenom, dateNaissance, lieuNaissance, ville, adresse.\n' +
+        '  adresse = the full address printed after the label "Adresse"\n' +
+        '  ville   = the Moroccan city read from that address (e.g. Fes, Casablanca, Rabat, Meknes, Marrakech, Tanger, Oujda, Kenitra, Tetouan, Safi...)\n' +
+        '  cin, nom, prenom, dateNaissance, lieuNaissance = null (not on the back)\n' +
+        'If the address or city is unreadable, set it to null. Do NOT guess.';
 
       const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -766,6 +777,7 @@ function router(deps = {}) {
           ]}],
           max_tokens:  120,
           temperature: 0.0,
+          response_format: { type: 'json_object' },
         }),
       });
 
@@ -781,6 +793,20 @@ function router(deps = {}) {
       if (!jsonHit) return res.json({ cin:null, nom:null, prenom:null, dateNaissance:null, lieuNaissance:null, ville:null, adresse:null });
 
       const fields = JSON.parse(jsonHit[0]);
+
+      // 🛡️ Anti-echo backstop: if the capture was unreadable and the model parroted the
+      // old prompt sample (or left a <placeholder> token), drop it — a fake identity must
+      // never reach the inscription form. Real cards won't match this exact tuple.
+      for (const k of Object.keys(fields)) {
+        if (typeof fields[k] === 'string' && (fields[k].includes('<') || fields[k].includes('>') || !fields[k].trim())) fields[k] = null;
+      }
+      const echoedExample =
+        (fields.cin && String(fields.cin).toUpperCase().replace(/\s/g, '') === 'CD608153') ||
+        (String(fields.nom || '').trim().toUpperCase() === 'BELLALA' && String(fields.prenom || '').trim().toUpperCase() === 'OMAR');
+      if (echoedExample) {
+        console.warn('[scan-cin] echoed prompt example detected (unreadable capture) — nulling identity fields');
+        fields.cin = fields.nom = fields.prenom = fields.dateNaissance = fields.lieuNaissance = null;
+      }
 
       // Date: DD/MM/YYYY or DD.MM.YYYY → YYYY-MM-DD
       if (fields.dateNaissance && !/^\d{4}-\d{2}-\d{2}$/.test(fields.dateNaissance)) {
