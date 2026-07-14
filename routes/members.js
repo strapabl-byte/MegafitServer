@@ -933,15 +933,27 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
 
       const isUrl = (s) => typeof s === 'string' && /^https?:\/\//.test(s);
       const isData = (s) => typeof s === 'string' && s.startsWith('data:');
+      // 🔒 SSRF guard: only ever fetch from Firebase/Google Storage hosts over
+      // https — never an internal IP, metadata endpoint, or arbitrary host.
+      const isStorageUrl = (s) => {
+        try {
+          const u = new URL(s);
+          return u.protocol === 'https:' &&
+            (u.hostname === 'firebasestorage.googleapis.com' || u.hostname === 'storage.googleapis.com' || u.hostname.endsWith('.storage.googleapis.com'));
+        } catch { return false; }
+      };
 
       // Pull the first embedded JPEG (profile photo) out of a jsPDF file and
       // re-upload it as a clean Storage image. Returns a URL or null.
       const photoFromPdf = async (pdfUrl, destPath) => {
-        if (!isUrl(pdfUrl)) return null;
+        if (!isStorageUrl(pdfUrl)) return null; // SSRF guard
         try {
           const r = await fetch(pdfUrl);
           if (!r.ok) return null;
+          const len = Number(r.headers.get('content-length') || 0);
+          if (len > 25 * 1024 * 1024) return null; // cap: never buffer >25MB
           const buf = Buffer.from(await r.arrayBuffer());
+          if (buf.length > 25 * 1024 * 1024) return null;
           const hay = buf.toString('latin1');
           const re = /DCTDecode[\s\S]*?stream\r?\n/g;
           let m;

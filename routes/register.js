@@ -10,6 +10,8 @@ const { logActivity, userFromReq } = require('../services/activity-logger');
 module.exports = function registerRouter({ db, admin, lc, apiCache, isQuotaExceeded, getCachedOrFetch, invalidateCache, syncGymCounts }) {
   const router = Router();
   const actLog = (opts) => logActivity({ db, admin, lc }, opts);
+  // Manager-PIN brute-force guard: lock a user out after 5 wrong tries / 15 min.
+  const pinFails = new Map(); // key: `${email}|${gymId}` -> { count, until }
 
   // ── GET /api/register ─────────────────────────────────────────────────────
   router.get('/', verifyAzureToken, async (req, res) => {
@@ -1147,10 +1149,27 @@ Rules:
     try {
       const { gymId, pin, purpose } = req.body;
       if (!gymId || !pin) return res.status(400).json({ ok: false });
+
+      // 🔒 Brute-force lockout (per user + gym)
+      const email = (req.user?.preferred_username || req.user?.oid || 'unknown').toLowerCase();
+      const key = `${email}|${gymId}`;
+      const now = Date.now();
+      const rec = pinFails.get(key);
+      if (rec && rec.until > now) {
+        actLog({ action: `Code responsable BLOQUÉ (trop de tentatives)`, page: 'Registre', gymId, method: 'PIN', source: 'pin_fail', user: userFromReq(req) });
+        return res.status(429).json({ ok: false, error: 'Trop de tentatives. Réessayez dans quelques minutes.' });
+      }
+
       const snap = await db.collection('megafit_config').doc('manager_pins').get();
       const data = snap.exists ? snap.data() : {};
       const stored = String(data[gymId] || '');
       const ok = stored !== '' && stored === String(pin);
+
+      if (ok) { pinFails.delete(key); }
+      else {
+        const count = (rec?.count || 0) + 1;
+        pinFails.set(key, { count, until: count >= 5 ? now + 15 * 60 * 1000 : 0 });
+      }
 
       // 🔒 AUDIT: record every use of the manager code — success AND failed
       // attempts — so a super admin can see who unlocked the register and why.
