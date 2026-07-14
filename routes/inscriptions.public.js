@@ -591,9 +591,10 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
     }
   });
 
-  // ── GET /public/members/search ────────────────────────────────────────────
-  // Supports allGyms=true for Multiclub search (searches across all gyms)
-  router.get('/public/members/search', async (req, res) => {
+  // ── GET /public/members/search ─────────────────── 🔒 DUAL-AUTH (secret or Azure) ──
+  // Supports allGyms=true for Multiclub search (searches across all gyms).
+  // Gated to stop the open internet from harvesting member PII (name/phone/CIN/photo).
+  router.get('/public/members/search', requireDebtorAccess, async (req, res) => {
     try {
       const q = (req.query.q || '').trim().toLowerCase();
       if (q.length < 2) return res.json([]);
@@ -637,8 +638,8 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
     }
   });
 
-  // ── GET /public/members/:id/detail ───────────────────────────────────────
-  router.get('/public/members/:id/detail', async (req, res) => {
+  // ── GET /public/members/:id/detail ─────────────── 🔒 DUAL-AUTH (secret or Azure) ──
+  router.get('/public/members/:id/detail', requireDebtorAccess, async (req, res) => {
     try {
       const memberId = req.params.id;
       if (!memberId) return res.status(400).json({ error: 'id required' });
@@ -677,9 +678,10 @@ module.exports = function inscriptionsPublicRouter({ db, admin, lc, apiCache, up
     }
   });
 
-  // ── POST /public/multiclub ───────────────────────────────────────────────
-  // Enable Multiclub access for an existing member. No auth required (QR commercial).
-  router.post('/public/multiclub', async (req, res) => {
+  // ── POST /public/multiclub ─────────────────────── 🔒 DUAL-AUTH (secret or Azure) ──
+  // Enable Multiclub access for an existing member. Records a payment, so it must
+  // not be open: the tablet (PWA) authenticates with X-Inject-Secret.
+  router.post('/public/multiclub', requireDebtorAccess, async (req, res) => {
     try {
       const {
         memberId, gymId: rawGymId,
