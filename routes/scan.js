@@ -740,27 +740,23 @@ function router(deps = {}) {
         } catch (_) { /* use original on error */ }
       }
 
-      // JSON *template* with EMPTY placeholders: gives the model the exact output shape
-      // it needs to read the fields reliably, WITHOUT a fake identity it could echo on a
-      // blurry photo. Empty strings can't leak a real name; the backstop still nulls any
-      // residual echo of the old sample ("BELLALA/OMAR/CD608153").
+      // ✅ ORIGINAL working prompt — reliably reads nom/prenom. The realistic example is
+      // deliberate: the model uses it to learn the CIN layout + output shape. Its ONLY
+      // downside (a blurry photo echoing this sample) is handled surgically by the
+      // anti-echo backstop below, which blanks BELLALA/OMAR/CD608153 WITHOUT affecting
+      // extraction on real, readable cards.
       const rectoPrompt =
-        "Front (recto) of a Moroccan national ID card (Carte Nationale d'Identite). " +
-        'Read the REAL printed text on THIS card and fill this JSON template (keep the keys, replace the empty strings):\n' +
-        '{"cin":"","nom":"","prenom":"","dateNaissance":"","lieuNaissance":"","ville":null,"adresse":null}\n' +
-        'nom = the FAMILY NAME (surname line, in capital letters). ' +
-        'prenom = the FIRST NAME / given name (the other capital-letters line, printed next to "Ne le" / "Nee le"). ' +
-        'cin = the ID number near the "N" label (letters + digits, e.g. one or two letters then digits). ' +
-        'dateNaissance = the date after "Ne(e) le", formatted YYYY-MM-DD. ' +
-        'lieuNaissance = the place printed after "a". ville and adresse stay null (they are on the back). ' +
-        'Read every name and number you can see on the card; use null only for a field that is truly absent or unreadable.';
+        'Moroccan CIN card front. Return ONLY this JSON (no text, no markdown):\n' +
+        '{"cin":"CD608153","nom":"BELLALA","prenom":"OMAR","dateNaissance":"YYYY-MM-DD","lieuNaissance":"BIR TALEB SIDI KACEM","ville":null,"adresse":null}\n' +
+        'CIN=top-left letters+digits. NOM=family name. PRENOM=first name. Date as YYYY-MM-DD. null if unreadable.';
 
       const versoPrompt =
-        'Back (verso) of a Moroccan national ID card. Read the REAL printed text and fill this JSON template:\n' +
-        '{"cin":null,"nom":null,"prenom":null,"dateNaissance":null,"lieuNaissance":null,"ville":"","adresse":""}\n' +
-        'adresse = the full address printed after the label "Adresse". ' +
-        'ville = the Moroccan city inside that address (Fes, Casablanca, Rabat, Meknes, Marrakech, Tanger, Oujda, Kenitra, Tetouan, Safi...). ' +
-        'The other keys stay null (they are on the front). Use null only if the address is genuinely unreadable.';
+        'Moroccan CIN card back (verso). Read the full address after the label "Adresse".\n' +
+        'Extract the CITY (ville) from the address text — it is usually a Moroccan city like Fès, Casablanca, Rabat, Meknès, Marrakech, Tanger, Oujda, Kénitra, Tétouan, Safi, etc.\n' +
+        'IMPORTANT: Do NOT copy the example below. Extract the REAL city from the actual card image.\n' +
+        'Return ONLY this JSON (no text, no markdown):\n' +
+        '{"cin":null,"nom":null,"prenom":null,"dateNaissance":null,"lieuNaissance":null,"ville":"Fès","adresse":"ROUTE IMMOUZER HAY NARJISS FES"}\n' +
+        'ville = the city name extracted from the address. adresse = full address text. null if unreadable.';
 
       const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -773,7 +769,6 @@ function router(deps = {}) {
           ]}],
           max_tokens:  120,
           temperature: 0.0,
-          response_format: { type: 'json_object' },
         }),
       });
 
