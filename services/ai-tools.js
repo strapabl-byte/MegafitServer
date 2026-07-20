@@ -46,21 +46,34 @@ const EN_MONTHS = { january: 1, february: 2, march: 3, april: 4, may: 5, june: 6
 
 function nowMorocco() { return new Date(Date.now() + 3600000); }
 function currentYm() { return nowMorocco().toISOString().slice(0, 10).slice(0, 7); }
+function shiftYm(ym, delta) {
+  let [y, m] = ym.split('-').map(Number);
+  m += delta;
+  while (m < 1) { m += 12; y -= 1; }
+  while (m > 12) { m -= 12; y += 1; }
+  return `${y}-${String(m).padStart(2, '0')}`;
+}
 
-// Accept 'YYYY-MM', 'YYYY', a French/English month name ("Mai", "mai", "may"),
-// or empty → current month. Month names assume the current year (or last year if
-// that month hasn't happened yet this year).
+// Accept 'YYYY-MM', a French/English month name ("Mai", "may"), a RELATIVE phrase
+// ("mois dernier", "ce mois", "last month", "il y a 2 mois"), or empty → current
+// month. Robust so the model can pass natural language and still hit the right month.
 function resolveMonth(input) {
   const cur = currentYm();
   if (!input) return cur;
   const s = String(input).trim().toLowerCase();
   if (/^\d{4}-\d{2}$/.test(s)) return s;
   if (/^\d{4}$/.test(s)) return null; // whole-year handled separately by caller
+  // ── relative phrases ──
+  if (/\b(ce mois|mois courant|mois[- ]ci|mois en cours|this month|current month|actuel)\b/.test(s)) return cur;
+  if (/\b(mois dernier|mois pass[eé]|mois pr[eé]c[eé]dent|last month|previous month|le mois d'avant)\b/.test(s)) return shiftYm(cur, -1);
+  if (/\b(avant[- ]dernier mois|il y a 2 mois|deux mois|two months ago)\b/.test(s)) return shiftYm(cur, -2);
+  if (/\b(il y a 3 mois|trois mois|three months ago)\b/.test(s)) return shiftYm(cur, -3);
+  // ── month names (assume current year, or last year if that month is still ahead) ──
   const m = FR_MONTHS[s] ?? EN_MONTHS[s];
   if (m) {
     const now = nowMorocco();
     let year = now.getFullYear();
-    if (m > now.getMonth() + 1) year -= 1; // e.g. asking "décembre" in March → last year
+    if (m > now.getMonth() + 1) year -= 1;
     return `${year}-${String(m).padStart(2, '0')}`;
   }
   return cur;
@@ -102,10 +115,10 @@ const TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'get_club_revenue',
-      description: "Chiffre d'affaires d'un club (ou tous) pour un mois donné: total, répartition par mode de paiement (espèces/carte/virement/chèque), nombre d'inscriptions, top formules, et comparaison au mois précédent.",
+      description: "Chiffre d'affaires d'un club (ou tous) pour un mois donné: total, répartition par mode de paiement, inscriptions, top formules, comparaison au mois précédent. Si club='all', retourne AUSSI 'par_club' (le CA de chacun des 4 clubs) — utilise CE champ pour répondre à 'quel club a le plus/le moins de CA', jamais le total.",
       parameters: { type: 'object', properties: {
         club: { type: 'string', description: "Club: 'all', 'dokarat', 'marjane', 'casa1', 'casa2', ou un nom (Casa Anfa...)" },
-        month: { type: 'string', description: "Mois au format 'YYYY-MM' ou nom du mois (Mai, mai, may). Défaut = mois courant." },
+        month: { type: 'string', description: "Mois: 'YYYY-MM', nom (Mai), ou relatif ('mois dernier', 'ce mois'). Défaut = mois courant." },
       } },
     },
   },
@@ -115,7 +128,7 @@ const TOOL_SCHEMAS = [
       name: 'list_decaissements',
       description: "Liste les décaissements (dépenses/sorties de caisse) d'un mois, triés par montant ou date. Utile pour 'le plus gros décaissement de Mai', 'les dépenses de ce mois', etc. Retourne chaque dépense avec montant, raison, catégorie, club, date, statut.",
       parameters: { type: 'object', properties: {
-        month: { type: 'string', description: "Mois 'YYYY-MM' ou nom (Mai). Défaut = mois courant." },
+        month: { type: 'string', description: "Mois: 'YYYY-MM', nom (Mai), ou relatif ('mois dernier', 'ce mois'). Défaut = mois courant." },
         gym: { type: 'string', description: "Club ou 'all'" },
         sort: { type: 'string', enum: ['amount', 'date'], description: "Tri: 'amount' (plus gros d'abord, défaut) ou 'date'" },
         limit: { type: 'integer', description: 'Nombre max (défaut 15)' },
@@ -259,9 +272,17 @@ function toolClubRevenue(q, { club, month }) {
   const prev = q.get(`SELECT COALESCE(SUM(CAST(tpe AS REAL)+CAST(espece AS REAL)+CAST(virement AS REAL)+CAST(cheque AS REAL)),0) v FROM register_cache WHERE strftime('%Y-%m',date)=? AND ${sc.where}`, prevYm);
   const prevTotal = Math.round(prev?.v || 0);
   const formulas = q.all(`SELECT abonnement name, COUNT(*) cnt, ROUND(SUM(CAST(prix AS REAL)),0) rev FROM register_cache WHERE strftime('%Y-%m',date)=? AND ${sc.where} AND abonnement IS NOT NULL AND abonnement!='' GROUP BY abonnement ORDER BY rev DESC LIMIT 6`, ym);
+  // When scope is 'all', break out each club so the model attributes CA correctly
+  // ("quel club a le plus") instead of mislabeling the empire total as one club.
+  let par_club;
+  if (sc.scope === 'all') {
+    const perGym = q.all(`SELECT gym_id, ROUND(SUM(CAST(tpe AS REAL)+CAST(espece AS REAL)+CAST(virement AS REAL)+CAST(cheque AS REAL)),0) rev, COUNT(*) inc FROM register_cache WHERE strftime('%Y-%m',date)=? AND ${sc.where} GROUP BY gym_id ORDER BY rev DESC`, ym);
+    par_club = (Array.isArray(perGym) ? perGym : []).map(g => ({ club: GYM_NAMES[g.gym_id] || g.gym_id, ca_dh: Math.round(g.rev || 0), inscriptions: g.inc }));
+  }
   return {
     club: sc.scope === 'all' ? 'ALL EMPIRE' : GYM_NAMES[sc.scope], mois: ym,
     ca_total_dh: total, inscriptions: row?.c || 0,
+    ...(par_club ? { note: "ca_total_dh = total des 4 clubs. Pour le CA par club, utilise par_club.", par_club } : {}),
     modes_paiement: { especes_dh: Math.round(row?.es || 0), carte_tpe_dh: Math.round(row?.tp || 0), virement_dh: Math.round(row?.vi || 0), cheque_dh: Math.round(row?.ch || 0) },
     mois_precedent_dh: prevTotal, variation_pct: prevTotal > 0 ? parseFloat(((total - prevTotal) / prevTotal * 100).toFixed(1)) : null,
     top_formules: (Array.isArray(formulas) ? formulas : []).map(f => ({ formule: f.name, vendus: f.cnt, ca_dh: Math.round(f.rev || 0) })),
