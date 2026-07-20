@@ -17,7 +17,15 @@ const hasOpenAI = () => !!process.env.OPENAI_API_KEY;
 async function openaiCall(messages, { tools, model, maxTokens = 1400, temperature = 0.3 } = {}) {
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw new Error('OPENAI_API_KEY not configured');
-  const body = { model: model || OPENAI_MODEL, messages, temperature, max_tokens: maxTokens };
+  const mdl = model || OPENAI_MODEL;
+  // gpt-5.x / reasoning models (o1/o3/o4) use `max_completion_tokens` and reject a
+  // custom `temperature` (only the default is allowed). gpt-4o uses the classic params.
+  const isNextGen = /^(gpt-5|o1|o3|o4)/i.test(mdl);
+  const body = { model: mdl, messages };
+  // Reasoning models spend part of the budget on hidden reasoning tokens — give a
+  // floor so the visible answer/brief isn't starved to empty.
+  if (isNextGen) { body.max_completion_tokens = Math.max(maxTokens, 2500); }
+  else { body.max_tokens = maxTokens; body.temperature = temperature; }
   if (tools?.length) { body.tools = tools; body.tool_choice = 'auto'; }
   const res = await fetch(OPENAI_URL, {
     method: 'POST',
@@ -1114,7 +1122,7 @@ Chaque point avec des CHIFFRES RÉELS tirés des données (DH, %). Note: Casa An
         { role: 'system', content: sys },
         { role: 'user', content: `Données complètes (${s.meta.gym_scope}, période ${s.meta.period}, jour ${s.meta.day_of_month}/${s.meta.days_in_month}):\n${JSON.stringify(briefContext(s))}` },
       ];
-      const data = await openaiCall(messages, { maxTokens: 1700, temperature: 0.35 });
+      const data = await openaiCall(messages, { maxTokens: 4000, temperature: 0.35 });
       const brief = data.choices?.[0]?.message?.content || '';
 
       try {
