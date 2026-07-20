@@ -4,6 +4,95 @@
 
 const { Router } = require('express');
 const { verifyAzureToken, requireAdmin } = require('../middleware/auth');
+const aiTools = require('../services/ai-tools'); // retrieval tool engine (OpenAI function-calling)
+
+// ─── OpenAI caller (function-calling capable) ───────────────────────────────
+// Auralix's "director brain". OPENAI_API_KEY is already configured (CIN scanner
+// uses it). gpt-4o is the default for reliable multi-step tool-use; override
+// with AURALIX_OPENAI_MODEL (e.g. a gpt-5-class id) once confirmed available.
+const OPENAI_URL   = 'https://api.openai.com/v1/chat/completions';
+const OPENAI_MODEL = process.env.AURALIX_OPENAI_MODEL || 'gpt-4o';
+const hasOpenAI = () => !!process.env.OPENAI_API_KEY;
+
+async function openaiCall(messages, { tools, model, maxTokens = 1400, temperature = 0.3 } = {}) {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) throw new Error('OPENAI_API_KEY not configured');
+  const body = { model: model || OPENAI_MODEL, messages, temperature, max_tokens: maxTokens };
+  if (tools?.length) { body.tools = tools; body.tool_choice = 'auto'; }
+  const res = await fetch(OPENAI_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) { const t = await res.text(); const e = new Error(`OpenAI HTTP ${res.status}: ${t.slice(0, 300)}`); e.httpStatus = res.status; throw e; }
+  return res.json();
+}
+
+// Function-calling loop: the model asks for a tool → we run it on REAL data →
+// feed the rows back → it reasons and answers. This is what removes the old
+// 3500-char snapshot keyhole for chat: the model fetches exactly what it needs.
+async function openaiAgentAnswer(db, systemPrompt, question) {
+  const messages = [{ role: 'system', content: systemPrompt }, { role: 'user', content: question }];
+  const toolsUsed = [];
+  for (let hop = 0; hop < 6; hop++) {
+    const data = await openaiCall(messages, { tools: aiTools.TOOL_SCHEMAS });
+    const msg = data.choices?.[0]?.message;
+    if (!msg) break;
+    messages.push(msg);
+    if (msg.tool_calls?.length) {
+      for (const tc of msg.tool_calls) {
+        let args = {}; try { args = JSON.parse(tc.function.arguments || '{}'); } catch {}
+        const result = aiTools.execute(db, tc.function.name, args);
+        toolsUsed.push(tc.function.name);
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result).slice(0, 7000) });
+      }
+      continue; // let the model read the results
+    }
+    return { reply: msg.content || '', toolsUsed };
+  }
+  return { reply: 'Analyse trop longue — reformule la question.', toolsUsed };
+}
+
+// Lean system prompt for the chat path: identity + compact KPI summary. Details
+// come from tools, not from stuffing the whole snapshot into the prompt.
+function buildAskSystemPrompt(snap, sig) {
+  const r = snap.revenue, meta = snap.meta;
+  return `Tu es AURALIX, le DIRECTEUR IA de MegaFit (4 clubs: Fès Doukkarate, Fès Saïss, Casa Anfa, Casa Lady). Opérateur d'élite: analytique, direct, orienté croissance et action.
+
+TU DISPOSES D'OUTILS pour interroger les données RÉELLES: revenus par club/mois, membres (get_member), décaissements et leur catégorie, dettes/débiteurs, performance commerciale, journal d'activité des managers. UTILISE-LES dès qu'une question porte sur un chiffre précis, un membre, un mois, un club ou une dépense — ne devine JAMAIS, va chercher la donnée exacte.
+
+ÉTAT ACTUEL (${meta.gym_scope}, ${meta.period}, jour ${meta.day_of_month}/${meta.days_in_month}):
+- CA mois: ${r.month.toLocaleString()} DH / objectif ${r.monthly_goal.toLocaleString()} DH (${sig.goal_progress_pct || 0}%) · projection ${(sig.projected_month_end || 0).toLocaleString()} DH
+- vs mois-1 (j1-${meta.day_of_month}): ${r.vs_prev_month_pct > 0 ? '+' : ''}${r.vs_prev_month_pct}%
+- Dette ouverte: ${snap.debts.total_open.toLocaleString()} DH (${snap.debts.members_count} mbr) · Décaissements mois: ${snap.decaissements.month_total.toLocaleString()} DH
+- Membres actifs: ${snap.members.active_total} · expirent 30j: ${snap.members.expiring_30d} · Incidents ouverts: ${snap.incidents.open_total}
+
+RÈGLES:
+- Français, concis, chaque chiffre avec DH et %.
+- Cite la donnée réelle obtenue (montant, nom, date, club).
+- Termine par 1 recommandation actionnable quand c'est pertinent.
+- Tu es un CONSEILLER: tu analyses et recommandes — tu ne modifies JAMAIS rien.`;
+}
+
+// Bounded but comprehensive context for the Director's Brief (full awareness,
+// heavy lists trimmed). gpt-4o handles this easily; no 3500-char truncation.
+function briefContext(s) {
+  return {
+    meta: s.meta,
+    revenue: s.revenue,
+    gyms: s.gyms,
+    members: { active_total: s.members.active_total, expiring_30d: s.members.expiring_30d, expired_not_renewed: s.members.expired_not_renewed, resub: s.members.resub, birthdays_this_month: s.members.birthdays_this_month, pending_inscriptions: s.members.pending_inscriptions },
+    debts: { total_open: s.debts.total_open, members_count: s.debts.members_count, top_debtors: (s.debts.top_debtors || []).slice(0, 8) },
+    decaissements: s.decaissements,
+    incidents: { open_total: s.incidents.open_total, critical: s.incidents.critical, high: s.incidents.high, list: (s.incidents.list || []).slice(0, 5) },
+    commercials: (s.commercials || []).slice(0, 8),
+    subscription_intel: (s.subscription_intel || []).slice(0, 12),
+    extension_ratio: s.extension_ratio,
+    relance_performance: (s.relance_performance || []).slice(0, 8),
+    top_formulas_empire: s.top_formulas_empire,
+    historical_revenue: (s.historical_revenue || []).slice(-6),
+  };
+}
 
 // ─── Groq caller with multi-key rotation + retry delay ──────────────────────
 const GROQ_KEYS = [
@@ -201,6 +290,13 @@ function initAiTables(db) {
       trends TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS ai_director_brief (
+      id TEXT PRIMARY KEY,
+      date TEXT NOT NULL,
+      gym_scope TEXT DEFAULT 'all',
+      brief_text TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 }
 
@@ -336,6 +432,17 @@ function buildSnapshot(db, getMeta, gymScope = 'all') {
   const decaisMonth = q1(`SELECT COALESCE(SUM(montant),0) total, COUNT(*) cnt FROM decaissements_cache WHERE strftime('%Y-%m', date)=? AND gym_id IN (${gymIn})`, ym, ...targetGyms);
   const decaisTop   = q(`SELECT gym_id, date, montant, raison, status FROM decaissements_cache WHERE strftime('%Y-%m', date)=? AND gym_id IN (${gymIn}) ORDER BY montant DESC LIMIT 10`, ym, ...targetGyms);
   const decaisByGym = q(`SELECT gym_id, ROUND(SUM(montant),0) total FROM decaissements_cache WHERE strftime('%Y-%m', date)=? AND gym_id IN (${gymIn}) GROUP BY gym_id`, ym, ...targetGyms);
+  // 🔥 Snapshot v2 — auto-categorize expenses (Salaires, Loyer, Énergie, Matériel…)
+  const decaisAllMonth = q(`SELECT montant, raison FROM decaissements_cache WHERE strftime('%Y-%m', date)=? AND gym_id IN (${gymIn})`, ym, ...targetGyms);
+  const decaisCatMap = {};
+  for (const d of decaisAllMonth) {
+    const c = aiTools.categorizeExpense(d.raison);
+    if (!decaisCatMap[c.key]) decaisCatMap[c.key] = { category: c.label, total: 0, count: 0 };
+    decaisCatMap[c.key].total += Number(d.montant) || 0;
+    decaisCatMap[c.key].count += 1;
+  }
+  const decaisByCategory = Object.values(decaisCatMap).map(c => ({ ...c, total: Math.round(c.total) })).sort((a, b) => b.total - a.total);
+  const decaisToRevPct = monthRev.total > 0 ? parseFloat(((decaisMonth?.total || 0) / monthRev.total * 100).toFixed(1)) : null;
 
   // ── Incidents ──────────────────────────────────────────────────────────────
   const openInc = q(`SELECT gym_id, title, cause, emergency, status, date FROM incidents_cache WHERE status!='Resolved' AND gym_id IN (${gymIn}) ORDER BY created_at DESC`, ...targetGyms);
@@ -503,8 +610,10 @@ function buildSnapshot(db, getMeta, gymScope = 'all') {
     decaissements: {
       month_total: Math.round(decaisMonth?.total || 0),
       month_count: decaisMonth?.cnt || 0,
+      expense_to_revenue_pct: decaisToRevPct,
       by_gym: decaisByGym.map(r => ({ gym: r.gym_id, name: GYM_NAMES[r.gym_id], total: Math.round(r.total||0) })),
-      top_items: decaisTop.map(d => ({ gym: d.gym_id, date: d.date, amount: Math.round(d.montant||0), reason: d.raison, status: d.status })),
+      by_category: decaisByCategory,
+      top_items: decaisTop.map(d => ({ gym: d.gym_id, date: d.date, amount: Math.round(d.montant||0), reason: d.raison, category: aiTools.categorizeExpense(d.raison).label, status: d.status })),
     },
     incidents: incSummary,
     courses: courseStats,
@@ -939,42 +1048,94 @@ module.exports = function aiAgentRouter({ lc }) {
   });
 
   // ── POST /api/ai/ask ───────────────────────────────────────────────────────
+  // OpenAI function-calling: the model queries the REAL data via tools (member,
+  // club revenue, décaissements, debtors, activity log) — no more 3500-char keyhole.
+  // Falls back to the legacy Groq path if OpenAI is unavailable, so nothing breaks.
   router.post('/api/ai/ask', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
       const { question, gym = 'all' } = req.body;
       if (!question?.trim()) return res.status(400).json({ error: 'Question required' });
 
-      // Use cached data — instant!
       const { snapshot: s, signals, alerts, fromCache } = getCached(gym);
       saveAlerts(alerts, gym);
 
-      // Inject daily digest memory for richer context
-      const digests = getDailyDigests(5);
+      const digests = getDailyDigests(3);
       const digestMemory = digests.length > 0
-        ? `\n\n=== MÉMOIRE IA (digests récents) ===\n${digests.map(d => `[${d.date}] ${d.digest_text?.slice(0, 150) || ''}`).join('\n')}`
+        ? `\n\nMÉMOIRE (digests récents): ${digests.map(d => `[${d.date}] ${(d.digest_text || '').slice(0, 120)}`).join(' · ')}`
         : '';
 
-      // Compact snapshot for prompt
-      const ctxJson = JSON.stringify({
-        revenue: s.revenue, members: { active_total: s.members.active_total, expiring_30d: s.members.expiring_30d, expired_not_renewed: s.members.expired_not_renewed, resub: s.members.resub, birthdays_this_month: s.members.birthdays_this_month },
-        door_traffic: s.door_traffic, debts: s.debts, decaissements: { month_total: s.decaissements.month_total, by_gym: s.decaissements.by_gym },
-        incidents: { open_total: s.incidents.open_total, critical: s.incidents.critical, list: s.incidents.list?.slice(0,4) },
-        courses: s.courses, gyms: s.gyms, commercials: s.commercials.slice(0, 8),
-        historical_revenue: s.historical_revenue.slice(-6),
-        subscription_intel: s.subscription_intel?.slice(0, 15),
-        top_formulas_empire: s.top_formulas_empire,
-        extension_ratio: s.extension_ratio,
-        relance_performance: s.relance_performance?.slice(0, 8),
-        pending_inscriptions_detailed: s.pending_inscriptions_detailed?.slice(0, 8),
-      });
+      // ── Primary: OpenAI director brain with retrieval tools ──
+      if (hasOpenAI()) {
+        try {
+          const sysPrompt = buildAskSystemPrompt(s, signals) + digestMemory;
+          const { reply, toolsUsed } = await openaiAgentAnswer(db, sysPrompt, question);
+          return res.json({ reply, signals, alerts, empire_status: signals.empire_status, fromCache, engine: 'openai', toolsUsed });
+        } catch (oe) {
+          console.error('[AI/ask] OpenAI failed → Groq fallback:', oe.message);
+        }
+      }
 
+      // ── Fallback: legacy Groq path (truncated snapshot) ──
+      const ctxJson = JSON.stringify({
+        revenue: s.revenue, members: { active_total: s.members.active_total, expiring_30d: s.members.expiring_30d, expired_not_renewed: s.members.expired_not_renewed, resub: s.members.resub },
+        door_traffic: s.door_traffic, debts: s.debts, decaissements: { month_total: s.decaissements.month_total, by_gym: s.decaissements.by_gym, by_category: s.decaissements.by_category },
+        incidents: { open_total: s.incidents.open_total, critical: s.incidents.critical }, gyms: s.gyms, commercials: s.commercials.slice(0, 8),
+        historical_revenue: s.historical_revenue.slice(-6), subscription_intel: s.subscription_intel?.slice(0, 15),
+      });
       const messages = [
-        { role: 'system', content: buildSysPrompt(s, signals) + digestMemory + `\n\n=== DONNÉES COMPLÈTES ===\n${ctxJson.slice(0, 3500)}` },
+        { role: 'system', content: buildSysPrompt(s, signals) + digestMemory + `\n\n=== DONNÉES ===\n${ctxJson.slice(0, 3500)}` },
         { role: 'user', content: question }
       ];
       const reply = await groq(messages, true);
-      res.json({ reply, signals, alerts, empire_status: signals.empire_status, fromCache });
+      res.json({ reply, signals, alerts, empire_status: signals.empire_status, fromCache, engine: 'groq' });
     } catch(e) { console.error('[AI/ask]', e.message); res.status(500).json({ error: e.message }); }
+  });
+
+  // ── POST /api/ai/director-brief ───────────────────────────────────────────
+  // The Morning Brief: full-snapshot (untruncated) executive briefing via OpenAI.
+  // State → What changed → Why → Top 3 actions → Risks. Stored for instant reload.
+  router.post('/api/ai/director-brief', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const { gym = 'all' } = req.body;
+      const { snapshot: s, signals } = getCached(gym);
+      if (!hasOpenAI()) return res.status(200).json({ brief: null, engine: 'none', error: 'OPENAI_API_KEY manquante sur le serveur' });
+
+      const sys = `Tu es AURALIX, le DIRECTEUR IA de MegaFit (4 clubs: Fès Doukkarate, Fès Saïss, Casa Anfa, Casa Lady). Rédige le BRIEFING MATINAL du directeur à partir des données COMPLÈTES fournies. Style exécutif, dense, chiffré, zéro bla-bla.
+
+STRUCTURE OBLIGATOIRE (français, avec ces titres):
+1. 📊 ÉTAT — statut global (✅/👁/⚠️/🔴) + CA mois vs objectif + projection fin de mois.
+2. 🔀 CE QUI A CHANGÉ — variations clés vs mois dernier (CA par club, décaissements, dette, membres).
+3. 🧭 POURQUOI — la cause la plus probable des variations importantes.
+4. 🎯 TOP 3 ACTIONS AUJOURD'HUI — chacune: QUI + QUOI + IMPACT chiffré attendu (DH/%).
+5. 🚨 RISQUES — 1 à 3 alertes (dette critique, churn, décaissements anormaux, activité staff suspecte).
+
+Chaque point avec des CHIFFRES RÉELS tirés des données (DH, %). Note: Casa Anfa et Casa Lady n'ont PAS de capteur de porte — ne jamais alerter sur leur trafic. Tu es un CONSEILLER: tu recommandes, tu ne modifies rien.`;
+      const messages = [
+        { role: 'system', content: sys },
+        { role: 'user', content: `Données complètes (${s.meta.gym_scope}, période ${s.meta.period}, jour ${s.meta.day_of_month}/${s.meta.days_in_month}):\n${JSON.stringify(briefContext(s))}` },
+      ];
+      const data = await openaiCall(messages, { maxTokens: 1700, temperature: 0.35 });
+      const brief = data.choices?.[0]?.message?.content || '';
+
+      try {
+        const today = new Date(Date.now() + 3600000).toISOString().slice(0, 10);
+        db.prepare(`INSERT OR REPLACE INTO ai_director_brief (id, date, gym_scope, brief_text, created_at) VALUES (?,?,?,?,datetime('now'))`)
+          .run(`brief_${gym}_${today}`, today, gym, brief);
+      } catch (dbErr) { console.error('[AI/director-brief] persist:', dbErr.message); }
+
+      res.json({ brief, engine: 'openai', period: s.meta.period, generated_at: new Date().toISOString() });
+    } catch(e) { console.error('[AI/director-brief]', e.message); res.status(500).json({ error: e.message }); }
+  });
+
+  // ── GET /api/ai/director-brief ── instant reload of today's stored brief ──
+  router.get('/api/ai/director-brief', verifyAzureToken, (req, res) => {
+    try {
+      const gym = req.query.gym || 'all';
+      const today = new Date(Date.now() + 3600000).toISOString().slice(0, 10);
+      const row = db.prepare(`SELECT brief_text, date, created_at FROM ai_director_brief WHERE id=?`).get(`brief_${gym}_${today}`)
+               || db.prepare(`SELECT brief_text, date, created_at FROM ai_director_brief WHERE gym_scope=? ORDER BY created_at DESC LIMIT 1`).get(gym);
+      res.json({ brief: row?.brief_text || null, date: row?.date || null, cached: !!row });
+    } catch(e) { res.json({ brief: null, error: e.message }); }
   });
 
   // ── POST /api/ai/scan ──────────────────────────────────────────────────────

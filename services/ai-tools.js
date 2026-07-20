@@ -1,0 +1,355 @@
+'use strict';
+// services/ai-tools.js — AURALIX Retrieval Tool Engine
+// ─────────────────────────────────────────────────────────────────────────────
+// OpenAI function-calling tools that let the AI query the REAL data on demand,
+// instead of receiving a truncated snapshot. This is what makes Auralix able to
+// answer "revenus de Casa Anfa le mois dernier", "meilleur décaissement de Mai",
+// "info sur ce membre" — the model picks a tool, we run the SQL, it reasons.
+//
+// Pure data layer: no LLM here. Every executor is deterministic, guarded, and
+// returns a plain object (the caller JSON-stringifies it back to the model).
+// Advisor-only: strictly READ-ONLY — no tool mutates anything.
+
+const GYM_NAMES = { dokarat: 'Fès Doukkarate', marjane: 'Fès Saïss', casa1: 'Casa Anfa', casa2: 'Casa Lady' };
+const VALID_GYMS = ['dokarat', 'marjane', 'casa1', 'casa2'];
+const GYM_ALIASES = {
+  dokarat: 'dokarat', dokkarat: 'dokarat', doukkarate: 'dokarat', fes: 'dokarat', 'fès doukkarate': 'dokarat',
+  marjane: 'marjane', saiss: 'marjane', 'saïss': 'marjane', 'fès saïss': 'marjane', 'fes saiss': 'marjane',
+  casa1: 'casa1', anfa: 'casa1', 'casa anfa': 'casa1',
+  casa2: 'casa2', lady: 'casa2', 'casa lady': 'casa2',
+};
+
+// Reste (debt) expression reused from buildSnapshot so numbers reconcile exactly.
+const RESTE_EXPR = `(CASE WHEN CAST(r.prix AS REAL)>0 THEN CAST(r.prix AS REAL)-(COALESCE(CAST(r.tpe AS REAL),0)+COALESCE(CAST(r.espece AS REAL),0)+COALESCE(CAST(r.virement AS REAL),0)+COALESCE(CAST(r.cheque AS REAL),0)) ELSE CAST(r.reste AS REAL) END)`;
+const NOT_SETTLED = `COALESCE(r.source,'')!='reste_settlement' AND NOT EXISTS (SELECT 1 FROM register_cache s WHERE s.source='reste_settlement' AND CAST(s.reste AS REAL)=0 AND s.gym_id=r.gym_id AND ((s.contrat=r.contrat AND s.contrat IS NOT NULL AND s.contrat!='' AND s.contrat!='-') OR (s.nom=r.nom AND s.nom IS NOT NULL AND s.nom!='')))`;
+
+// ── Décaissement auto-categorization (deterministic, same spirit as the RH filter) ──
+const EXPENSE_CATEGORIES = [
+  { key: 'salaires',    label: 'Salaires & Staff',   re: /salaire|avance|prime|paie|coach|moniteur|monitrice|instruct|prof|animat|personnel|employ|vacataire|honoraire|femme de m[eé]nage|agent|gardien|s[eé]curit/i },
+  { key: 'loyer',       label: 'Loyer & Charges',    re: /loyer|rent|bail|charge|syndic|taxe|imp[oô]t|patente/i },
+  { key: 'energie',     label: 'Énergie & Eau',      re: /electric|électric|lydec|redal|amendis|eau|water|onee|facture eau|facture electr/i },
+  { key: 'materiel',    label: 'Matériel & Équip.',  re: /materiel|matériel|equip|équip|machine|haltere|haltère|poids|tapis|velo|vélo|banc|barre|r[eé]paration|maintenance|pi[eè]ce/i },
+  { key: 'marketing',   label: 'Marketing & Pub',    re: /pub|marketing|flyer|affiche|banderole|sponsor|influenc|facebook|insta|ads|campagne|photograph|design|impression/i },
+  { key: 'produits',    label: 'Produits & Boutique',re: /produit|boutique|complement|complément|prote|whey|creatin|créatin|barre|boisson|eau min|snack|caf[eé]|the|thé|stock/i },
+  { key: 'entretien',   label: 'Entretien & Nettoy.',re: /nettoy|menage|ménage|produit entretien|javel|serpill|hygiene|hygiène|savon|papier|consommable/i },
+  { key: 'internet',    label: 'Internet & Télécom', re: /internet|wifi|iam|inwi|orange|telecom|téléphone|telephone|abonnement net|fibre/i },
+];
+function categorizeExpense(reason) {
+  const r = (reason || '').toString();
+  for (const c of EXPENSE_CATEGORIES) if (c.re.test(r)) return c;
+  return { key: 'autre', label: 'Autre / Divers' };
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+const FR_MONTHS = { janvier: 1, fevrier: 2, 'février': 2, mars: 3, avril: 4, mai: 5, juin: 6, juillet: 7, aout: 8, 'août': 8, septembre: 9, octobre: 10, novembre: 11, decembre: 12, 'décembre': 12 };
+const EN_MONTHS = { january: 1, february: 2, march: 3, april: 4, may: 5, june: 6, july: 7, august: 8, september: 9, october: 10, november: 11, december: 12 };
+
+function nowMorocco() { return new Date(Date.now() + 3600000); }
+function currentYm() { return nowMorocco().toISOString().slice(0, 10).slice(0, 7); }
+
+// Accept 'YYYY-MM', 'YYYY', a French/English month name ("Mai", "mai", "may"),
+// or empty → current month. Month names assume the current year (or last year if
+// that month hasn't happened yet this year).
+function resolveMonth(input) {
+  const cur = currentYm();
+  if (!input) return cur;
+  const s = String(input).trim().toLowerCase();
+  if (/^\d{4}-\d{2}$/.test(s)) return s;
+  if (/^\d{4}$/.test(s)) return null; // whole-year handled separately by caller
+  const m = FR_MONTHS[s] ?? EN_MONTHS[s];
+  if (m) {
+    const now = nowMorocco();
+    let year = now.getFullYear();
+    if (m > now.getMonth() + 1) year -= 1; // e.g. asking "décembre" in March → last year
+    return `${year}-${String(m).padStart(2, '0')}`;
+  }
+  return cur;
+}
+
+function resolveGym(input) {
+  if (!input || input === 'all') return 'all';
+  const s = String(input).trim().toLowerCase();
+  if (VALID_GYMS.includes(s)) return s;
+  return GYM_ALIASES[s] || null; // null = unrecognised → caller reports error
+}
+
+function makeQ(db) {
+  return {
+    all: (sql, ...a) => { try { return db.prepare(sql).all(...a); } catch (e) { return { __err: e.message }; } },
+    get: (sql, ...a) => { try { return db.prepare(sql).get(...a); } catch (e) { return { __err: e.message }; } },
+  };
+}
+
+// ── OpenAI function-tool schemas ──────────────────────────────────────────────
+const TOOL_SCHEMAS = [
+  {
+    type: 'function',
+    function: {
+      name: 'get_kpi_overview',
+      description: "Vue d'ensemble instantanée de toute l'entreprise (les 4 clubs ou un club): CA du mois, objectif, dette totale, décaissements, membres actifs/expirants, incidents, et CA+croissance par club. À utiliser en premier pour comprendre la situation globale.",
+      parameters: { type: 'object', properties: { gym: { type: 'string', description: "Club: 'all' (défaut), 'dokarat', 'marjane', 'casa1', 'casa2'" } } },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_member',
+      description: "Cherche un membre par nom, téléphone ou CIN. Retourne son profil (club, plan, expiration) et son historique de paiements + reste à payer (dette).",
+      parameters: { type: 'object', properties: { query: { type: 'string', description: 'Nom, prénom, téléphone ou CIN du membre' } }, required: ['query'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_club_revenue',
+      description: "Chiffre d'affaires d'un club (ou tous) pour un mois donné: total, répartition par mode de paiement (espèces/carte/virement/chèque), nombre d'inscriptions, top formules, et comparaison au mois précédent.",
+      parameters: { type: 'object', properties: {
+        club: { type: 'string', description: "Club: 'all', 'dokarat', 'marjane', 'casa1', 'casa2', ou un nom (Casa Anfa...)" },
+        month: { type: 'string', description: "Mois au format 'YYYY-MM' ou nom du mois (Mai, mai, may). Défaut = mois courant." },
+      } },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_decaissements',
+      description: "Liste les décaissements (dépenses/sorties de caisse) d'un mois, triés par montant ou date. Utile pour 'le plus gros décaissement de Mai', 'les dépenses de ce mois', etc. Retourne chaque dépense avec montant, raison, catégorie, club, date, statut.",
+      parameters: { type: 'object', properties: {
+        month: { type: 'string', description: "Mois 'YYYY-MM' ou nom (Mai). Défaut = mois courant." },
+        gym: { type: 'string', description: "Club ou 'all'" },
+        sort: { type: 'string', enum: ['amount', 'date'], description: "Tri: 'amount' (plus gros d'abord, défaut) ou 'date'" },
+        limit: { type: 'integer', description: 'Nombre max (défaut 15)' },
+      } },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_expense_breakdown',
+      description: "Répartition des décaissements par catégorie (Salaires, Loyer, Énergie, Matériel, Marketing, Produits, Entretien, Internet, Autre) pour un mois, avec le ratio dépenses/CA. Utile pour analyser où part l'argent et la marge.",
+      parameters: { type: 'object', properties: {
+        month: { type: 'string', description: "Mois 'YYYY-MM' ou nom. Défaut = mois courant." },
+        gym: { type: 'string', description: "Club ou 'all'" },
+      } },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_debtors',
+      description: "Liste des membres avec un reste à payer (dette), triés du plus gros au plus petit, avec le total de la dette.",
+      parameters: { type: 'object', properties: {
+        gym: { type: 'string', description: "Club ou 'all'" },
+        limit: { type: 'integer', description: 'Nombre max (défaut 15)' },
+      } },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_commercial_performance',
+      description: "Performance des commerciaux pour un mois: inscriptions, CA généré, ticket moyen, par commercial et par club.",
+      parameters: { type: 'object', properties: {
+        month: { type: 'string', description: "Mois 'YYYY-MM' ou nom. Défaut = mois courant." },
+        gym: { type: 'string', description: "Club ou 'all'" },
+      } },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_activity_log',
+      description: "Journal d'activité des managers/staff (audit): qui a fait quoi, quelle page, quand — y compris l'usage du CODE responsable dans le registre. Utile pour surveiller l'activité ('qu'a fait tel manager', 'qui a utilisé le code', 'activité de Casa Anfa cette semaine').",
+      parameters: { type: 'object', properties: {
+        query: { type: 'string', description: "Mot-clé à filtrer (action, nom, page). Optionnel." },
+        gym: { type: 'string', description: "Club ou 'all'" },
+        days: { type: 'integer', description: 'Fenêtre en jours (défaut 30)' },
+        limit: { type: 'integer', description: 'Nombre max (défaut 25)' },
+      } },
+    },
+  },
+];
+
+// ── executors ─────────────────────────────────────────────────────────────────
+function execute(db, name, args = {}) {
+  if (!db) return { error: 'DB indisponible' };
+  const q = makeQ(db);
+  try {
+    switch (name) {
+      case 'get_kpi_overview':      return toolKpiOverview(q, args);
+      case 'get_member':            return toolGetMember(q, args);
+      case 'get_club_revenue':      return toolClubRevenue(q, args);
+      case 'list_decaissements':    return toolListDecaissements(q, args);
+      case 'get_expense_breakdown': return toolExpenseBreakdown(q, args);
+      case 'get_debtors':           return toolGetDebtors(q, args);
+      case 'get_commercial_performance': return toolCommercialPerf(q, args);
+      case 'search_activity_log':   return toolSearchActivity(q, args);
+      default: return { error: `Outil inconnu: ${name}` };
+    }
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+function gymScopeSql(gym) {
+  const g = resolveGym(gym);
+  if (g === null) return { bad: true };
+  if (g === 'all') return { where: `gym_id IN ('${VALID_GYMS.join("','")}')`, gyms: VALID_GYMS, scope: 'all' };
+  return { where: `gym_id='${g}'`, gyms: [g], scope: g };
+}
+
+function toolKpiOverview(q, { gym }) {
+  const sc = gymScopeSql(gym); if (sc.bad) return { error: 'Club non reconnu' };
+  const ym = currentYm();
+  const today = nowMorocco().toISOString().slice(0, 10);
+  const revExpr = 'CAST(tpe AS REAL)+CAST(espece AS REAL)+CAST(virement AS REAL)+CAST(cheque AS REAL)';
+  const month = q.get(`SELECT COALESCE(SUM(${revExpr}),0) v, COUNT(*) c FROM register_cache WHERE strftime('%Y-%m',date)=? AND ${sc.where}`, ym);
+  const day = q.get(`SELECT COALESCE(SUM(${revExpr}),0) v FROM register_cache WHERE date=? AND ${sc.where}`, today);
+  const dec = q.get(`SELECT COALESCE(SUM(montant),0) v, COUNT(*) c FROM decaissements_cache WHERE strftime('%Y-%m',date)=? AND ${sc.where.replace(/gym_id/g,'gym_id')}`, ym);
+  const debt = q.get(`SELECT COALESCE(SUM(${RESTE_EXPR}),0) total, COUNT(*) cnt FROM register_cache r WHERE ${NOT_SETTLED} AND ${RESTE_EXPR}>0 AND r.${sc.where}`);
+  const active = q.get(`SELECT COUNT(*) c FROM members_cache WHERE is_archive=0 AND ${sc.where}`);
+  const expiring = q.get(`SELECT COUNT(*) c FROM members_cache WHERE is_archive=0 AND ${sc.where} AND expires_on IS NOT NULL AND expires_on<date('now','+30 days') AND expires_on>date('now')`);
+  const incidents = q.get(`SELECT COUNT(*) c FROM incidents_cache WHERE status!='Resolved' AND ${sc.where}`);
+  const perGym = q.all(`SELECT gym_id, ROUND(SUM(${revExpr}),0) rev, COUNT(*) inc FROM register_cache WHERE strftime('%Y-%m',date)=? AND ${sc.where} GROUP BY gym_id`, ym);
+  return {
+    period: ym, scope: sc.scope === 'all' ? 'ALL EMPIRE' : GYM_NAMES[sc.scope],
+    ca_mois_dh: Math.round(month?.v || 0), inscriptions_mois: month?.c || 0, ca_aujourdhui_dh: Math.round(day?.v || 0),
+    decaissements_mois_dh: Math.round(dec?.v || 0), decaissements_count: dec?.c || 0,
+    dette_totale_dh: Math.round(debt?.total || 0), membres_en_dette: debt?.cnt || 0,
+    membres_actifs: active?.c || 0, expirent_30j: expiring?.c || 0, incidents_ouverts: incidents?.c || 0,
+    par_club: perGym.map(g => ({ club: GYM_NAMES[g.gym_id] || g.gym_id, ca_dh: Math.round(g.rev || 0), inscriptions: g.inc })),
+  };
+}
+
+function toolGetMember(q, { query }) {
+  if (!query || String(query).trim().length < 2) return { error: 'Requête trop courte' };
+  const like = `%${String(query).trim().toLowerCase()}%`;
+  const matches = q.all(
+    `SELECT id, full_name, phone, cin, gym_id, plan, expires_on, is_archive FROM members_cache
+     WHERE (LOWER(full_name) LIKE ? OR REPLACE(phone,' ','') LIKE ? OR LOWER(cin) LIKE ?)
+     ORDER BY is_archive ASC LIMIT 6`, like, like.replace(/\s/g, ''), like);
+  if (!Array.isArray(matches) || matches.length === 0) return { found: false, message: 'Aucun membre trouvé' };
+  const list = matches.map(m => ({ name: m.full_name, club: GYM_NAMES[m.gym_id] || m.gym_id, phone: m.phone, cin: m.cin, plan: m.plan, expires_on: m.expires_on, archived: m.is_archive === 1 }));
+  // Payment history + debt for the best (first) match by name.
+  const top = matches[0];
+  const nameLike = `%${(top.full_name || '').toLowerCase()}%`;
+  const tx = q.all(
+    `SELECT r.date, r.gym_id, r.abonnement, ROUND(CAST(r.prix AS REAL),0) prix,
+            ROUND(COALESCE(CAST(r.tpe AS REAL),0)+COALESCE(CAST(r.espece AS REAL),0)+COALESCE(CAST(r.virement AS REAL),0)+COALESCE(CAST(r.cheque AS REAL),0),0) paye,
+            ROUND(${RESTE_EXPR},0) reste, r.commercial
+     FROM register_cache r WHERE LOWER(r.nom) LIKE ? ORDER BY r.date DESC LIMIT 12`, nameLike);
+  const txArr = Array.isArray(tx) ? tx : [];
+  const debt = txArr.reduce((s, t) => s + Math.max(0, t.reste || 0), 0);
+  return {
+    found: true, matches: list,
+    detail_pour: top.full_name,
+    dette_dh: Math.round(debt),
+    transactions: txArr.map(t => ({ date: t.date, club: GYM_NAMES[t.gym_id] || t.gym_id, formule: t.abonnement, prix_dh: t.prix, paye_dh: t.paye, reste_dh: Math.max(0, t.reste || 0), commercial: t.commercial })),
+  };
+}
+
+function toolClubRevenue(q, { club, month }) {
+  const sc = gymScopeSql(club); if (sc.bad) return { error: 'Club non reconnu' };
+  const ym = resolveMonth(month); if (!ym) return { error: "Mois invalide (utilise 'YYYY-MM' ou un nom de mois)" };
+  const row = q.get(`SELECT COALESCE(SUM(CAST(espece AS REAL)),0) es, COALESCE(SUM(CAST(virement AS REAL)),0) vi, COALESCE(SUM(CAST(cheque AS REAL)),0) ch, COALESCE(SUM(CAST(tpe AS REAL)),0) tp, COUNT(*) c FROM register_cache WHERE strftime('%Y-%m',date)=? AND ${sc.where}`, ym);
+  const total = Math.round((row?.es || 0) + (row?.vi || 0) + (row?.ch || 0) + (row?.tp || 0));
+  // previous month for comparison
+  const [y, mo] = ym.split('-').map(Number);
+  const prevYm = mo === 1 ? `${y - 1}-12` : `${y}-${String(mo - 1).padStart(2, '0')}`;
+  const prev = q.get(`SELECT COALESCE(SUM(CAST(tpe AS REAL)+CAST(espece AS REAL)+CAST(virement AS REAL)+CAST(cheque AS REAL)),0) v FROM register_cache WHERE strftime('%Y-%m',date)=? AND ${sc.where}`, prevYm);
+  const prevTotal = Math.round(prev?.v || 0);
+  const formulas = q.all(`SELECT abonnement name, COUNT(*) cnt, ROUND(SUM(CAST(prix AS REAL)),0) rev FROM register_cache WHERE strftime('%Y-%m',date)=? AND ${sc.where} AND abonnement IS NOT NULL AND abonnement!='' GROUP BY abonnement ORDER BY rev DESC LIMIT 6`, ym);
+  return {
+    club: sc.scope === 'all' ? 'ALL EMPIRE' : GYM_NAMES[sc.scope], mois: ym,
+    ca_total_dh: total, inscriptions: row?.c || 0,
+    modes_paiement: { especes_dh: Math.round(row?.es || 0), carte_tpe_dh: Math.round(row?.tp || 0), virement_dh: Math.round(row?.vi || 0), cheque_dh: Math.round(row?.ch || 0) },
+    mois_precedent_dh: prevTotal, variation_pct: prevTotal > 0 ? parseFloat(((total - prevTotal) / prevTotal * 100).toFixed(1)) : null,
+    top_formules: (Array.isArray(formulas) ? formulas : []).map(f => ({ formule: f.name, vendus: f.cnt, ca_dh: Math.round(f.rev || 0) })),
+  };
+}
+
+function toolListDecaissements(q, { month, gym, sort, limit }) {
+  const sc = gymScopeSql(gym); if (sc.bad) return { error: 'Club non reconnu' };
+  const ym = resolveMonth(month); if (!ym) return { error: 'Mois invalide' };
+  const order = sort === 'date' ? 'date DESC' : 'montant DESC';
+  const lim = Math.min(Math.max(parseInt(limit) || 15, 1), 40);
+  const rows = q.all(`SELECT gym_id, date, ROUND(montant,0) montant, raison, status, requested_by FROM decaissements_cache WHERE strftime('%Y-%m',date)=? AND ${sc.where} ORDER BY ${order} LIMIT ?`, ym, lim);
+  const totalRow = q.get(`SELECT COALESCE(SUM(montant),0) v, COUNT(*) c FROM decaissements_cache WHERE strftime('%Y-%m',date)=? AND ${sc.where}`, ym);
+  const arr = Array.isArray(rows) ? rows : [];
+  return {
+    mois: ym, club: sc.scope === 'all' ? 'ALL EMPIRE' : GYM_NAMES[sc.scope],
+    total_dh: Math.round(totalRow?.v || 0), nombre: totalRow?.c || 0,
+    decaissements: arr.map(d => ({ montant_dh: Math.round(d.montant || 0), raison: d.raison, categorie: categorizeExpense(d.raison).label, club: GYM_NAMES[d.gym_id] || d.gym_id, date: d.date, statut: d.status, demande_par: d.requested_by })),
+  };
+}
+
+function toolExpenseBreakdown(q, { month, gym }) {
+  const sc = gymScopeSql(gym); if (sc.bad) return { error: 'Club non reconnu' };
+  const ym = resolveMonth(month); if (!ym) return { error: 'Mois invalide' };
+  const rows = q.all(`SELECT montant, raison FROM decaissements_cache WHERE strftime('%Y-%m',date)=? AND ${sc.where}`, ym);
+  const arr = Array.isArray(rows) ? rows : [];
+  const buckets = {};
+  let total = 0;
+  for (const d of arr) {
+    const c = categorizeExpense(d.raison);
+    const amt = Number(d.montant) || 0;
+    total += amt;
+    if (!buckets[c.key]) buckets[c.key] = { categorie: c.label, total_dh: 0, count: 0 };
+    buckets[c.key].total_dh += amt; buckets[c.key].count += 1;
+  }
+  const revRow = q.get(`SELECT COALESCE(SUM(CAST(tpe AS REAL)+CAST(espece AS REAL)+CAST(virement AS REAL)+CAST(cheque AS REAL)),0) v FROM register_cache WHERE strftime('%Y-%m',date)=? AND ${sc.where}`, ym);
+  const ca = Math.round(revRow?.v || 0);
+  const list = Object.values(buckets).map(b => ({ ...b, total_dh: Math.round(b.total_dh), pct_des_depenses: total > 0 ? Math.round(b.total_dh / total * 100) : 0 })).sort((a, b) => b.total_dh - a.total_dh);
+  return {
+    mois: ym, club: sc.scope === 'all' ? 'ALL EMPIRE' : GYM_NAMES[sc.scope],
+    depenses_totales_dh: Math.round(total), ca_dh: ca,
+    ratio_depenses_sur_ca_pct: ca > 0 ? parseFloat((total / ca * 100).toFixed(1)) : null,
+    par_categorie: list,
+  };
+}
+
+function toolGetDebtors(q, { gym, limit }) {
+  const sc = gymScopeSql(gym); if (sc.bad) return { error: 'Club non reconnu' };
+  const lim = Math.min(Math.max(parseInt(limit) || 15, 1), 40);
+  const rows = q.all(`SELECT r.nom, r.gym_id, ROUND(${RESTE_EXPR},0) reste, r.date, r.note_reste FROM register_cache r WHERE ${NOT_SETTLED} AND ${RESTE_EXPR}>0 AND r.${sc.where} ORDER BY reste DESC LIMIT ?`, lim);
+  const tot = q.get(`SELECT COALESCE(SUM(${RESTE_EXPR}),0) total, COUNT(*) cnt FROM register_cache r WHERE ${NOT_SETTLED} AND ${RESTE_EXPR}>0 AND r.${sc.where}`);
+  const arr = Array.isArray(rows) ? rows : [];
+  return {
+    club: sc.scope === 'all' ? 'ALL EMPIRE' : GYM_NAMES[sc.scope],
+    dette_totale_dh: Math.round(tot?.total || 0), nombre_debiteurs: tot?.cnt || 0,
+    debiteurs: arr.map(d => ({ nom: d.nom, club: GYM_NAMES[d.gym_id] || d.gym_id, reste_dh: Math.round(d.reste || 0), date: d.date, note: d.note_reste })),
+  };
+}
+
+function toolCommercialPerf(q, { month, gym }) {
+  const sc = gymScopeSql(gym); if (sc.bad) return { error: 'Club non reconnu' };
+  const ym = resolveMonth(month); if (!ym) return { error: 'Mois invalide' };
+  const rows = q.all(`SELECT commercial name, gym_id, COUNT(*) inscriptions, ROUND(SUM(CAST(prix AS REAL)),0) ca, ROUND(AVG(CAST(prix AS REAL)),0) ticket_moyen FROM register_cache WHERE strftime('%Y-%m',date)=? AND ${sc.where} AND commercial IS NOT NULL AND commercial!='' GROUP BY commercial, gym_id ORDER BY ca DESC LIMIT 15`, ym);
+  const arr = Array.isArray(rows) ? rows : [];
+  return {
+    mois: ym, club: sc.scope === 'all' ? 'ALL EMPIRE' : GYM_NAMES[sc.scope],
+    commerciaux: arr.map(c => ({ commercial: c.name, club: GYM_NAMES[c.gym_id] || c.gym_id, inscriptions: c.inscriptions, ca_dh: Math.round(c.ca || 0), ticket_moyen_dh: Math.round(c.ticket_moyen || 0) })),
+  };
+}
+
+function toolSearchActivity(q, { query, gym, days, limit }) {
+  const sc = gymScopeSql(gym); if (sc.bad) return { error: 'Club non reconnu' };
+  const win = Math.min(Math.max(parseInt(days) || 30, 1), 180);
+  const lim = Math.min(Math.max(parseInt(limit) || 25, 1), 60);
+  const clauses = [`date >= date('now','-${win} days')`, sc.where];
+  const params = [];
+  if (query && String(query).trim()) {
+    clauses.push('(LOWER(action) LIKE ? OR LOWER(user_name) LIKE ? OR LOWER(page) LIKE ?)');
+    const like = `%${String(query).trim().toLowerCase()}%`;
+    params.push(like, like, like);
+  }
+  const rows = q.all(`SELECT date, created_at, user_name, user_role, action, page, method, source, club_name FROM activity_logs_cache WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC LIMIT ?`, ...params, lim);
+  const arr = Array.isArray(rows) ? rows : [];
+  const pinUse = arr.filter(a => (a.source || '').includes('pin')).length;
+  return {
+    club: sc.scope === 'all' ? 'ALL EMPIRE' : GYM_NAMES[sc.scope], fenetre_jours: win, nombre: arr.length, usages_code_responsable: pinUse,
+    activites: arr.map(a => ({ date: a.date, heure: (a.created_at || '').slice(11, 16), utilisateur: a.user_name, role: a.user_role, action: a.action, page: a.page, club: a.club_name, via: a.source })),
+  };
+}
+
+module.exports = { TOOL_SCHEMAS, execute, categorizeExpense, EXPENSE_CATEGORIES, resolveMonth, resolveGym, GYM_NAMES };
