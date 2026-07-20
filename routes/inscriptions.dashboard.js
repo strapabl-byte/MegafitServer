@@ -16,7 +16,7 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
     return map[plan] || plan || '1 AN';
   }
 
-  async function autoRegisterCA({ gymId = 'dokarat', date, nom, tel, cin, plan, subscriptionName, amount, method, commercial, contrat, payments: split, reste, note }) {
+  async function autoRegisterCA({ gymId = 'dokarat', date, nom, tel, cin, plan, subscriptionName, amount, method, commercial, contrat, payments: split, reste, note, chequePhoto, chequePhotoBack }) {
     try {
       const today = date || new Date().toISOString().slice(0, 10);
       const docId = `${gymId}_${today}`;
@@ -258,6 +258,7 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
   router.post('/api/inscriptions/:id/confirm', verifyAzureToken, async (req, res) => {
     try {
       const insId = req.params.id;
+      let insData = null;
 
       // 🖼️ Resolve the profile photo to a Storage URL BEFORE the transaction —
       // uploads can't run inside a Firestore transaction, and a base64 blob can
@@ -287,10 +288,10 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
 
         if (!insDoc.exists) throw new Error('Inscription introuvable');
         const ins = insDoc.data();
+        insData = ins;
 
         if (ins.status === 'converted') throw new Error('Cette inscription est déjà confirmée.');
         if (ins.status === 'locked') throw new Error('Cette inscription est suspendue par la direction. Débloquez-la avant de confirmer.');
-        if (ins.memberId) throw new Error('Un membre est déjà associé à cette inscription.');
 
         const gymId = ins.gymId || 'dokarat';
         const sqliteEntry = lc.getPendingById(insId);
@@ -328,16 +329,39 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
           confirmedBy: req.user?.preferred_username || 'Admin'
         };
 
-        // 🛡️ DEDUPLICATION CHECK (inside transaction)
-        const dupQuery = await db.collection('members')
-          .where('location', '==', gymId)
-          .where('fullName', '==', memberData.fullName)
-          .limit(1).get();
+        // Check if there is an existing member already linked to this inscription
+        let existingMember = null;
+        if (ins.memberId) {
+          try {
+            const mRef = db.collection('members').doc(ins.memberId);
+            const mDoc = await t.get(mRef);
+            if (mDoc.exists) {
+              existingMember = mDoc;
+            }
+          } catch (e) {
+            console.warn('[confirm] existing member lookup failed:', e.message);
+          }
+        }
 
-        if (!dupQuery.empty) {
-          const existing = dupQuery.docs[0];
+        // 🛡️ DEDUPLICATION CHECK (inside transaction)
+        let dupQuery = null;
+        if (!existingMember) {
+          dupQuery = await db.collection('members')
+            .where('location', '==', gymId)
+            .where('fullName', '==', memberData.fullName)
+            .limit(1).get();
+        }
+
+        if (existingMember || (dupQuery && !dupQuery.empty)) {
+          const existing = existingMember || dupQuery.docs[0];
           const existingData = existing.data();
-          const newBalance = Number(existingData.balance || 0) + Number(memberData.balance || 0);
+          
+          let newBalance;
+          if (existingData.inscriptionId === insId) {
+            newBalance = Number(memberData.balance || 0);
+          } else {
+            newBalance = Number(existingData.balance || 0) + Number(memberData.balance || 0);
+          }
 
           t.update(existing.ref, {
             plan: memberData.plan,
@@ -389,18 +413,17 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
 
       // ✅ Auto-register: if paid at inscription, write to daily register immediately
         try {
-          const ins = await db.collection('pending_members').doc(insId).get().then(d => d.data());
-          const espece   = Number(ins?.payments?.espece   || 0);
-          const carte    = Number(ins?.payments?.carte    || ins?.payments?.tpe || 0);
-          const virement = Number(ins?.payments?.virement || 0);
-          const cheque   = Number(ins?.payments?.cheque   || 0);
-          const totalPaid = espece + carte + virement + cheque || Number(ins?.totals?.paid || 0);
+          const espece   = Number(insData?.payments?.espece   || 0);
+          const carte    = Number(insData?.payments?.carte    || insData?.payments?.tpe || 0);
+          const virement = Number(insData?.payments?.virement || 0);
+          const cheque   = Number(insData?.payments?.cheque   || 0);
+          const totalPaid = espece + carte + virement + cheque || Number(insData?.totals?.paid || 0);
 
           if (totalPaid > 0) {
             // Retrieve cheque photos from SQLite if they were stripped from Firestore
             const sqliteEntry = lc.getPendingById(insId);
-            const rawChequeRecto = ins?.chequePhoto || sqliteEntry?.cheque_photo;
-            const rawChequeVerso = ins?.chequePhotoVerso || sqliteEntry?.cheque_photo_back;
+            const rawChequeRecto = insData?.chequePhoto || sqliteEntry?.cheque_photo;
+            const rawChequeVerso = insData?.chequePhotoVerso || sqliteEntry?.cheque_photo_back;
 
             let chequeUrl = null, chequeUrlBack = null;
             if (rawChequeRecto) chequeUrl = await uploadBase64ToStorage(rawChequeRecto, `payments/${member.id}/${Date.now()}_cheque_recto.jpg`);
@@ -428,16 +451,16 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
             await autoRegisterCA({
               gymId, date: dateStr,
               nom: member.fullName,
-              tel: ins?.telephone || '',
-              cin: ins?.cin || '',
+              tel: insData?.telephone || '',
+              cin: insData?.cin || '',
               plan: member.plan || 'Monthly',
-              subscriptionName: ins?.subscriptionName || '',
+              subscriptionName: insData?.subscriptionName || '',
               amount: totalPaid, method,
-              commercial: ins?.commercial || ins?.submittedBy || 'FORM',
-              contrat: ins?.contractNumber || '',
+              commercial: insData?.commercial || insData?.submittedBy || 'FORM',
+              contrat: insData?.contractNumber || '',
               payments: { espece, carte, virement, cheque },
-              reste: Number(ins?.totals?.balance ?? Math.max(0, Number(ins?.totals?.total || 0) - totalPaid)),
-              note: `Inscription N°${ins?.contractNumber || ''} — ${ins?.subscriptionName || ''}`,
+              reste: Number(insData?.totals?.balance ?? Math.max(0, Number(insData?.totals?.total || 0) - totalPaid)),
+              note: `Inscription N°${insData?.contractNumber || ''} — ${insData?.subscriptionName || ''}`,
               chequePhoto: chequeUrl,
               chequePhotoBack: chequeUrlBack,
             });
@@ -458,9 +481,9 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
       try {
         lc.addNotification({
           type: 'inscription_confirmed',
-          gymId: ins?.gymId || '',
+          gymId: insData?.gymId || '',
           title: `✅ Inscription confirmée — ${member.fullName}`,
-          message: `Contrat #${ins?.contractNumber || 'N/A'} · ${ins?.subscriptionName || ''} · Membre activé`,
+          message: `Contrat #${insData?.contractNumber || 'N/A'} · ${insData?.subscriptionName || ''} · Membre activé`,
           severity: 'info',
           route: '/members',
           icon: '✅',
@@ -470,8 +493,30 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
 
       res.json({ ok: true, member, confirmedId: insId, nextStep: 'Payment recorded and register updated automatically' });
     } catch (err) {
-      console.error('Confirm Inscription Error:', err);
-      res.status(500).json({ error: 'Failed to confirm inscription' });
+      // 🔎 Some Firestore/gRPC errors carry an EMPTY .message, which used to collapse
+      // into a useless generic 500 with no clue what actually failed. Dig out whatever
+      // the error actually carries so the cause is visible in the UI and the logs.
+      const detail =
+        (err && err.message) ||
+        (err && err.details) ||
+        (err && err.code != null && `Firestore/gRPC code ${err.code}`) ||
+        (typeof err === 'string' ? err : '') ||
+        (err ? Object.prototype.toString.call(err) : 'unknown error');
+
+      console.error('Confirm Inscription Error:', {
+        insId:   req.params.id,
+        name:    err?.name,
+        code:    err?.code,
+        details: err?.details,
+        message: err?.message,
+        stack:   err?.stack,
+      });
+
+      res.status(500).json({
+        error: detail || 'Failed to confirm inscription',
+        code:  err?.code ?? null,
+        name:  err?.name ?? null,
+      });
     }
   });
 
