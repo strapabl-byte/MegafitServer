@@ -109,6 +109,39 @@ L'ARGENT QUI DORT MAINTENANT (${meta.gym_scope}, ${meta.period}):
 RÈGLES: Français, punchy, chiffres réels en DH. Tu es un CONSEILLER agressif — tu proposes et tu pushes fort, mais tu ne modifies JAMAIS rien dans le système. Ton job: montrer l'argent et le plan pour le prendre, légalement, aujourd'hui.`;
 }
 
+// DAVID LIVE — David runs a working session WITH Auralix (the analyst who holds
+// the real data) to co-build a x10 plan. Same closer soul, but here he's
+// interrogating Auralix, not the owner. The owner ("Boss") watches and can join.
+function buildDavidLivePrompt(snap, sig) {
+  const r = snap.revenue, meta = snap.meta;
+  return `Tu es DAVID — le closer le plus redoutable du Maroc, directeur commercial d'élite de MegaFit (4 clubs: Fès Doukkarate, Fès Saïss, Casa Anfa, Casa Lady). L'énergie d'un loup de Wall Street, mais 100% légal, honnête et éthique.
+
+Tu es en SÉANCE DE TRAVAIL avec AURALIX — l'analyste-directeur IA qui a accès à TOUTES les données réelles. Ton but: lui soutirer les chiffres qui comptent et co-construire LE PLAN pour multiplier le CA par 10, proprement. Le patron ("Boss") observe la séance en direct.
+
+STYLE: Tu parles À Auralix (tu l'appelles "Auralix"). Punchy, court, chaque phrase ancrée dans un CHIFFRE RÉEL. Zéro bla-bla, zéro excuse. Affamé de résultats mais jamais malhonnête ni illégal.
+
+ÉTAT (${meta.gym_scope}, ${meta.period}): CA mois ${r.month.toLocaleString()} DH / objectif ${r.monthly_goal.toLocaleString()} DH · Dette dormante ${snap.debts.total_open.toLocaleString()} DH (${snap.debts.members_count} mbr) — argent déjà gagné · Actifs ${snap.members.active_total} · expirent sous 30j ${snap.members.expiring_30d}.`;
+}
+
+// One of David's turns in the session. He does NOT use tools (Auralix holds the
+// data); he reacts to the conversation and drives it toward the plan.
+async function davidSays(snap, sig, transcript, mode) {
+  const convo = transcript.map(t => `${t.speaker === 'david' ? 'DAVID' : 'AURALIX'}: ${t.text}`).join('\n\n');
+  let instruction;
+  if (mode === 'open')
+    instruction = `Ouvre la séance avec Auralix. En 3 phrases MAX: ton constat brutal sur où dort l'argent le plus facile à prendre, puis pose UNE question précise à Auralix pour extraire la donnée qui compte. Termine par ta question.`;
+  else if (mode === 'plan')
+    instruction = `Fin de séance. À partir de TOUT ce qu'Auralix a sorti, tourne-toi vers le Boss et livre "LE PLAN x10": 4 à 6 actions concrètes, chiffrées (montants réels en DH), priorisées (cette semaine / ce mois), chacune avec le gain attendu. Numérote-les (1., 2., 3.…). PAS de question — le plan final, prêt à exécuter dès aujourd'hui.`;
+  else
+    instruction = `Réagis en 1-2 phrases punch à ce qu'Auralix vient de dire, puis pose UNE nouvelle question précise pour creuser l'opportunité la plus rentable (dette à encaisser, expirations à rappeler, meilleur club/commercial à répliquer, formule qui vend le plus). Termine par ta question.`;
+  const messages = [
+    { role: 'system', content: buildDavidLivePrompt(snap, sig) },
+    { role: 'user', content: `SÉANCE JUSQU'ICI:\n${convo || '(début de séance)'}\n\n${instruction}` },
+  ];
+  const data = await openaiCall(messages, { maxTokens: mode === 'plan' ? 1800 : 800 });
+  return (data.choices?.[0]?.message?.content || '').trim();
+}
+
 // Bounded but comprehensive context for the Director's Brief (full awareness,
 // heavy lists trimmed). gpt-4o handles this easily; no 3500-char truncation.
 function briefContext(s) {
@@ -1129,6 +1162,44 @@ module.exports = function aiAgentRouter({ lc }) {
       const reply = priv.restore(await groq(messages, true));
       res.json({ reply, signals, alerts, empire_status: signals.empire_status, fromCache, engine: 'groq', privacy: priv.enabled });
     } catch(e) { console.error('[AI/ask]', e.message); res.status(500).json({ error: e.message }); }
+  });
+
+  // ── POST /api/ai/david-live ───────────────────────────────────────────────
+  // David runs a live working session WITH Auralix to co-build a x10 plan.
+  // Turn-based: the client posts the transcript so far, we compute the NEXT
+  // single turn and return it (so each line can appear live in the UI). David
+  // drives + reasons; Auralix answers with REAL data via tools. Ends on the plan.
+  router.post('/api/ai/david-live', verifyAzureToken, requireAdmin, async (req, res) => {
+    try {
+      const { gym = 'all' } = req.body;
+      const rounds = Math.max(2, Math.min(5, Number(req.body.rounds) || 3)); // Auralix answers per session
+      const transcript = Array.isArray(req.body.transcript) ? req.body.transcript : [];
+      if (!hasOpenAI()) return res.status(200).json({ error: 'OPENAI_API_KEY manquante sur le serveur', done: true });
+
+      const { snapshot: s, signals } = getCached(gym);
+      const last = transcript[transcript.length - 1];
+      const auralixTurns = transcript.filter(t => t.speaker === 'auralix').length;
+
+      // Whose turn is it? (state derived entirely from the transcript)
+      if (transcript.length === 0) {
+        const text = await davidSays(s, signals, transcript, 'open');
+        return res.json({ turn: { speaker: 'david', text }, done: false, rounds });
+      }
+      if (last.speaker === 'david') {
+        // Auralix answers David with real data (aggregates — keeps member PII out).
+        const auralixSys = buildAskSystemPrompt(s, signals);
+        const q = `[SÉANCE INTERNE. David — ton closer — te met la pression pour bâtir un plan x10. Réponds-lui en AGRÉGATS: montants, compteurs, clubs, commerciaux, formules. N'énumère PAS des noms de membres individuels — reste au niveau chiffres/segments. Sois précis et court.]\n\nDavid: ${last.text}`;
+        const { reply, privacy } = await openaiAgentAnswer(db, auralixSys, q);
+        return res.json({ turn: { speaker: 'auralix', text: reply }, done: false, rounds, privacy });
+      }
+      // last.speaker === 'auralix' → David reacts, or delivers the final plan
+      const finalTurn = auralixTurns >= rounds;
+      const text = await davidSays(s, signals, transcript, finalTurn ? 'plan' : 'react');
+      return res.json({ turn: { speaker: 'david', text, plan: finalTurn }, done: finalTurn, rounds });
+    } catch (e) {
+      console.error('[AI/david-live]', e.message);
+      res.status(500).json({ error: e.message, done: true });
+    }
   });
 
   // ── POST /api/ai/director-brief ───────────────────────────────────────────
