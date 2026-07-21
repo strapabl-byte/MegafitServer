@@ -1174,18 +1174,30 @@ Chaque point avec des CHIFFRES RÉELS tirés des données (DH, %). Note: Casa An
       const { snapshot: s, signals, alerts, fromCache } = getCached(gym);
       saveAlerts(alerts, gym);
 
-      const ctxJson = JSON.stringify({
-        revenue: s.revenue, members: { active_total: s.members.active_total, expiring_30d: s.members.expiring_30d, expired_not_renewed: s.members.expired_not_renewed, resub: s.members.resub },
-        door_traffic: s.door_traffic, debts: s.debts, decaissements: s.decaissements,
-        incidents: s.incidents, commercials: s.commercials.slice(0,6), gyms: s.gyms, courses: s.courses,
-      });
-
+      const SCHEMA = `Réponds UNIQUEMENT en JSON valide (aucun texte avant/après):\n{"empire_status":"HEALTHY|WATCH|WARNING|CRITICAL","mood":"healthy|watch|warning|critical","executive_summary":"string","critical_alerts":[{"level":"critical","title":"string","detail":"string","gym":"string"}],"watch_points":[{"title":"string","detail":"string"}],"growth_opportunities":[{"title":"string","detail":"string","impact":"string"}],"priority_actions":[{"title":"string","owner":"string","deadline":"string","impact":"HIGH|MEDIUM","gym":"string","description":"string"}]}`;
+      // Accurate, un-truncated context — includes the PRE-COMPUTED variation so the model never recomputes a %.
+      const ctxScan = {
+        revenue: s.revenue, // revenue.vs_prev_month_pct is the correct pro-rata variation
+        members: { active_total: s.members.active_total, expiring_30d: s.members.expiring_30d, expired_not_renewed: s.members.expired_not_renewed, resub: s.members.resub },
+        debts: { total_open: s.debts.total_open, members_count: s.debts.members_count },
+        decaissements: { month_total: s.decaissements.month_total, expense_to_revenue_pct: s.decaissements.expense_to_revenue_pct, by_category: s.decaissements.by_category },
+        incidents: { open_total: s.incidents.open_total, critical: s.incidents.critical }, commercials: s.commercials.slice(0, 8), gyms: s.gyms, subscription_intel: s.subscription_intel?.slice(0, 10),
+      };
+      const sysScan = `Tu es AURALIX, IA tactique MegaFit (${s.meta.gym_scope}, ${s.meta.period}, jour ${s.meta.day_of_month}/${s.meta.days_in_month}). Analyse tactique de l'empire.
+RÈGLE ABSOLUE (CHIFFRES): utilise EXACTEMENT les valeurs fournies. \`revenue.vs_prev_month_pct\` EST la variation correcte vs le mois dernier au même jour (pro-rata) — ne recalcule JAMAIS un pourcentage toi-même, et ne compare pas le mois en cours (partiel) au mois dernier complet. Casa Anfa et Casa Lady n'ont pas de capteur de porte — ne jamais alerter sur leur trafic.
+${SCHEMA}`;
       const messages = [
-        { role: 'system', content: buildSysPrompt(s, signals) + `\n\n=== SNAPSHOT COMPLET ===\n${ctxJson.slice(0, 4000)}\n\nRéponds UNIQUEMENT en JSON valide (aucun texte avant ou après):\n{"empire_status":"HEALTHY|WATCH|WARNING|CRITICAL","mood":"healthy|watch|warning|critical","executive_summary":"string","critical_alerts":[{"level":"critical","title":"string","detail":"string","gym":"string"}],"watch_points":[{"title":"string","detail":"string"}],"growth_opportunities":[{"title":"string","detail":"string","impact":"string"}],"priority_actions":[{"title":"string","owner":"string","deadline":"string","impact":"HIGH|MEDIUM","gym":"string","description":"string"}]}` },
-        { role: 'user', content: `Scanne l'empire ${s.meta.gym_scope} et génère le JSON d'analyse tactique.` }
+        { role: 'system', content: sysScan },
+        { role: 'user', content: `Données:\n${JSON.stringify(ctxScan)}` },
       ];
 
-      const raw = await groq(messages, true);
+      // Primary: OpenAI (gpt-5.5 — accurate, doesn't miscompute). Fallback: Groq.
+      let raw = '';
+      if (hasOpenAI()) {
+        try { const d = await openaiCall(messages, { maxTokens: 2600 }); raw = d.choices?.[0]?.message?.content || ''; }
+        catch (oe) { console.error('[AI/scan] OpenAI failed → Groq:', oe.message); }
+      }
+      if (!raw) raw = await groq([{ role: 'system', content: buildSysPrompt(s, signals) + '\n\n' + sysScan }, messages[1]], true);
       let parsed;
       try {
         const m = raw.match(/\{[\s\S]*\}/);
