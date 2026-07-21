@@ -93,6 +93,41 @@ function makeQ(db) {
   };
 }
 
+// ── Privacy engine ────────────────────────────────────────────────────────────
+// When strict mode is on, member PII (name / phone / CIN) is swapped for a stable
+// per-request pseudonym BEFORE anything reaches OpenAI; `restore()` swaps them back
+// in the model's reply so the director still sees the real value. OpenAI never sees
+// a real member identity. When disabled, every method is a no-op passthrough.
+function makePrivacy(enabled) {
+  const fwd = new Map();  // `${kind}::${real}` → pseudonym
+  const rev = [];         // { pseudo, real }
+  let n = 0;
+  const LABEL = { member: 'Membre', tel: 'Tel', cin: 'CIN' };
+  const tok = (real, kind) => {
+    if (real == null || real === '' || typeof real === 'number') return real;
+    const s = String(real);
+    const key = `${kind}::${s}`;
+    if (fwd.has(key)) return fwd.get(key);
+    n += 1;
+    const pseudo = `${LABEL[kind] || 'X'}-${String(n).padStart(3, '0')}`;
+    fwd.set(key, pseudo); rev.push({ pseudo, real: s });
+    return pseudo;
+  };
+  return {
+    enabled: !!enabled,
+    name: (v) => enabled ? tok(v, 'member') : v,
+    tel:  (v) => enabled ? tok(v, 'tel') : v,
+    cin:  (v) => enabled ? tok(v, 'cin') : v,
+    // swap pseudonyms → real in outgoing text (longest pseudonym first to avoid prefix collisions)
+    restore: (text) => {
+      if (!enabled || !text) return text;
+      let out = String(text);
+      rev.slice().sort((a, b) => b.pseudo.length - a.pseudo.length).forEach(({ pseudo, real }) => { out = out.split(pseudo).join(real); });
+      return out;
+    },
+  };
+}
+
 // ── OpenAI function-tool schemas ──────────────────────────────────────────────
 const TOOL_SCHEMAS = [
   {
@@ -184,17 +219,18 @@ const TOOL_SCHEMAS = [
 ];
 
 // ── executors ─────────────────────────────────────────────────────────────────
-function execute(db, name, args = {}) {
+function execute(db, name, args = {}, priv) {
   if (!db) return { error: 'DB indisponible' };
   const q = makeQ(db);
+  const P = priv || makePrivacy(false); // no-op passthrough when privacy off
   try {
     switch (name) {
       case 'get_kpi_overview':      return toolKpiOverview(q, args);
-      case 'get_member':            return toolGetMember(q, args);
+      case 'get_member':            return toolGetMember(q, args, P);
       case 'get_club_revenue':      return toolClubRevenue(q, args);
       case 'list_decaissements':    return toolListDecaissements(q, args);
       case 'get_expense_breakdown': return toolExpenseBreakdown(q, args);
-      case 'get_debtors':           return toolGetDebtors(q, args);
+      case 'get_debtors':           return toolGetDebtors(q, args, P);
       case 'get_commercial_performance': return toolCommercialPerf(q, args);
       case 'search_activity_log':   return toolSearchActivity(q, args);
       default: return { error: `Outil inconnu: ${name}` };
@@ -234,7 +270,7 @@ function toolKpiOverview(q, { gym }) {
   };
 }
 
-function toolGetMember(q, { query }) {
+function toolGetMember(q, { query }, P) {
   if (!query || String(query).trim().length < 2) return { error: 'Requête trop courte' };
   const like = `%${String(query).trim().toLowerCase()}%`;
   const matches = q.all(
@@ -242,8 +278,8 @@ function toolGetMember(q, { query }) {
      WHERE (LOWER(full_name) LIKE ? OR REPLACE(phone,' ','') LIKE ? OR LOWER(cin) LIKE ?)
      ORDER BY is_archive ASC LIMIT 6`, like, like.replace(/\s/g, ''), like);
   if (!Array.isArray(matches) || matches.length === 0) return { found: false, message: 'Aucun membre trouvé' };
-  const list = matches.map(m => ({ name: m.full_name, club: GYM_NAMES[m.gym_id] || m.gym_id, phone: m.phone, cin: m.cin, plan: m.plan, expires_on: m.expires_on, archived: m.is_archive === 1 }));
-  // Payment history + debt for the best (first) match by name.
+  // PII (name/phone/cin) is pseudonymized here when privacy is strict; restored in the reply.
+  const list = matches.map(m => ({ name: P.name(m.full_name), club: GYM_NAMES[m.gym_id] || m.gym_id, phone: P.tel(m.phone), cin: P.cin(m.cin), plan: m.plan, expires_on: m.expires_on, archived: m.is_archive === 1 }));
   const top = matches[0];
   const nameLike = `%${(top.full_name || '').toLowerCase()}%`;
   const tx = q.all(
@@ -255,7 +291,7 @@ function toolGetMember(q, { query }) {
   const debt = txArr.reduce((s, t) => s + Math.max(0, t.reste || 0), 0);
   return {
     found: true, matches: list,
-    detail_pour: top.full_name,
+    detail_pour: P.name(top.full_name),
     dette_dh: Math.round(debt),
     transactions: txArr.map(t => ({ date: t.date, club: GYM_NAMES[t.gym_id] || t.gym_id, formule: t.abonnement, prix_dh: t.prix, paye_dh: t.paye, reste_dh: Math.max(0, t.reste || 0), commercial: t.commercial })),
   };
@@ -329,7 +365,7 @@ function toolExpenseBreakdown(q, { month, gym }) {
   };
 }
 
-function toolGetDebtors(q, { gym, limit }) {
+function toolGetDebtors(q, { gym, limit }, P) {
   const sc = gymScopeSql(gym); if (sc.bad) return { error: 'Club non reconnu' };
   const lim = Math.min(Math.max(parseInt(limit) || 15, 1), 40);
   const rows = q.all(`SELECT r.nom, r.gym_id, ROUND(${RESTE_EXPR},0) reste, r.date, r.note_reste FROM register_cache r WHERE ${NOT_SETTLED} AND ${RESTE_EXPR}>0 AND r.${sc.where} ORDER BY reste DESC LIMIT ?`, lim);
@@ -338,7 +374,7 @@ function toolGetDebtors(q, { gym, limit }) {
   return {
     club: sc.scope === 'all' ? 'ALL EMPIRE' : GYM_NAMES[sc.scope],
     dette_totale_dh: Math.round(tot?.total || 0), nombre_debiteurs: tot?.cnt || 0,
-    debiteurs: arr.map(d => ({ nom: d.nom, club: GYM_NAMES[d.gym_id] || d.gym_id, reste_dh: Math.round(d.reste || 0), date: d.date, note: d.note_reste })),
+    debiteurs: arr.map(d => ({ nom: P.name(d.nom), club: GYM_NAMES[d.gym_id] || d.gym_id, reste_dh: Math.round(d.reste || 0), date: d.date, note: d.note_reste })),
   };
 }
 
@@ -373,4 +409,4 @@ function toolSearchActivity(q, { query, gym, days, limit }) {
   };
 }
 
-module.exports = { TOOL_SCHEMAS, execute, categorizeExpense, EXPENSE_CATEGORIES, resolveMonth, resolveGym, GYM_NAMES };
+module.exports = { TOOL_SCHEMAS, execute, makePrivacy, categorizeExpense, EXPENSE_CATEGORIES, resolveMonth, resolveGym, GYM_NAMES };

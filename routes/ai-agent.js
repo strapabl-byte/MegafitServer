@@ -13,6 +13,9 @@ const aiTools = require('../services/ai-tools'); // retrieval tool engine (OpenA
 const OPENAI_URL   = 'https://api.openai.com/v1/chat/completions';
 const OPENAI_MODEL = process.env.AURALIX_OPENAI_MODEL || 'gpt-4o';
 const hasOpenAI = () => !!process.env.OPENAI_API_KEY;
+// Privacy: when strict, member PII is pseudonymized before any data leaves for
+// OpenAI and restored in the reply — flip live with the env var, no redeploy.
+const strictPrivacy = () => process.env.AURALIX_PRIVACY_MODE === 'strict';
 
 async function openaiCall(messages, { tools, model, maxTokens = 1400, temperature = 0.3 } = {}) {
   const key = process.env.OPENAI_API_KEY;
@@ -40,6 +43,7 @@ async function openaiCall(messages, { tools, model, maxTokens = 1400, temperatur
 // feed the rows back → it reasons and answers. This is what removes the old
 // 3500-char snapshot keyhole for chat: the model fetches exactly what it needs.
 async function openaiAgentAnswer(db, systemPrompt, question) {
+  const priv = aiTools.makePrivacy(strictPrivacy()); // pseudonymize outbound, restore inbound
   const messages = [{ role: 'system', content: systemPrompt }, { role: 'user', content: question }];
   const toolsUsed = [];
   for (let hop = 0; hop < 6; hop++) {
@@ -50,15 +54,15 @@ async function openaiAgentAnswer(db, systemPrompt, question) {
     if (msg.tool_calls?.length) {
       for (const tc of msg.tool_calls) {
         let args = {}; try { args = JSON.parse(tc.function.arguments || '{}'); } catch {}
-        const result = aiTools.execute(db, tc.function.name, args);
+        const result = aiTools.execute(db, tc.function.name, args, priv);
         toolsUsed.push(tc.function.name);
         messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result).slice(0, 7000) });
       }
       continue; // let the model read the results
     }
-    return { reply: msg.content || '', toolsUsed };
+    return { reply: priv.restore(msg.content || ''), toolsUsed, privacy: priv.enabled };
   }
-  return { reply: 'Analyse trop longue — reformule la question.', toolsUsed };
+  return { reply: 'Analyse trop longue — reformule la question.', toolsUsed, privacy: priv.enabled };
 }
 
 // Lean system prompt for the chat path: identity + compact KPI summary. Details
@@ -1076,17 +1080,21 @@ module.exports = function aiAgentRouter({ lc }) {
       if (hasOpenAI()) {
         try {
           const sysPrompt = buildAskSystemPrompt(s, signals) + digestMemory;
-          const { reply, toolsUsed } = await openaiAgentAnswer(db, sysPrompt, question);
-          return res.json({ reply, signals, alerts, empire_status: signals.empire_status, fromCache, engine: 'openai', toolsUsed });
+          const { reply, toolsUsed, privacy } = await openaiAgentAnswer(db, sysPrompt, question);
+          return res.json({ reply, signals, alerts, empire_status: signals.empire_status, fromCache, engine: 'openai', toolsUsed, privacy });
         } catch (oe) {
           console.error('[AI/ask] OpenAI failed → Groq fallback:', oe.message);
         }
       }
 
-      // ── Fallback: legacy Groq path (truncated snapshot) ──
+      // ── Fallback: legacy Groq path (truncated snapshot) — same privacy guarantee ──
+      const priv = aiTools.makePrivacy(strictPrivacy());
+      const debtsCtx = priv.enabled
+        ? { ...s.debts, top_debtors: (s.debts.top_debtors || []).map(d => ({ ...d, name: priv.name(d.name) })) }
+        : s.debts;
       const ctxJson = JSON.stringify({
         revenue: s.revenue, members: { active_total: s.members.active_total, expiring_30d: s.members.expiring_30d, expired_not_renewed: s.members.expired_not_renewed, resub: s.members.resub },
-        door_traffic: s.door_traffic, debts: s.debts, decaissements: { month_total: s.decaissements.month_total, by_gym: s.decaissements.by_gym, by_category: s.decaissements.by_category },
+        door_traffic: s.door_traffic, debts: debtsCtx, decaissements: { month_total: s.decaissements.month_total, by_gym: s.decaissements.by_gym, by_category: s.decaissements.by_category },
         incidents: { open_total: s.incidents.open_total, critical: s.incidents.critical }, gyms: s.gyms, commercials: s.commercials.slice(0, 8),
         historical_revenue: s.historical_revenue.slice(-6), subscription_intel: s.subscription_intel?.slice(0, 15),
       });
@@ -1094,8 +1102,8 @@ module.exports = function aiAgentRouter({ lc }) {
         { role: 'system', content: buildSysPrompt(s, signals) + digestMemory + `\n\n=== DONNÉES ===\n${ctxJson.slice(0, 3500)}` },
         { role: 'user', content: question }
       ];
-      const reply = await groq(messages, true);
-      res.json({ reply, signals, alerts, empire_status: signals.empire_status, fromCache, engine: 'groq' });
+      const reply = priv.restore(await groq(messages, true));
+      res.json({ reply, signals, alerts, empire_status: signals.empire_status, fromCache, engine: 'groq', privacy: priv.enabled });
     } catch(e) { console.error('[AI/ask]', e.message); res.status(500).json({ error: e.message }); }
   });
 
@@ -1118,12 +1126,16 @@ STRUCTURE OBLIGATOIRE (français, avec ces titres):
 5. 🚨 RISQUES — 1 à 3 alertes (dette critique, churn, décaissements anormaux, activité staff suspecte).
 
 Chaque point avec des CHIFFRES RÉELS tirés des données (DH, %). Note: Casa Anfa et Casa Lady n'ont PAS de capteur de porte — ne jamais alerter sur leur trafic. Tu es un CONSEILLER: tu recommandes, tu ne modifies rien.`;
+      // Pseudonymize debtor names before the brief context leaves for OpenAI; restore after.
+      const priv = aiTools.makePrivacy(strictPrivacy());
+      const ctx = briefContext(s);
+      if (priv.enabled && ctx.debts?.top_debtors) ctx.debts.top_debtors = ctx.debts.top_debtors.map(d => ({ ...d, name: priv.name(d.name) }));
       const messages = [
         { role: 'system', content: sys },
-        { role: 'user', content: `Données complètes (${s.meta.gym_scope}, période ${s.meta.period}, jour ${s.meta.day_of_month}/${s.meta.days_in_month}):\n${JSON.stringify(briefContext(s))}` },
+        { role: 'user', content: `Données complètes (${s.meta.gym_scope}, période ${s.meta.period}, jour ${s.meta.day_of_month}/${s.meta.days_in_month}):\n${JSON.stringify(ctx)}` },
       ];
       const data = await openaiCall(messages, { maxTokens: 4000, temperature: 0.35 });
-      const brief = data.choices?.[0]?.message?.content || '';
+      const brief = priv.restore(data.choices?.[0]?.message?.content || '');
 
       try {
         const today = new Date(Date.now() + 3600000).toISOString().slice(0, 10);
