@@ -86,6 +86,29 @@ RÈGLES:
 - Tu es un CONSEILLER: tu analyses et recommandes — tu ne modifies JAMAIS rien.`;
 }
 
+// DAVID — the growth-closer persona. Same tools/data as Auralix, different soul:
+// the charisma and hunger of a Wall Street closer, pointed at LEGIT 10× growth.
+function buildDavidSystemPrompt(snap, sig) {
+  const r = snap.revenue, meta = snap.meta;
+  return `Tu es DAVID — le closer le plus redoutable du Maroc, directeur commercial d'élite pour MegaFit (4 clubs: Fès Doukkarate, Fès Saïss, Casa Anfa, Casa Lady). L'énergie et le charisme d'un loup de Wall Street — mais 100% légal, honnête et éthique (l'arnaque, c'est ce qui les envoie en prison). Ton obsession unique: multiplier le CA par 10.
+
+TON CARACTÈRE:
+- Direct, percutant, plein de conviction. Tu appelles l'utilisateur "Boss".
+- Zéro bla-bla, zéro excuse — une excuse, c'est de l'argent perdu.
+- Motivant, ambitieux, affamé de résultats — mais chaque phrase s'appuie sur un CHIFFRE RÉEL.
+- Chaque réponse se termine par UN move concret pour faire rentrer de l'argent, aujourd'hui.
+- Jamais de mensonge, jamais de manipulation, jamais rien d'illégal. Tu montres où est l'argent et comment le prendre proprement.
+
+TU AS DES OUTILS pour interroger les VRAIES données (dettes, membres à risque/churn, revenus par club/mois, décaissements, commerciaux). UTILISE-LES à fond avant de parler — va chercher le chiffre exact puis transforme-le en opportunité. Ne devine JAMAIS.
+
+L'ARGENT QUI DORT MAINTENANT (${meta.gym_scope}, ${meta.period}):
+- CA mois: ${r.month.toLocaleString()} DH / objectif ${r.monthly_goal.toLocaleString()} DH
+- Dette dormante: ${snap.debts.total_open.toLocaleString()} DH (${snap.debts.members_count} membres) — de l'argent DÉJÀ gagné qui attend qu'on aille le chercher
+- Membres actifs: ${snap.members.active_total} · expirent sous 30j: ${snap.members.expiring_30d} — chaque expiration non appelée = un client offert à la concurrence
+
+RÈGLES: Français, punchy, chiffres réels en DH. Tu es un CONSEILLER agressif — tu proposes et tu pushes fort, mais tu ne modifies JAMAIS rien dans le système. Ton job: montrer l'argent et le plan pour le prendre, légalement, aujourd'hui.`;
+}
+
 // Bounded but comprehensive context for the Director's Brief (full awareness,
 // heavy lists trimmed). gpt-4o handles this easily; no 3500-char truncation.
 function briefContext(s) {
@@ -1066,6 +1089,7 @@ module.exports = function aiAgentRouter({ lc }) {
   router.post('/api/ai/ask', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
       const { question, gym = 'all' } = req.body;
+      const persona = req.body.persona === 'david' ? 'david' : 'auralix';
       if (!question?.trim()) return res.status(400).json({ error: 'Question required' });
 
       const { snapshot: s, signals, alerts, fromCache } = getCached(gym);
@@ -1076,12 +1100,12 @@ module.exports = function aiAgentRouter({ lc }) {
         ? `\n\nMÉMOIRE (digests récents): ${digests.map(d => `[${d.date}] ${(d.digest_text || '').slice(0, 120)}`).join(' · ')}`
         : '';
 
-      // ── Primary: OpenAI director brain with retrieval tools ──
+      // ── Primary: OpenAI director brain with retrieval tools (Auralix or David persona) ──
       if (hasOpenAI()) {
         try {
-          const sysPrompt = buildAskSystemPrompt(s, signals) + digestMemory;
+          const sysPrompt = (persona === 'david' ? buildDavidSystemPrompt(s, signals) : buildAskSystemPrompt(s, signals)) + digestMemory;
           const { reply, toolsUsed, privacy } = await openaiAgentAnswer(db, sysPrompt, question);
-          return res.json({ reply, signals, alerts, empire_status: signals.empire_status, fromCache, engine: 'openai', toolsUsed, privacy });
+          return res.json({ reply, signals, alerts, empire_status: signals.empire_status, fromCache, engine: 'openai', toolsUsed, privacy, persona });
         } catch (oe) {
           console.error('[AI/ask] OpenAI failed → Groq fallback:', oe.message);
         }
