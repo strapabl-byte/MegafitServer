@@ -1147,6 +1147,15 @@ Chaque point avec des CHIFFRES RÉELS tirés des données (DH, %). Note: Casa An
     } catch(e) { console.error('[AI/director-brief]', e.message); res.status(500).json({ error: e.message }); }
   });
 
+  // ── GET /api/ai/churn-risk ── ranked members at risk of not renewing ──
+  // Direct dashboard endpoint → REAL names (privacy mode only guards data sent
+  // to OpenAI; this goes straight to the admin's own screen so they can act).
+  router.get('/api/ai/churn-risk', verifyAzureToken, requireAdmin, (req, res) => {
+    try {
+      res.json(aiTools.churnRisk(db, { gym: req.query.gym || 'all', limit: req.query.limit || 25 }));
+    } catch(e) { console.error('[AI/churn-risk]', e.message); res.status(500).json({ error: e.message }); }
+  });
+
   // ── GET /api/ai/director-brief ── instant reload of today's stored brief ──
   router.get('/api/ai/director-brief', verifyAzureToken, (req, res) => {
     try {

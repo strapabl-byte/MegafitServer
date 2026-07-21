@@ -206,6 +206,17 @@ const TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
+      name: 'get_churn_risk',
+      description: "Membres à RISQUE de non-renouvellement (churn), classés du plus risqué au moins risqué, avec un score, le niveau (CRITIQUE/ÉLEVÉ/MODÉRÉ) et les raisons (expiration proche/dépassée, dette, formule courte). Utile pour 'qui risque de partir', 'qui appeler en priorité pour la relance'.",
+      parameters: { type: 'object', properties: {
+        gym: { type: 'string', description: "Club ou 'all'" },
+        limit: { type: 'integer', description: 'Nombre max (défaut 20)' },
+      } },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'search_activity_log',
       description: "Journal d'activité des managers/staff (audit): qui a fait quoi, quelle page, quand — y compris l'usage du CODE responsable dans le registre. Utile pour surveiller l'activité ('qu'a fait tel manager', 'qui a utilisé le code', 'activité de Casa Anfa cette semaine').",
       parameters: { type: 'object', properties: {
@@ -231,6 +242,7 @@ function execute(db, name, args = {}, priv) {
       case 'list_decaissements':    return toolListDecaissements(q, args);
       case 'get_expense_breakdown': return toolExpenseBreakdown(q, args);
       case 'get_debtors':           return toolGetDebtors(q, args, P);
+      case 'get_churn_risk':        return toolChurnRisk(q, args, P);
       case 'get_commercial_performance': return toolCommercialPerf(q, args);
       case 'search_activity_log':   return toolSearchActivity(q, args);
       default: return { error: `Outil inconnu: ${name}` };
@@ -378,6 +390,64 @@ function toolGetDebtors(q, { gym, limit }, P) {
   };
 }
 
+// ── Churn risk: deterministic, explainable scoring (expiry + debt + plan) ──────
+// Reusable core (real names); the tool wrapper pseudonymizes under privacy mode,
+// the /api/ai/churn-risk endpoint uses it directly (real names to the dashboard).
+function computeChurn(q, { gym, limit } = {}) {
+  const sc = gymScopeSql(gym); if (sc.bad) return { error: 'Club non reconnu' };
+  const lim = Math.min(Math.max(parseInt(limit) || 20, 1), 60);
+  // Actionable window only: expiring within 45 days (save them) or expired within
+  // the last 45 days (recoverable win-back). Excludes members long gone (8 months+).
+  const rows = q.all(`SELECT id, full_name, gym_id, plan, expires_on,
+      CAST(julianday(expires_on) - julianday('now') AS INTEGER) AS dte
+    FROM members_cache
+    WHERE is_archive=0 AND ${sc.where} AND expires_on IS NOT NULL AND expires_on!=''
+      AND date(expires_on) < date('now','+45 days')
+      AND date(expires_on) > date('now','-45 days')
+    ORDER BY expires_on ASC LIMIT 400`);
+  const arr = Array.isArray(rows) ? rows : [];
+  // best-effort debt-by-name map (extra risk signal; not critical if unmatched)
+  const debtRows = q.all(`SELECT LOWER(r.nom) nom, ROUND(SUM(${RESTE_EXPR}),0) reste FROM register_cache r WHERE ${NOT_SETTLED} AND ${RESTE_EXPR}>0 AND r.${sc.where} GROUP BY LOWER(r.nom)`);
+  const debtMap = {};
+  (Array.isArray(debtRows) ? debtRows : []).forEach(d => { if (d.nom) debtMap[d.nom] = d.reste || 0; });
+  const findDebt = (name) => {
+    const n = (name || '').toLowerCase().trim(); if (!n) return 0;
+    if (debtMap[n]) return debtMap[n];
+    for (const k in debtMap) { if (k.length > 3 && (n.includes(k) || k.includes(n))) return debtMap[k]; }
+    return 0;
+  };
+  const scored = arr.map(m => {
+    const dte = m.dte; let score = 0; const reasons = [];
+    if (dte >= 0 && dte <= 7) { score += 48; reasons.push(`Expire dans ${dte}j — à sauver maintenant`); }
+    else if (dte < 0) { score += 44; reasons.push(`Expiré depuis ${Math.abs(dte)}j — à récupérer`); }
+    else if (dte <= 30) { score += 28; reasons.push(`Expire dans ${dte}j`); }
+    else { score += 12; reasons.push(`Expire dans ${dte}j`); }
+    const debt = findDebt(m.full_name);
+    if (debt > 0) { score += Math.min(22, 12 + Math.round(debt / 1000)); reasons.push(`Dette ${Math.round(debt)} DH`); }
+    if (/(^|\D)1\s*mois|mensuel|hebdo|semaine|jour/i.test(m.plan || '')) { score += 14; reasons.push('Formule courte'); }
+    score = Math.max(0, Math.min(100, score));
+    const level = score >= 60 ? 'CRITIQUE' : score >= 40 ? 'ÉLEVÉ' : score >= 25 ? 'MODÉRÉ' : 'FAIBLE';
+    return { name: m.full_name, club: GYM_NAMES[m.gym_id] || m.gym_id, plan: m.plan, expires_on: m.expires_on, days_to_expiry: dte, debt_dh: Math.round(debt), score, level, reasons };
+  }).sort((a, b) => b.score - a.score).slice(0, lim);
+  return {
+    club: sc.scope === 'all' ? 'ALL EMPIRE' : GYM_NAMES[sc.scope],
+    summary: {
+      total_candidates: arr.length,
+      critique: scored.filter(x => x.level === 'CRITIQUE').length,
+      eleve: scored.filter(x => x.level === 'ÉLEVÉ').length,
+      modere: scored.filter(x => x.level === 'MODÉRÉ').length,
+    },
+    at_risk: scored,
+  };
+}
+function toolChurnRisk(q, args, P) {
+  const r = computeChurn(q, args);
+  if (r.error) return r;
+  return { ...r, at_risk: r.at_risk.map(x => ({ ...x, name: P.name(x.name) })) };
+}
+// db-level wrapper for the direct dashboard endpoint (always real names)
+function churnRisk(db, args = {}) { return computeChurn(makeQ(db), args); }
+
 function toolCommercialPerf(q, { month, gym }) {
   const sc = gymScopeSql(gym); if (sc.bad) return { error: 'Club non reconnu' };
   const ym = resolveMonth(month); if (!ym) return { error: 'Mois invalide' };
@@ -409,4 +479,4 @@ function toolSearchActivity(q, { query, gym, days, limit }) {
   };
 }
 
-module.exports = { TOOL_SCHEMAS, execute, makePrivacy, categorizeExpense, EXPENSE_CATEGORIES, resolveMonth, resolveGym, GYM_NAMES };
+module.exports = { TOOL_SCHEMAS, execute, makePrivacy, churnRisk, categorizeExpense, EXPENSE_CATEGORIES, resolveMonth, resolveGym, GYM_NAMES };
