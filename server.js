@@ -1142,7 +1142,16 @@ app.post('/api/send-notification-bulk', _vat, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Healthcheck
 // ─────────────────────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
+app.get('/health', (req, res) => {
+  // Counts only (no PII) — lets us verify the Odoo archive import state after a deploy.
+  let odoo = null;
+  try {
+    const rows     = lc.db.prepare('SELECT COUNT(*) c FROM odoo_members_cache').get().c;
+    const enriched = lc.db.prepare('SELECT COUNT(*) c FROM odoo_members_cache WHERE partner_id IS NOT NULL').get().c;
+    odoo = { rows, enriched };
+  } catch (_) {}
+  res.json({ ok: true, ts: new Date().toISOString(), odoo });
+});
 
 
 // (inject-stats endpoint moved above route mounts — see line ~193)
