@@ -248,6 +248,7 @@ module.exports = function coursesRouter({ db, admin }) {
   router.get('/api/coaches/private-clients', verifyAzureToken, async (req, res) => {
     try {
       const minSessions = parseInt(req.query.min) || 10;
+      const gymScope = (req.query.gymId || 'all').toLowerCase();
       const GYM_NAMES = { dokarat: 'Fès Dokkarat', marjane: 'Fès Saïss', casa1: 'Casa Anfa', casa2: 'Casa Lady' };
       const canSee = (g) => req.isAdmin || (typeof req.hasAccessToGym === 'function' ? req.hasAccessToGym(g) : true);
 
@@ -266,7 +267,8 @@ module.exports = function coursesRouter({ db, admin }) {
         if (sessions < minSessions) return;
 
         const gymId = (m.gymId || 'unknown').toLowerCase();
-        if (!canSee(gymId)) return; // managers only see their own club
+        if (!canSee(gymId)) return;                          // managers only see their own club
+        if (gymScope !== 'all' && gymId !== gymScope) return; // honor the selected club
 
         const createdAt = m.createdAt?.toDate ? m.createdAt.toDate().toISOString()
           : (m.createdAt?._seconds ? new Date(m.createdAt._seconds * 1000).toISOString() : null);
