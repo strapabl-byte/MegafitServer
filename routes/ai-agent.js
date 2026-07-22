@@ -17,7 +17,10 @@ const hasOpenAI = () => !!process.env.OPENAI_API_KEY;
 // OpenAI and restored in the reply — flip live with the env var, no redeploy.
 const strictPrivacy = () => process.env.AURALIX_PRIVACY_MODE === 'strict';
 
-async function openaiCall(messages, { tools, model, maxTokens = 1400, temperature = 0.3 } = {}) {
+// 💰 COST CONTROL: on reasoning models (gpt-5.x / o-series) the *hidden* reasoning
+// tokens are billed too, so we cap both the answer budget and the reasoning effort.
+// Defaults are deliberately tight — Auralix/David must be precise, not verbose.
+async function openaiCall(messages, { tools, model, maxTokens = 700, temperature = 0.3, effort = 'low' } = {}) {
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw new Error('OPENAI_API_KEY not configured');
   const mdl = model || OPENAI_MODEL;
@@ -25,16 +28,34 @@ async function openaiCall(messages, { tools, model, maxTokens = 1400, temperatur
   // custom `temperature` (only the default is allowed). gpt-4o uses the classic params.
   const isNextGen = /^(gpt-5|o1|o3|o4)/i.test(mdl);
   const body = { model: mdl, messages };
-  // Reasoning models spend part of the budget on hidden reasoning tokens — give a
-  // floor so the visible answer/brief isn't starved to empty.
-  if (isNextGen) { body.max_completion_tokens = Math.max(maxTokens, 2500); }
-  else { body.max_tokens = maxTokens; body.temperature = temperature; }
+  if (isNextGen) {
+    // Floor keeps the visible answer from being starved by reasoning tokens, but is
+    // far tighter than before (was 2500) now that reasoning effort is capped.
+    body.max_completion_tokens = Math.max(maxTokens, 1000);
+    if (effort) body.reasoning_effort = effort;
+  } else {
+    body.max_tokens = maxTokens;
+    body.temperature = temperature;
+  }
   if (tools?.length) { body.tools = tools; body.tool_choice = 'auto'; }
-  const res = await fetch(OPENAI_URL, {
+
+  const post = async (payload) => fetch(OPENAI_URL, {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify(payload),
   });
+
+  let res = await post(body);
+  // Some models don't accept `reasoning_effort` — retry once without it rather than fail.
+  if (!res.ok && body.reasoning_effort) {
+    const txt = await res.text();
+    if (/reasoning_effort/i.test(txt)) {
+      const { reasoning_effort, ...fallback } = body;
+      res = await post(fallback);
+    } else {
+      const e = new Error(`OpenAI HTTP ${res.status}: ${txt.slice(0, 300)}`); e.httpStatus = res.status; throw e;
+    }
+  }
   if (!res.ok) { const t = await res.text(); const e = new Error(`OpenAI HTTP ${res.status}: ${t.slice(0, 300)}`); e.httpStatus = res.status; throw e; }
   return res.json();
 }
@@ -46,8 +67,13 @@ async function openaiAgentAnswer(db, systemPrompt, question) {
   const priv = aiTools.makePrivacy(strictPrivacy()); // pseudonymize outbound, restore inbound
   const messages = [{ role: 'system', content: systemPrompt }, { role: 'user', content: question }];
   const toolsUsed = [];
-  for (let hop = 0; hop < 6; hop++) {
-    const data = await openaiCall(messages, { tools: aiTools.TOOL_SCHEMAS });
+  // 4 hops is enough for every real question and saves resending the whole history
+  // (+ tool schemas) two extra times — the single biggest input-token cost here.
+  for (let hop = 0; hop < 4; hop++) {
+    // The cap is a ceiling, not a target: with reasoning_effort='low' the spend is
+    // driven by effort + the "6 lignes max" prompt rule, so keep enough headroom that
+    // the final synthesis is never truncated to an empty answer.
+    const data = await openaiCall(messages, { tools: aiTools.TOOL_SCHEMAS, maxTokens: 1400 });
     const msg = data.choices?.[0]?.message;
     if (!msg) break;
     messages.push(msg);
@@ -56,7 +82,8 @@ async function openaiAgentAnswer(db, systemPrompt, question) {
         let args = {}; try { args = JSON.parse(tc.function.arguments || '{}'); } catch {}
         const result = aiTools.execute(db, tc.function.name, args, priv);
         toolsUsed.push(tc.function.name);
-        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result).slice(0, 7000) });
+        // Tool rows are re-sent on every following hop — keep them tight (was 7000).
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result).slice(0, 2800) });
       }
       continue; // let the model read the results
     }
@@ -79,10 +106,12 @@ TU DISPOSES D'OUTILS pour interroger les données RÉELLES: revenus par club/moi
 - Dette ouverte: ${snap.debts.total_open.toLocaleString()} DH (${snap.debts.members_count} mbr) · Décaissements mois: ${snap.decaissements.month_total.toLocaleString()} DH
 - Membres actifs: ${snap.members.active_total} · expirent 30j: ${snap.members.expiring_30d} · Incidents ouverts: ${snap.incidents.open_total}
 
-RÈGLES:
-- Français, concis, chaque chiffre avec DH et %.
-- Cite la donnée réelle obtenue (montant, nom, date, club).
-- Termine par 1 recommandation actionnable quand c'est pertinent.
+RÈGLES (STRICTES — précision, pas de volume):
+- 6 LIGNES MAXIMUM. Zéro préambule, zéro reformulation de la question, zéro conclusion generique.
+- Va droit au chiffre demandé. Chaque chiffre avec DH et %.
+- Cite la donnée réelle obtenue (montant, nom, date, club) — rien d'autre.
+- 1 seule recommandation actionnable à la fin, en une ligne, et seulement si elle apporte quelque chose.
+- N'énumère pas tout ce que tu sais: réponds EXACTEMENT à ce qui est demandé.
 - Tu es un CONSEILLER: tu analyses et recommandes — tu ne modifies JAMAIS rien.`;
 }
 
@@ -106,7 +135,7 @@ L'ARGENT QUI DORT MAINTENANT (${meta.gym_scope}, ${meta.period}):
 - Dette dormante: ${snap.debts.total_open.toLocaleString()} DH (${snap.debts.members_count} membres) — de l'argent DÉJÀ gagné qui attend qu'on aille le chercher
 - Membres actifs: ${snap.members.active_total} · expirent sous 30j: ${snap.members.expiring_30d} — chaque expiration non appelée = un client offert à la concurrence
 
-RÈGLES: Français, punchy, chiffres réels en DH. Tu es un CONSEILLER agressif — tu proposes et tu pushes fort, mais tu ne modifies JAMAIS rien dans le système. Ton job: montrer l'argent et le plan pour le prendre, légalement, aujourd'hui.`;
+RÈGLES: Français, punchy, chiffres réels en DH. 6 LIGNES MAXIMUM — un closer va droit au but, il ne fait pas de rapport. Zéro préambule. Tu es un CONSEILLER agressif — tu proposes et tu pushes fort, mais tu ne modifies JAMAIS rien dans le système. Ton job: montrer l'argent et le plan pour le prendre, légalement, aujourd'hui.`;
 }
 
 // DAVID LIVE — David runs a working session WITH Auralix (the analyst who holds
@@ -138,7 +167,9 @@ async function davidSays(snap, sig, transcript, mode) {
     { role: 'system', content: buildDavidLivePrompt(snap, sig) },
     { role: 'user', content: `SÉANCE JUSQU'ICI:\n${convo || '(début de séance)'}\n\n${instruction}` },
   ];
-  const data = await openaiCall(messages, { maxTokens: mode === 'plan' ? 1800 : 800 });
+  // The plan is a full numbered action list over the whole transcript — it needs real
+  // room, otherwise reasoning tokens eat the budget and it returns empty.
+  const data = await openaiCall(messages, { maxTokens: mode === 'plan' ? 2200 : 900 });
   return (data.choices?.[0]?.message?.content || '').trim();
 }
 
@@ -1172,7 +1203,7 @@ module.exports = function aiAgentRouter({ lc }) {
   router.post('/api/ai/david-live', verifyAzureToken, requireAdmin, async (req, res) => {
     try {
       const { gym = 'all' } = req.body;
-      const rounds = Math.max(2, Math.min(5, Number(req.body.rounds) || 3)); // Auralix answers per session
+      const rounds = Math.max(1, Math.min(4, Number(req.body.rounds) || 2)); // Auralix answers per session (each round = 2 model calls)
       const transcript = Array.isArray(req.body.transcript) ? req.body.transcript : [];
       if (!hasOpenAI()) return res.status(200).json({ error: 'OPENAI_API_KEY manquante sur le serveur', done: true });
 
@@ -1229,7 +1260,10 @@ Chaque point avec des CHIFFRES RÉELS tirés des données (DH, %). Note: Casa An
         { role: 'system', content: sys },
         { role: 'user', content: `Données complètes (${s.meta.gym_scope}, période ${s.meta.period}, jour ${s.meta.day_of_month}/${s.meta.days_in_month}):\n${JSON.stringify(ctx)}` },
       ];
-      const data = await openaiCall(messages, { maxTokens: 4000, temperature: 0.35 });
+      // The brief is long-form over a big snapshot: keep effort LOW (otherwise hidden
+      // reasoning tokens swallow the whole budget and the brief comes back empty) and
+      // give it enough room to actually write the 5 sections.
+      const data = await openaiCall(messages, { maxTokens: 2600, temperature: 0.35, effort: 'low' });
       const brief = priv.restore(data.choices?.[0]?.message?.content || '');
 
       try {
@@ -1289,7 +1323,7 @@ ${SCHEMA}`;
       // Primary: OpenAI (gpt-5.5 — accurate, doesn't miscompute). Fallback: Groq.
       let raw = '';
       if (hasOpenAI()) {
-        try { const d = await openaiCall(messages, { maxTokens: 2600 }); raw = d.choices?.[0]?.message?.content || ''; }
+        try { const d = await openaiCall(messages, { maxTokens: 1700 }); raw = d.choices?.[0]?.message?.content || ''; }
         catch (oe) { console.error('[AI/scan] OpenAI failed → Groq:', oe.message); }
       }
       if (!raw) raw = await groq([{ role: 'system', content: buildSysPrompt(s, signals) + '\n\n' + sysScan }, messages[1]], true);
