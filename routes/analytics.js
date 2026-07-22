@@ -924,6 +924,27 @@ Reply ONLY with valid JSON (no markdown):
         }
       }
 
+      // 📦 ARCHIVE BACKFILL — historical periods predate the daily register, so their
+      // revenue lives in the Odoo archive (amount_paid booked on date_inscription).
+      // Loaded in ONE query for the whole range, then used only where the register has
+      // nothing for that day+club, so live data always wins and nothing double-counts.
+      const archiveRev = {};
+      try {
+        if (lc.db && dateStrs.length) {
+          const from = dateStrs[0], to = dateStrs[dateStrs.length - 1];
+          const rows = lc.db.prepare(
+            `SELECT date_inscription AS d, gym_id AS g, SUM(amount_paid) AS rev
+               FROM odoo_members_cache
+              WHERE date_inscription BETWEEN ? AND ? AND amount_paid > 0
+              GROUP BY d, g`
+          ).all(from, to);
+          rows.forEach(r => {
+            if (!r.d) return;
+            (archiveRev[r.d] = archiveRev[r.d] || {})[r.g] = Number(r.rev) || 0;
+          });
+        }
+      } catch (e) { console.warn('[daily-stats] archive backfill failed:', e.message); }
+
       // Revenue from SQLite register (completed days) + today register if requested
       dateStrs.forEach(d => {
          let rev = 0;
@@ -933,8 +954,17 @@ Reply ONLY with valid JSON (no markdown):
             lc.getRegister(gid, d).forEach(e => {
                gymRev += (Number(e.tpe)||0) + (Number(e.espece)||0) + (Number(e.virement)||0) + (Number(e.cheque)||0);
             });
+            // Gap-fill from the archive only when the register has nothing that day.
+            if (gymRev === 0 && archiveRev[d] && archiveRev[d][gid]) gymRev = archiveRev[d][gid];
             revPerGym[gid] = gymRev;
             rev += gymRev;
+         }
+         // ~13% of archived sales have no club recorded in Odoo. On the empire view
+         // ('all') add them to the TOTAL so it isn't under-reported — they stay out of
+         // the per-club series because there's no club to attribute them to.
+         if (gymId === 'all' && archiveRev[d]) {
+            const unassigned = (archiveRev[d]['other'] || 0) + (archiveRev[d][''] || 0) + (archiveRev[d][null] || 0);
+            if (unassigned > 0) { rev += unassigned; revPerGym.other = unassigned; }
          }
          map[d].revenue = rev;
          map[d].revPerGym = revPerGym;
