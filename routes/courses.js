@@ -240,6 +240,69 @@ module.exports = function coursesRouter({ db, admin }) {
     } catch (err) { res.status(500).json({ error: 'Failed to fetch participants' }); }
   });
 
+  // ── GET /api/coaches/private-clients ──────────────────────────────────────
+  // All clients with a PRIVATE-COACHING package of N séances or more (default 10),
+  // grouped by club. The coaching formula (coachingOption / coachingSessions /
+  // coachingPrice) is captured on the inscription (pending_members) doc and
+  // persists after the inscription is confirmed — so this covers current members too.
+  router.get('/api/coaches/private-clients', verifyAzureToken, async (req, res) => {
+    try {
+      const minSessions = parseInt(req.query.min) || 10;
+      const GYM_NAMES = { dokarat: 'Fès Dokkarat', marjane: 'Fès Saïss', casa1: 'Casa Anfa', casa2: 'Casa Lady' };
+      const canSee = (g) => req.isAdmin || (typeof req.hasAccessToGym === 'function' ? req.hasAccessToGym(g) : true);
+
+      // Only the inscriptions that actually took private coaching (small, indexed subset).
+      const snap = await db.collection('pending_members').where('coachingOption', '==', true).get();
+
+      const clubs = {}; // gymId -> [rows]
+      let total = 0;
+      snap.docs.forEach(d => {
+        const m = d.data();
+        const formula = (m.coachingSessions || '').toString().trim();
+        if (!formula) return;
+        // Parse the séance count from the formula name, e.g. "COACHING DOU 20 SEANCES CASA".
+        const numMatch = formula.match(/(\d+)\s*S[EÉ]ANCE/i) || formula.match(/(\d+)/);
+        const sessions = numMatch ? parseInt(numMatch[1]) : 0;
+        if (sessions < minSessions) return;
+
+        const gymId = (m.gymId || 'unknown').toLowerCase();
+        if (!canSee(gymId)) return; // managers only see their own club
+
+        const createdAt = m.createdAt?.toDate ? m.createdAt.toDate().toISOString()
+          : (m.createdAt?._seconds ? new Date(m.createdAt._seconds * 1000).toISOString() : null);
+
+        const row = {
+          id: d.id,
+          fullName: `${m.prenom || ''} ${m.nom || ''}`.trim() || m.fullName || 'Inconnu',
+          phone: m.telephone || m.phone || '',
+          formula,
+          sessions,
+          price: Number(m.coachingPrice) || 0,
+          subscriptionName: m.subscriptionName || '',
+          contractNumber: m.contractNumber || null,
+          commercial: m.commercial || null,
+          status: m.status || null,
+          createdAt,
+        };
+        (clubs[gymId] = clubs[gymId] || []).push(row);
+        total++;
+      });
+
+      // Sort each club: most séances first, then most recent.
+      Object.values(clubs).forEach(arr => arr.sort((a, b) => b.sessions - a.sessions || (b.createdAt || '').localeCompare(a.createdAt || '')));
+
+      const order = ['dokarat', 'marjane', 'casa1', 'casa2'];
+      const result = [];
+      order.forEach(g => { if (clubs[g]?.length) result.push({ gymId: g, gymName: GYM_NAMES[g], count: clubs[g].length, sessionsTotal: clubs[g].reduce((s, r) => s + r.sessions, 0), clients: clubs[g] }); });
+      Object.keys(clubs).forEach(g => { if (!order.includes(g)) result.push({ gymId: g, gymName: g, count: clubs[g].length, sessionsTotal: clubs[g].reduce((s, r) => s + r.sessions, 0), clients: clubs[g] }); });
+
+      res.json({ total, minSessions, clubs: result });
+    } catch (err) {
+      console.error('[private-clients]', err.message);
+      res.status(500).json({ error: 'Failed to fetch private coaching clients' });
+    }
+  });
+
   router.get('/api/reservations-global', verifyAzureToken, async (req, res) => {
     try {
       const snap = await db.collection('reservations').orderBy('createdAt', 'desc').limit(200).get();
