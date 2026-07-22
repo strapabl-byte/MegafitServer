@@ -424,6 +424,31 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
     });
   });
 
+  // Full Odoo subscription history for an archive member. Matched by partner_id when
+  // known (exact person), else by normalized name restricted to their own club or
+  // club-less rows — never another club's namesake.
+  const odooHistoryFor = (partnerId, nameNorm, gymId) => {
+    try {
+      if (!lc.db) return [];
+      let rows = [];
+      if (partnerId) rows = lc.db.prepare('SELECT * FROM odoo_members_cache WHERE partner_id = ? ORDER BY date_inscription ASC, id ASC').all(String(partnerId));
+      if (!rows.length && nameNorm) {
+        rows = lc.db.prepare(`SELECT * FROM odoo_members_cache WHERE name_norm = ? AND (gym_id = ? OR gym_id = 'other' OR gym_id IS NULL OR gym_id = '') ORDER BY date_inscription ASC, id ASC`).all(nameNorm, gymId || '');
+      }
+      return rows.map(r => ({
+        membershipName: r.membership_name || null,
+        amountPaid: Number(r.amount_paid) || 0,
+        dateInscription: r.date_inscription || null,
+        dateFrom: r.date_from || null,
+        dateTo: r.expires_on || null,
+        state: r.status || null,
+        posOrder: r.pos_order || null,
+        gymId: r.gym_id || null,
+        isUpgrade: !!r.is_upgrade,
+      }));
+    } catch (e) { return []; }
+  };
+
   // ── GET /api/members/:id/profile ──────────────────────────────────────────
   // 🔒 DISK-FIRST: Reads member + inscription from SQLite. Firebase only as last resort.
   router.get('/:id/profile', verifyAzureToken, async (req, res) => {
@@ -478,6 +503,8 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
             isArchive: true,
             is_archive: 1,
             isImported: true,
+            // Full subscription history (this member may have several over the years)
+            odooHistory: odooHistoryFor(row.partner_id, row.name_norm, row.gym_id),
             // Dedicated block for the archive detail card in the member panel
             odoo: {
               partnerId: row.partner_id || null,
@@ -536,6 +563,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           isArchive:       member.isArchive       || !!member.is_archive     || false,
           isImported:      member.isImported      || false,
           odoo:            member.odoo            || null,
+          odooHistory:     member.odooHistory     || null,
           source: member.source === 'odoo' ? 'odoo' : 'disk',
         };
       } else {
@@ -579,6 +607,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
                 isUpgrade: !!row.is_upgrade,
                 gymId: row.gym_id || null,
               };
+              member.odooHistory = odooHistoryFor(row.partner_id, norm, member.location);
               // Fill only what's missing — never overwrite real member data.
               if (!member.subscriptionName || member.subscriptionName === 'Monthly') member.subscriptionName = row.membership_name || member.subscriptionName;
               if (!member.periodFrom)   member.periodFrom   = row.date_from || row.date_inscription || null;
