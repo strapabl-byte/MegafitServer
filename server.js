@@ -510,8 +510,8 @@ app.post('/admin/reload-odoo-members', (req, res) => {
     const members = JSON.parse(fs.readFileSync(slimPath, 'utf8'));
     const normName = s => (s || '').replace(/\s+/g, ' ').trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     const deleted = lc.db.prepare('DELETE FROM odoo_members_cache').run().changes;
-    const insert = lc.db.prepare(`INSERT OR IGNORE INTO odoo_members_cache (full_name, first_name, last_name, gym_id, status, expires_on, name_norm) VALUES (?, ?, ?, ?, ?, ?, ?)`);
-    const tx = lc.db.transaction((rows) => { for (const m of rows) insert.run(m.fullName, m.firstName, m.lastName, m.gymId, m.status, m.expiresOn, normName(m.fullName)); });
+    const insert = lc.db.prepare(`INSERT OR IGNORE INTO odoo_members_cache (full_name, first_name, last_name, gym_id, status, expires_on, name_norm, partner_id, date_inscription, date_from, membership_name, amount_paid, is_upgrade, pos_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const tx = lc.db.transaction((rows) => { for (const m of rows) insert.run(m.fullName, m.firstName, m.lastName, m.gymId, m.status, m.expiresOn, normName(m.fullName), m.partnerId || null, m.dateInscription || null, m.dateFrom || null, m.membershipName || null, Number(m.amountPaid) || 0, m.isUpgrade ? 1 : 0, m.posOrderName || null); });
     tx(members);
     const byGym = lc.db.prepare('SELECT gym_id, COUNT(*) as c FROM odoo_members_cache GROUP BY gym_id').all();
     const total  = lc.db.prepare('SELECT COUNT(*) as c FROM odoo_members_cache').get().c;
@@ -1528,8 +1528,12 @@ app.listen(PORT, '0.0.0.0', () => {
   setTimeout(() => {
     try {
       const count = lc.db.prepare('SELECT COUNT(*) as c FROM odoo_members_cache').get().c;
-      if (count > 0) {
-        console.log(`⚡ [SMART-ID] Odoo members already loaded: ${count} rows in SQLite.`);
+      // Older imports only stored name/gym/expiry. If the rich columns are empty we
+      // re-import so archive members get their formule, montant, dates and POS order.
+      let enriched = 0;
+      try { enriched = count > 0 ? lc.db.prepare('SELECT COUNT(*) as c FROM odoo_members_cache WHERE partner_id IS NOT NULL').get().c : 0; } catch (_) {}
+      if (count > 0 && enriched > 0) {
+        console.log(`⚡ [SMART-ID] Odoo archive already loaded: ${count} rows (${enriched} enrichis).`);
         return;
       }
       const slimPath = path.join(__dirname, 'data', 'odoo_members_slim.json');
@@ -1538,14 +1542,24 @@ app.listen(PORT, '0.0.0.0', () => {
         return;
       }
       const members = JSON.parse(fs.readFileSync(slimPath, 'utf8'));
+      if (count > 0 && enriched === 0) {
+        const del = lc.db.prepare('DELETE FROM odoo_members_cache').run().changes;
+        console.log(`♻️  [SMART-ID] Archive Odoo sans détails — ré-import enrichi (${del} lignes remplacées).`);
+      }
       const normName = s => (s || '').replace(/\s+/g, ' ').trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
       const insert = lc.db.prepare(`
-        INSERT OR IGNORE INTO odoo_members_cache (full_name, first_name, last_name, gym_id, status, expires_on, name_norm)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT OR IGNORE INTO odoo_members_cache (full_name, first_name, last_name, gym_id, status, expires_on, name_norm, partner_id, date_inscription, date_from, membership_name, amount_paid, is_upgrade, pos_order)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
-      const tx = lc.db.transaction((rows) => { for (const m of rows) insert.run(m.fullName, m.firstName, m.lastName, m.gymId, m.status, m.expiresOn, normName(m.fullName)); });
+      const tx = lc.db.transaction((rows) => {
+        for (const m of rows) insert.run(
+          m.fullName, m.firstName, m.lastName, m.gymId, m.status, m.expiresOn, normName(m.fullName),
+          m.partnerId || null, m.dateInscription || null, m.dateFrom || null,
+          m.membershipName || null, Number(m.amountPaid) || 0, m.isUpgrade ? 1 : 0, m.posOrderName || null
+        );
+      });
       tx(members);
-      console.log(`✅ [SMART-ID] Loaded ${members.length} Odoo members into SQLite for smart identification.`);
+      console.log(`✅ [SMART-ID] Archive Odoo chargée: ${members.length} lignes (détails complets).`);
     } catch (err) {
       console.error('❌ [SMART-ID] Failed to load Odoo members:', err.message);
     }

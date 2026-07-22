@@ -92,6 +92,9 @@ const migrations = [
   'ALTER TABLE odoo_members_cache ADD COLUMN membership_name TEXT',
   'ALTER TABLE odoo_members_cache ADD COLUMN amount_paid REAL DEFAULT 0',
   'ALTER TABLE odoo_members_cache ADD COLUMN is_upgrade INTEGER DEFAULT 0',
+  'ALTER TABLE odoo_members_cache ADD COLUMN partner_id TEXT',
+  'ALTER TABLE odoo_members_cache ADD COLUMN date_inscription TEXT',
+  'ALTER TABLE odoo_members_cache ADD COLUMN pos_order TEXT',
 ];
 
 for (const m of migrations) {
@@ -476,6 +479,11 @@ try { db.exec('ALTER TABLE members_cache ADD COLUMN receipt_email_status TEXT');
 try { db.exec('ALTER TABLE members_cache ADD COLUMN receipt_email_at TEXT'); } catch(_) {}
 try { db.exec('ALTER TABLE members_cache ADD COLUMN receipt_email_to TEXT'); } catch(_) {}
 try { db.exec('ALTER TABLE members_cache ADD COLUMN receipt_email_reason TEXT'); } catch(_) {}
+
+// Indexes for the archive date filters (inscription / expiration ranges).
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_odoo_members_dateins ON odoo_members_cache(date_inscription)'); } catch(_) {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_odoo_members_expires ON odoo_members_cache(expires_on)'); } catch(_) {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_odoo_members_partner ON odoo_members_cache(partner_id)'); } catch(_) {}
 
 const insertEntry = db.prepare(`
   INSERT OR REPLACE INTO entries (id, gym_id, date, timestamp, name, method, status, is_face, user_id)
