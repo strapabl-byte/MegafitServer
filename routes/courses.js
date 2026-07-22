@@ -300,28 +300,44 @@ module.exports = function coursesRouter({ db, admin }) {
         _pcCache = { ts: Date.now(), rows };
       }
 
+      const order = ['dokarat', 'marjane', 'casa1', 'casa2'];
+
+      // Rows this user is allowed to see (manager access + selected club).
+      const accessible = _pcCache.rows.filter(r => canSee(r.gymId) && (gymScope === 'all' || r.gymId === gymScope));
+
+      // ── STATS: count ALL coaching per club (both add-on AND bundled-in-subscription),
+      //    independent of the séance threshold. This is the "compter tout" view. ──
+      const statMap = {};
+      accessible.forEach(r => {
+        const s = statMap[r.gymId] = statMap[r.gymId] || { gymId: r.gymId, gymName: GYM_NAMES[r.gymId] || r.gymId, count: 0, sessions: 0, revenue: 0, addon: 0, included: 0 };
+        s.count++;
+        s.sessions += r.sessions;
+        s.revenue += r.price || 0;
+        if (r.included) s.included++; else s.addon++;
+      });
+      const byClub = [];
+      order.forEach(g => { if (statMap[g]) byClub.push(statMap[g]); });
+      Object.keys(statMap).forEach(g => { if (!order.includes(g)) byClub.push(statMap[g]); });
+      const totals = byClub.reduce((t, s) => ({
+        count: t.count + s.count, sessions: t.sessions + s.sessions,
+        revenue: t.revenue + s.revenue, addon: t.addon + s.addon, included: t.included + s.included,
+      }), { count: 0, sessions: 0, revenue: 0, addon: 0, included: 0 });
+
+      // ── DETAILED LIST: respects the séance threshold. Bundled/unknown-count coaching
+      //    only appears at the base level (10+ / Tous), not at 20+/50+/100+. ──
       const clubs = {};
-      let total = 0;
-      _pcCache.rows.forEach(r => {
-        if (!canSee(r.gymId)) return;                              // manager access
-        if (gymScope !== 'all' && r.gymId !== gymScope) return;    // selected club
-        // Filter by séances: known count must clear the bar; bundled/unknown-count
-        // coaching only shows at the base level (10+ / Tous), not at 20+/50+/100+.
+      accessible.forEach(r => {
         if (r.included) { if (minSessions > 10) return; }
         else if (r.sessions < minSessions) return;
         (clubs[r.gymId] = clubs[r.gymId] || []).push(r);
-        total++;
       });
-
       Object.values(clubs).forEach(arr => arr.sort((a, b) => b.sessions - a.sessions || (b.createdAt || '').localeCompare(a.createdAt || '')));
-
-      const order = ['dokarat', 'marjane', 'casa1', 'casa2'];
       const result = [];
       const build = g => ({ gymId: g, gymName: GYM_NAMES[g] || g, count: clubs[g].length, sessionsTotal: clubs[g].reduce((s, r) => s + r.sessions, 0), clients: clubs[g] });
       order.forEach(g => { if (clubs[g]?.length) result.push(build(g)); });
       Object.keys(clubs).forEach(g => { if (!order.includes(g)) result.push(build(g)); });
 
-      res.json({ total, minSessions, clubs: result });
+      res.json({ total: result.reduce((s, c) => s + c.count, 0), minSessions, stats: { byClub, totals }, clubs: result });
     } catch (err) {
       console.error('[private-clients]', err.message);
       res.status(500).json({ error: 'Failed to fetch private coaching clients' });
