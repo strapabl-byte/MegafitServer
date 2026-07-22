@@ -184,7 +184,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         finalMembers = [...finalMembers, ...normalizedPdf];
       }
 
-      // 2b️⃣ Merge archived Odoo members
+      // 2b️⃣ Merge archived Odoo members (Deduplicated to avoid duplicates)
       try {
         const getGymIds = (gId) => {
           if (!gId || gId === 'all') return [];
@@ -199,9 +199,31 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
 
         const odooGymIds = getGymIds(gymId);
         const odooClause = buildInClause(odooGymIds);
-        const odooRows = lc.db ? lc.db.prepare(`SELECT * FROM odoo_members_cache WHERE ${odooClause.sql}`).all(...odooClause.params) : [];
+        const odooRows = lc.db ? lc.db.prepare(`SELECT * FROM odoo_members_cache WHERE ${odooClause.sql} ORDER BY id DESC`).all(...odooClause.params) : [];
         
-        const odooMembers = odooRows.map(row => ({
+        const normName = (s) => (s || '').replace(/\s+/g, ' ').trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        const existingNorms = new Set();
+        finalMembers.forEach(m => {
+          const norm = normName(m.full_name || m.fullName);
+          if (norm) existingNorms.add(norm);
+        });
+
+        const uniqueOdooMap = new Map();
+        odooRows.forEach(row => {
+          const norm = row.name_norm || normName(row.full_name);
+          if (!norm || existingNorms.has(norm)) return;
+
+          if (!uniqueOdooMap.has(norm)) {
+            uniqueOdooMap.set(norm, row);
+          } else {
+            const current = uniqueOdooMap.get(norm);
+            if (current.status !== 'Active' && row.status === 'Active') {
+              uniqueOdooMap.set(norm, row);
+            }
+          }
+        });
+
+        const odooMembers = Array.from(uniqueOdooMap.values()).map(row => ({
           id: `odoo-${row.id}`,
           gym_id: row.gym_id,
           location: row.gym_id,
@@ -209,14 +231,14 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           fullName: row.full_name,
           expires_on: row.expires_on,
           expiresOn: row.expires_on,
-          status: 'expired',
+          status: row.status ? row.status.toLowerCase() : 'expired',
           is_archive: 1,
           isArchive: true,
           importedFromOdoo: true,
           isImported: true,
           phone: '',
           plan: 'Monthly',
-          subscription_name: 'Monthly',
+          subscription_name: row.membership_name || 'Monthly',
           isPendingWithPdf: false,
         }));
 
