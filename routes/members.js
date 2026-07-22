@@ -261,6 +261,8 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         adresse:          m.adresse          || null,
         ville:            m.ville            || null,
         commercial:       m.commercial       || null,
+        isFrozen:         m.isFrozen         || !!m.is_frozen       || false,
+        frozenAt:         m.frozenAt         || m.frozen_at         || null,
       }));
 
       // 5️⃣ Restrict fields for non-admin users
@@ -278,6 +280,8 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           pdfUrl: m.pdfUrl || null, isRestricted: true,
           createdAt: m.createdAt || null, isPendingWithPdf: m.isPendingWithPdf || false,
           isArchive: m.isArchive || false,
+          isFrozen: m.isFrozen || !!m.is_frozen || false,
+          frozenAt: m.frozenAt || m.frozen_at || null,
         }));
       }
 
@@ -454,6 +458,11 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           cin:             member.cin             || null,
           balance:         member.balance         || 0,
           isFrozen:        member.isFrozen        || !!member.is_frozen      || false,
+          frozenAt:        member.frozenAt        || member.frozen_at        || null,
+          freezeReason:    member.freezeReason    || member.freeze_reason    || null,
+          freezeProofUrl:  member.freezeProofUrl  || member.freeze_proof_url || null,
+          freezeDuration:  member.freezeDuration  || member.freeze_duration  || null,
+          freezeLogs:      (() => { const fl = member.freezeLogs || member.freeze_logs; if (!fl) return []; if (Array.isArray(fl)) return fl; try { return JSON.parse(fl); } catch { return []; } })(),
           inscriptionId:   member.inscriptionId   || member.inscription_id   || null,
           subscriptionName:member.subscriptionName|| member.subscription_name|| member.plan || null,
           periodFrom:      member.periodFrom      || member.period_from      || null,
@@ -688,7 +697,22 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
 
       // Re-fetch to return latest data
       const updatedSnap = await ref.get();
-      res.json({ id: updatedSnap.id, ...updatedSnap.data() });
+      const updated = updatedSnap.data();
+
+      // 🔒 Persist to disk too — the dashboard reads disk-first, so without this the
+      // freeze would vanish on refresh (writes to Firestore only were invisible on reload).
+      const frozenAtIso = updated.frozenAt?.toDate ? updated.frozenAt.toDate().toISOString() : new Date().toISOString();
+      try {
+        lc.setMemberFreeze?.(req.params.id, {
+          is_frozen: 1,
+          frozen_at: frozenAtIso,
+          freeze_reason: req.body.reason || null,
+          freeze_proof_url: req.body.proofUrl || null,
+          freeze_duration: durationDays,
+        });
+      } catch (diskErr) { console.warn('[Freeze] disk write failed:', diskErr.message); }
+
+      res.json({ id: updatedSnap.id, ...updated });
     } catch (err) {
       console.error('Freeze Error:', err);
       res.status(500).json({ error: 'Failed to freeze subscription' });
@@ -749,6 +773,24 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
       delete apiCache.profiles[req.params.id]; // invalidate profile cache
+
+      // 🔒 Mirror to disk: clear freeze state, push out expiry, append the log — so the
+      // refresh (disk-first read) shows the member un-frozen with the extended expiry.
+      try {
+        const diskRow = lc.getMemberById ? lc.getMemberById(req.params.id) : null;
+        let logs = [];
+        if (diskRow?.freeze_logs) { try { logs = JSON.parse(diskRow.freeze_logs) || []; } catch { logs = []; } }
+        logs.push(freezeLog);
+        lc.setMemberFreeze?.(req.params.id, {
+          is_frozen: 0,
+          frozen_at: null,
+          freeze_reason: null,
+          freeze_proof_url: null,
+          freeze_duration: null,
+          expires_on: newExpiresOn || null,
+          freeze_logs: JSON.stringify(logs),
+        });
+      } catch (diskErr) { console.warn('[Unfreeze] disk write failed:', diskErr.message); }
 
       // Re-fetch to return latest data
       const updatedSnap = await ref.get();

@@ -457,6 +457,15 @@ try { db.exec('ALTER TABLE members_cache ADD COLUMN bonus_3months INTEGER DEFAUL
 // Safe migration: add balance_deadline to members_cache
 try { db.exec('ALTER TABLE members_cache ADD COLUMN balance_deadline TEXT'); } catch(_) {}
 
+// Safe migration: freeze/gel state persisted to disk so it survives a page refresh
+// (the freeze endpoints write Firestore AND disk; disk-first reads then surface it).
+try { db.exec('ALTER TABLE members_cache ADD COLUMN is_frozen INTEGER DEFAULT 0'); } catch(_) {}
+try { db.exec('ALTER TABLE members_cache ADD COLUMN frozen_at TEXT'); } catch(_) {}
+try { db.exec('ALTER TABLE members_cache ADD COLUMN freeze_reason TEXT'); } catch(_) {}
+try { db.exec('ALTER TABLE members_cache ADD COLUMN freeze_proof_url TEXT'); } catch(_) {}
+try { db.exec('ALTER TABLE members_cache ADD COLUMN freeze_duration INTEGER'); } catch(_) {}
+try { db.exec('ALTER TABLE members_cache ADD COLUMN freeze_logs TEXT'); } catch(_) {}
+
 const insertEntry = db.prepare(`
   INSERT OR REPLACE INTO entries (id, gym_id, date, timestamp, name, method, status, is_face, user_id)
   VALUES (@id, @gym_id, @date, @timestamp, @name, @method, @status, @is_face, @user_id)
@@ -580,9 +589,9 @@ function getDailyStat(gymId, date) {
 
 const insertMember = db.prepare(`
   INSERT OR REPLACE INTO members_cache
-    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date, email, adresse, ville, is_archive, bonus_3months, inscription_id, contract_number, balance_deadline, cheque_photo, cheque_photo_back)
+    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date, email, adresse, ville, is_archive, bonus_3months, inscription_id, contract_number, balance_deadline, cheque_photo, cheque_photo_back, is_frozen, frozen_at, freeze_reason, freeze_proof_url, freeze_duration, freeze_logs)
   VALUES
-    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date, @email, @adresse, @ville, @is_archive, @bonus_3months, @inscription_id, @contract_number, @balance_deadline, @cheque_photo, @cheque_photo_back)
+    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date, @email, @adresse, @ville, @is_archive, @bonus_3months, @inscription_id, @contract_number, @balance_deadline, @cheque_photo, @cheque_photo_back, @is_frozen, @frozen_at, @freeze_reason, @freeze_proof_url, @freeze_duration, @freeze_logs)
 `);
 
 function upsertMembers(gymId, membersArr) {
@@ -649,7 +658,36 @@ function upsertMembers(gymId, membersArr) {
     balance_deadline:  m.balanceDeadline || m.balance_deadline || null,
     cheque_photo:      m.chequePhoto || m.cheque_photo || null,
     cheque_photo_back: m.chequePhotoBack || m.cheque_photo_back || m.chequePhotoVerso || null,
+    is_frozen:         (m.isFrozen || m.is_frozen) ? 1 : 0,
+    frozen_at:         typeof m.frozenAt === 'string' ? m.frozenAt :
+                       (m.frozenAt && typeof m.frozenAt.toDate === 'function') ? m.frozenAt.toDate().toISOString() :
+                       (m.frozenAt?._seconds ? new Date(m.frozenAt._seconds * 1000).toISOString() : (m.frozen_at || null)),
+    freeze_reason:     m.freezeReason || m.freeze_reason || null,
+    freeze_proof_url:  m.freezeProofUrl || m.freeze_proof_url || null,
+    freeze_duration:   m.freezeDuration || m.freeze_duration || null,
+    freeze_logs:       m.freezeLogs ? (typeof m.freezeLogs === 'string' ? m.freezeLogs : JSON.stringify(m.freezeLogs)) : (m.freeze_logs || null),
   })));
+}
+
+// Targeted freeze/unfreeze write to disk (all gym rows for this member id) so the
+// disk-first reads (list + profile) reflect the frozen state after a refresh.
+function setMemberFreeze(id, f = {}) {
+  if (!id) return;
+  try {
+    const sets = [], vals = [];
+    const put = (col, v) => { sets.push(`${col} = ?`); vals.push(v); };
+    if ('is_frozen'        in f) put('is_frozen', f.is_frozen ? 1 : 0);
+    if ('frozen_at'        in f) put('frozen_at', f.frozen_at || null);
+    if ('freeze_reason'    in f) put('freeze_reason', f.freeze_reason || null);
+    if ('freeze_proof_url' in f) put('freeze_proof_url', f.freeze_proof_url || null);
+    if ('freeze_duration'  in f) put('freeze_duration', f.freeze_duration || null);
+    if ('expires_on'       in f) put('expires_on', f.expires_on || null);
+    if ('freeze_logs'      in f) put('freeze_logs', f.freeze_logs || null);
+    if (!sets.length) return;
+    db.prepare(`UPDATE members_cache SET ${sets.join(', ')} WHERE id = ?`).run(...vals, id);
+  } catch (err) {
+    console.error('SQLite setMemberFreeze error:', err.message);
+  }
 }
 
 function getMembers(gymId) {
@@ -1406,7 +1444,7 @@ module.exports = {
   // daily stats
   upsertDailyStat, getDailyStats, getDailyStatsRange, getDailyStat,
   // members
-  upsertMembers, getMembers, getMemberById, pruneStaleMember, getDebtors, updateMemberChequePhotos,
+  upsertMembers, getMembers, getMemberById, pruneStaleMember, getDebtors, updateMemberChequePhotos, setMemberFreeze,
   // register
   upsertRegister, getRegister, deleteRegisterEntry,
   // decaissements
