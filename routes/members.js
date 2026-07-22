@@ -551,6 +551,46 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         lc.upsertMembers(gymId, [member]);
       }
 
+      // 📦 ARCHIVE ENRICHMENT — archive/imported members often live in members_cache
+      // with almost nothing (empty plan, no amount). The full history lives in
+      // odoo_members_cache, so match on the normalized name (preferring the same club
+      // and the most relevant line) and attach the rich details.
+      if (member && (member.isArchive || member.isImported) && !member.odoo && lc.db) {
+        try {
+          const norm = String(member.fullName || '')
+            .replace(/\s+/g, ' ').trim().toUpperCase()
+            .normalize('NFD').replace(/[̀-ͯ]/g, '');
+          if (norm) {
+            const ORDER = `ORDER BY CASE WHEN status='Active' THEN 0 WHEN status='Futur' THEN 1 ELSE 2 END, expires_on DESC`;
+            let row = lc.db.prepare(`SELECT * FROM odoo_members_cache WHERE name_norm = ? AND gym_id = ? ${ORDER} LIMIT 1`).get(norm, member.location || '');
+            // Fallback ONLY to club-less/unmapped Odoo rows — never borrow a record
+            // from another club (a namesake elsewhere must not leak into this club).
+            if (!row) row = lc.db.prepare(`SELECT * FROM odoo_members_cache WHERE name_norm = ? AND (gym_id = 'other' OR gym_id IS NULL OR gym_id = '') ${ORDER} LIMIT 1`).get(norm);
+            if (row) {
+              member.odoo = {
+                partnerId: row.partner_id || null,
+                posOrder: row.pos_order || null,
+                membershipName: row.membership_name || null,
+                amountPaid: Number(row.amount_paid) || 0,
+                dateInscription: row.date_inscription || null,
+                dateFrom: row.date_from || null,
+                dateTo: row.expires_on || null,
+                state: row.status || null,
+                isUpgrade: !!row.is_upgrade,
+                gymId: row.gym_id || null,
+              };
+              // Fill only what's missing — never overwrite real member data.
+              if (!member.subscriptionName || member.subscriptionName === 'Monthly') member.subscriptionName = row.membership_name || member.subscriptionName;
+              if (!member.periodFrom)   member.periodFrom   = row.date_from || row.date_inscription || null;
+              if (!member.periodTo)     member.periodTo     = row.expires_on || null;
+              if (!member.expiresOn)    member.expiresOn    = row.expires_on || null;
+              if (!member.totalPaid)    member.totalPaid    = Number(row.amount_paid) || 0;
+              if (!member.createdAtStr) member.createdAtStr = row.date_inscription || null;
+            }
+          }
+        } catch (e) { console.warn('[profile] archive enrichment failed:', e.message); }
+      }
+
       // Access control
       if (!req.isAdmin && member.location && !req.hasAccessToGym(member.location)) {
         console.warn(`🚫 Manager ${req.user?.name} tried to access member ${memberId} from gym ${member.location}`);
