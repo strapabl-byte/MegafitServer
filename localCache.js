@@ -471,6 +471,7 @@ try { db.exec('ALTER TABLE members_cache ADD COLUMN freeze_logs TEXT'); } catch(
 try { db.exec('ALTER TABLE members_cache ADD COLUMN receipt_email_status TEXT'); } catch(_) {}
 try { db.exec('ALTER TABLE members_cache ADD COLUMN receipt_email_at TEXT'); } catch(_) {}
 try { db.exec('ALTER TABLE members_cache ADD COLUMN receipt_email_to TEXT'); } catch(_) {}
+try { db.exec('ALTER TABLE members_cache ADD COLUMN receipt_email_reason TEXT'); } catch(_) {}
 
 const insertEntry = db.prepare(`
   INSERT OR REPLACE INTO entries (id, gym_id, date, timestamp, name, method, status, is_face, user_id)
@@ -595,9 +596,9 @@ function getDailyStat(gymId, date) {
 
 const insertMember = db.prepare(`
   INSERT OR REPLACE INTO members_cache
-    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date, email, adresse, ville, is_archive, bonus_3months, inscription_id, contract_number, balance_deadline, cheque_photo, cheque_photo_back, is_frozen, frozen_at, freeze_reason, freeze_proof_url, freeze_duration, freeze_logs, receipt_email_status, receipt_email_at, receipt_email_to)
+    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date, email, adresse, ville, is_archive, bonus_3months, inscription_id, contract_number, balance_deadline, cheque_photo, cheque_photo_back, is_frozen, frozen_at, freeze_reason, freeze_proof_url, freeze_duration, freeze_logs, receipt_email_status, receipt_email_at, receipt_email_to, receipt_email_reason)
   VALUES
-    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date, @email, @adresse, @ville, @is_archive, @bonus_3months, @inscription_id, @contract_number, @balance_deadline, @cheque_photo, @cheque_photo_back, @is_frozen, @frozen_at, @freeze_reason, @freeze_proof_url, @freeze_duration, @freeze_logs, @receipt_email_status, @receipt_email_at, @receipt_email_to)
+    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date, @email, @adresse, @ville, @is_archive, @bonus_3months, @inscription_id, @contract_number, @balance_deadline, @cheque_photo, @cheque_photo_back, @is_frozen, @frozen_at, @freeze_reason, @freeze_proof_url, @freeze_duration, @freeze_logs, @receipt_email_status, @receipt_email_at, @receipt_email_to, @receipt_email_reason)
 `);
 
 function upsertMembers(gymId, membersArr) {
@@ -675,7 +676,24 @@ function upsertMembers(gymId, membersArr) {
     receipt_email_status: m.receiptEmailStatus || m.receipt_email_status || null,
     receipt_email_at:     m.receiptEmailAt || m.receipt_email_at || null,
     receipt_email_to:     m.receiptEmailTo || m.receipt_email_to || null,
+    receipt_email_reason: m.receiptEmailReason || m.receipt_email_reason || null,
   })));
+}
+
+// Classify a member email for receipt sending. Returns { status, reason }:
+// 'ok' (send it), 'no_email' (missing/invalid format), or 'error' (fake/test address).
+function classifyReceiptEmail(raw) {
+  const email = (raw || '').trim().toLowerCase();
+  if (!email) return { status: 'no_email', reason: 'Email manquant' };
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { status: 'no_email', reason: 'Format email invalide' };
+  const [local, domain] = email.split('@');
+  const FAKE_DOMAINS = ['test.com','test.test','test.ma','example.com','example.org','example.net','fake.com','faux.com','mail.com','email.com','no.com','none.com','xxx.com','a.com','aa.com','abc.com','azerty.com','qwerty.com','tempmail.com','mailinator.com','yopmail.com','guerrillamail.com','trashmail.com','sharklasers.com','1secmail.com','getnada.com'];
+  const FAKE_LOCALS = ['test','tests','testing','testtest','fake','faux','none','na','nan','noemail','nomail','no-email','sansemail','sans','xxx','xx','aaa','aaaa','abc','azerty','qwerty','anonymous','nobody'];
+  if (FAKE_DOMAINS.includes(domain)) return { status: 'error', reason: `Email de test/factice (${domain})` };
+  if (FAKE_LOCALS.includes(local))   return { status: 'error', reason: 'Email de test/factice' };
+  if (/^(.)\1+$/.test(local))        return { status: 'error', reason: 'Email de test/factice' }; // aaaa@…
+  if (local.includes('test') || domain.split('.')[0] === 'test') return { status: 'error', reason: 'Email de test/factice' };
+  return { status: 'ok', reason: null };
 }
 
 // Persist the billing-receipt email outcome to disk (sent / no_email / error / pending).
@@ -687,6 +705,7 @@ function setMemberReceiptStatus(id, f = {}) {
     if ('status' in f) put('receipt_email_status', f.status || null);
     if ('at' in f)     put('receipt_email_at', f.at || null);
     if ('to' in f)     put('receipt_email_to', f.to || null);
+    if ('reason' in f) put('receipt_email_reason', f.reason || null);
     if (!sets.length) return;
     db.prepare(`UPDATE members_cache SET ${sets.join(', ')} WHERE id = ?`).run(...vals, id);
   } catch (err) {
@@ -1469,7 +1488,7 @@ module.exports = {
   // daily stats
   upsertDailyStat, getDailyStats, getDailyStatsRange, getDailyStat,
   // members
-  upsertMembers, getMembers, getMemberById, pruneStaleMember, getDebtors, updateMemberChequePhotos, setMemberFreeze, setMemberReceiptStatus,
+  upsertMembers, getMembers, getMemberById, pruneStaleMember, getDebtors, updateMemberChequePhotos, setMemberFreeze, setMemberReceiptStatus, classifyReceiptEmail,
   // register
   upsertRegister, getRegister, deleteRegisterEntry,
   // decaissements

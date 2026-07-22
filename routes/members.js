@@ -265,6 +265,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         frozenAt:         m.frozenAt         || m.frozen_at         || null,
         receiptEmailStatus: m.receiptEmailStatus || m.receipt_email_status || null,
         receiptEmailTo:     m.receiptEmailTo     || m.receipt_email_to     || null,
+        receiptEmailReason: m.receiptEmailReason || m.receipt_email_reason || null,
       }));
 
       // 5️⃣ Restrict fields for non-admin users
@@ -285,6 +286,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           isFrozen: m.isFrozen || !!m.is_frozen || false,
           frozenAt: m.frozenAt || m.frozen_at || null,
           receiptEmailStatus: m.receiptEmailStatus || m.receipt_email_status || null,
+          receiptEmailReason: m.receiptEmailReason || m.receipt_email_reason || null,
         }));
       }
 
@@ -469,6 +471,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           receiptEmailStatus: member.receiptEmailStatus || member.receipt_email_status || null,
           receiptEmailAt:     member.receiptEmailAt     || member.receipt_email_at     || null,
           receiptEmailTo:     member.receiptEmailTo     || member.receipt_email_to     || null,
+          receiptEmailReason: member.receiptEmailReason || member.receipt_email_reason || null,
           inscriptionId:   member.inscriptionId   || member.inscription_id   || null,
           subscriptionName:member.subscriptionName|| member.subscription_name|| member.plan || null,
           periodFrom:      member.periodFrom      || member.period_from      || null,
@@ -813,17 +816,19 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
   // and the Payments page flags the member red.
   router.post('/:id/receipt-status', verifyAzureToken, async (req, res) => {
     try {
-      const { status, to } = req.body || {};
+      const { status, to, reason } = req.body || {};
       const allowed = ['sent', 'no_email', 'error', 'pending'];
       if (!allowed.includes(status)) return res.status(400).json({ error: 'invalid status' });
 
       const at = status === 'sent' ? new Date().toISOString() : null;
+      const finalReason = status === 'sent' || status === 'pending' ? null : (reason || null);
       await db.collection('members').doc(req.params.id).update({
         receiptEmailStatus: status,
         receiptEmailAt: at,
         receiptEmailTo: to || null,
+        receiptEmailReason: finalReason,
       }).catch(() => {});
-      try { lc.setMemberReceiptStatus?.(req.params.id, { status, to: to || null, at }); } catch (_) {}
+      try { lc.setMemberReceiptStatus?.(req.params.id, { status, to: to || null, at, reason: finalReason }); } catch (_) {}
       delete apiCache.profiles[req.params.id];
 
       if (status === 'error' || status === 'no_email') {
@@ -834,8 +839,8 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
             type: 'receipt_email_failed',
             gymId: m.location || '',
             title: `🧾 Reçu non envoyé — ${m.fullName || ''}`,
-            message: status === 'no_email'
-              ? `Email manquant — reçu de paiement non envoyé. Ajoutez un email puis renvoyez-le.`
+            message: finalReason
+              ? `${finalReason} — reçu de paiement non envoyé. Corrigez l'email dans Paiements puis renvoyez-le.`
               : `Échec de l'envoi du reçu de paiement par email. Réessayez depuis Paiements.`,
             severity: 'critical',
             route: '/payments',

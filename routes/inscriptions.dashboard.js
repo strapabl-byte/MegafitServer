@@ -416,21 +416,28 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
       // notification. If they DO have an email, mark 'pending' — the dashboard then
       // generates the receipt PDF and sends it, updating the status to sent/error.
       try {
-        const hasEmail = !!(member.email && /\S+@\S+\.\S+/.test(String(member.email)));
-        const receiptStatus = hasEmail ? 'pending' : 'no_email';
+        // Classify the email: ok → 'pending' (dashboard sends the PDF); missing/invalid
+        // → 'no_email'; fake/test address → 'error'. Non-sendable cases get a red notif.
+        const cls = (typeof lc.classifyReceiptEmail === 'function')
+          ? lc.classifyReceiptEmail(member.email)
+          : (member.email && /\S+@\S+\.\S+/.test(String(member.email)) ? { status: 'ok', reason: null } : { status: 'no_email', reason: 'Email manquant' });
+        const sendable = cls.status === 'ok';
+        const receiptStatus = sendable ? 'pending' : cls.status; // 'no_email' | 'error'
+        const reason = sendable ? null : cls.reason;
         member.receiptEmailStatus = receiptStatus;
         await db.collection('members').doc(member.id).update({
           receiptEmailStatus: receiptStatus,
-          receiptEmailTo: hasEmail ? member.email : null,
+          receiptEmailReason: reason,
+          receiptEmailTo: member.email || null,
           receiptEmailAt: null,
         }).catch(() => {});
-        try { lc.setMemberReceiptStatus?.(member.id, { status: receiptStatus, to: hasEmail ? member.email : null, at: null }); } catch (_) {}
-        if (!hasEmail) {
+        try { lc.setMemberReceiptStatus?.(member.id, { status: receiptStatus, reason, to: member.email || null, at: null }); } catch (_) {}
+        if (!sendable) {
           lc.addNotification({
             type: 'receipt_email_missing',
             gymId: member.location || insData?.gymId || '',
             title: `🧾 Reçu non envoyé — ${member.fullName}`,
-            message: `Email manquant — le reçu de paiement n'a pas pu être envoyé. Ajoutez un email dans Paiements puis renvoyez-le.`,
+            message: `${reason} — le reçu de paiement n'a pas pu être envoyé. Corrigez l'email dans Paiements puis renvoyez-le.`,
             severity: 'critical',
             route: '/payments',
             icon: '🧾',
