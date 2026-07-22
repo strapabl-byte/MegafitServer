@@ -241,10 +241,13 @@ module.exports = function coursesRouter({ db, admin }) {
   });
 
   // ── GET /api/coaches/private-clients ──────────────────────────────────────
-  // All clients with a PRIVATE-COACHING package of N séances or more (default 10),
-  // grouped by club. The coaching formula (coachingOption / coachingSessions /
-  // coachingPrice) is captured on the inscription (pending_members) doc and
-  // persists after the inscription is confirmed — so this covers current members too.
+  // Every client whose inscription includes private coaching — grouped by club.
+  // Coaching is detected from MULTIPLE signals so we don't miss anyone:
+  //   1. the explicit add-on (coachingOption / coachingSessions / coachingPrice), and
+  //   2. coaching bundled INTO the subscription itself (subscriptionName contains
+  //      "COACHING" — e.g. a 1-an / 6-mois pack with séances included).
+  // The full scan is cached 10 min (keyed on nothing) so gym/min changes are free.
+  let _pcCache = { ts: 0, rows: null };
   router.get('/api/coaches/private-clients', verifyAzureToken, async (req, res) => {
     try {
       const minSessions = parseInt(req.query.min) || 10;
@@ -252,51 +255,71 @@ module.exports = function coursesRouter({ db, admin }) {
       const GYM_NAMES = { dokarat: 'Fès Dokkarat', marjane: 'Fès Saïss', casa1: 'Casa Anfa', casa2: 'Casa Lady' };
       const canSee = (g) => req.isAdmin || (typeof req.hasAccessToGym === 'function' ? req.hasAccessToGym(g) : true);
 
-      // Only the inscriptions that actually took private coaching (small, indexed subset).
-      const snap = await db.collection('pending_members').where('coachingOption', '==', true).get();
+      // Build/refresh the cross-club coaching roster (all clubs, unfiltered).
+      if (!_pcCache.rows || Date.now() - _pcCache.ts > 10 * 60 * 1000) {
+        const snap = await db.collection('pending_members').get();
+        const rows = [];
+        snap.docs.forEach(d => {
+          const m = d.data();
+          if (m.status === 'deleted' || m.deleted || m.isDeleted) return;
 
-      const clubs = {}; // gymId -> [rows]
+          const subName = (m.subscriptionName || '').toString();
+          const cs = (m.coachingSessions || '').toString().trim();
+          const price = Number(m.coachingPrice) || 0;
+          const hasCoaching = m.coachingOption === true || cs !== '' || price > 0 || /coaching/i.test(subName);
+          if (!hasCoaching) return;
+
+          // Séance count: prefer the coaching formula, else parse it out of the subscription name.
+          let sessions = 0;
+          const fromCs = cs.match(/(\d+)\s*S[EÉ]ANCE/i) || (cs ? cs.match(/(\d+)/) : null);
+          const fromSub = subName.match(/coaching[^0-9]{0,20}(\d+)/i) || (/coaching/i.test(subName) ? subName.match(/(\d+)\s*S[EÉ]ANCE/i) : null);
+          const num = fromCs || fromSub;
+          if (num) sessions = parseInt(num[1]);
+          const included = sessions === 0; // coaching present but no explicit count → bundled in the plan
+
+          const createdAt = m.createdAt?.toDate ? m.createdAt.toDate().toISOString()
+            : (m.createdAt?._seconds ? new Date(m.createdAt._seconds * 1000).toISOString() : null);
+
+          rows.push({
+            id: d.id,
+            gymId: (m.gymId || 'unknown').toLowerCase(),
+            fullName: `${m.prenom || ''} ${m.nom || ''}`.trim() || m.fullName || 'Inconnu',
+            phone: m.telephone || m.phone || '',
+            formula: cs || (/(coaching[^,;•\n]*)/i.exec(subName)?.[1]?.trim()) || 'Coaching inclus',
+            sessions,
+            included,
+            source: cs || price > 0 || m.coachingOption === true ? 'addon' : 'subscription',
+            price,
+            subscriptionName: subName,
+            contractNumber: m.contractNumber || null,
+            commercial: m.commercial || null,
+            status: m.status || null,
+            createdAt,
+          });
+        });
+        _pcCache = { ts: Date.now(), rows };
+      }
+
+      const clubs = {};
       let total = 0;
-      snap.docs.forEach(d => {
-        const m = d.data();
-        const formula = (m.coachingSessions || '').toString().trim();
-        if (!formula) return;
-        // Parse the séance count from the formula name, e.g. "COACHING DOU 20 SEANCES CASA".
-        const numMatch = formula.match(/(\d+)\s*S[EÉ]ANCE/i) || formula.match(/(\d+)/);
-        const sessions = numMatch ? parseInt(numMatch[1]) : 0;
-        if (sessions < minSessions) return;
-
-        const gymId = (m.gymId || 'unknown').toLowerCase();
-        if (!canSee(gymId)) return;                          // managers only see their own club
-        if (gymScope !== 'all' && gymId !== gymScope) return; // honor the selected club
-
-        const createdAt = m.createdAt?.toDate ? m.createdAt.toDate().toISOString()
-          : (m.createdAt?._seconds ? new Date(m.createdAt._seconds * 1000).toISOString() : null);
-
-        const row = {
-          id: d.id,
-          fullName: `${m.prenom || ''} ${m.nom || ''}`.trim() || m.fullName || 'Inconnu',
-          phone: m.telephone || m.phone || '',
-          formula,
-          sessions,
-          price: Number(m.coachingPrice) || 0,
-          subscriptionName: m.subscriptionName || '',
-          contractNumber: m.contractNumber || null,
-          commercial: m.commercial || null,
-          status: m.status || null,
-          createdAt,
-        };
-        (clubs[gymId] = clubs[gymId] || []).push(row);
+      _pcCache.rows.forEach(r => {
+        if (!canSee(r.gymId)) return;                              // manager access
+        if (gymScope !== 'all' && r.gymId !== gymScope) return;    // selected club
+        // Filter by séances: known count must clear the bar; bundled/unknown-count
+        // coaching only shows at the base level (10+ / Tous), not at 20+/50+/100+.
+        if (r.included) { if (minSessions > 10) return; }
+        else if (r.sessions < minSessions) return;
+        (clubs[r.gymId] = clubs[r.gymId] || []).push(r);
         total++;
       });
 
-      // Sort each club: most séances first, then most recent.
       Object.values(clubs).forEach(arr => arr.sort((a, b) => b.sessions - a.sessions || (b.createdAt || '').localeCompare(a.createdAt || '')));
 
       const order = ['dokarat', 'marjane', 'casa1', 'casa2'];
       const result = [];
-      order.forEach(g => { if (clubs[g]?.length) result.push({ gymId: g, gymName: GYM_NAMES[g], count: clubs[g].length, sessionsTotal: clubs[g].reduce((s, r) => s + r.sessions, 0), clients: clubs[g] }); });
-      Object.keys(clubs).forEach(g => { if (!order.includes(g)) result.push({ gymId: g, gymName: g, count: clubs[g].length, sessionsTotal: clubs[g].reduce((s, r) => s + r.sessions, 0), clients: clubs[g] }); });
+      const build = g => ({ gymId: g, gymName: GYM_NAMES[g] || g, count: clubs[g].length, sessionsTotal: clubs[g].reduce((s, r) => s + r.sessions, 0), clients: clubs[g] });
+      order.forEach(g => { if (clubs[g]?.length) result.push(build(g)); });
+      Object.keys(clubs).forEach(g => { if (!order.includes(g)) result.push(build(g)); });
 
       res.json({ total, minSessions, clubs: result });
     } catch (err) {
