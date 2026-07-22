@@ -88,6 +88,10 @@ const migrations = [
   'ALTER TABLE members_cache ADD COLUMN multiclub INTEGER DEFAULT 0',
   // pending_cache migrations
   'ALTER TABLE pending_cache ADD COLUMN member_signature TEXT',
+  'ALTER TABLE odoo_members_cache ADD COLUMN date_from TEXT',
+  'ALTER TABLE odoo_members_cache ADD COLUMN membership_name TEXT',
+  'ALTER TABLE odoo_members_cache ADD COLUMN amount_paid REAL DEFAULT 0',
+  'ALTER TABLE odoo_members_cache ADD COLUMN is_upgrade INTEGER DEFAULT 0',
 ];
 
 for (const m of migrations) {
