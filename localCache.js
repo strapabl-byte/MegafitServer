@@ -466,6 +466,12 @@ try { db.exec('ALTER TABLE members_cache ADD COLUMN freeze_proof_url TEXT'); } c
 try { db.exec('ALTER TABLE members_cache ADD COLUMN freeze_duration INTEGER'); } catch(_) {}
 try { db.exec('ALTER TABLE members_cache ADD COLUMN freeze_logs TEXT'); } catch(_) {}
 
+// Safe migration: billing-receipt email status (sent / no_email / error / pending)
+// so the Payments page can flag members whose receipt could not be emailed (red).
+try { db.exec('ALTER TABLE members_cache ADD COLUMN receipt_email_status TEXT'); } catch(_) {}
+try { db.exec('ALTER TABLE members_cache ADD COLUMN receipt_email_at TEXT'); } catch(_) {}
+try { db.exec('ALTER TABLE members_cache ADD COLUMN receipt_email_to TEXT'); } catch(_) {}
+
 const insertEntry = db.prepare(`
   INSERT OR REPLACE INTO entries (id, gym_id, date, timestamp, name, method, status, is_face, user_id)
   VALUES (@id, @gym_id, @date, @timestamp, @name, @method, @status, @is_face, @user_id)
@@ -589,9 +595,9 @@ function getDailyStat(gymId, date) {
 
 const insertMember = db.prepare(`
   INSERT OR REPLACE INTO members_cache
-    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date, email, adresse, ville, is_archive, bonus_3months, inscription_id, contract_number, balance_deadline, cheque_photo, cheque_photo_back, is_frozen, frozen_at, freeze_reason, freeze_proof_url, freeze_duration, freeze_logs)
+    (id, gym_id, full_name, phone, plan, subscription_name, expires_on, period_from, status, birthday, cin, qr_token, photo, pdf_url, synced_at, balance, created_at, total_paid, last_payment_date, email, adresse, ville, is_archive, bonus_3months, inscription_id, contract_number, balance_deadline, cheque_photo, cheque_photo_back, is_frozen, frozen_at, freeze_reason, freeze_proof_url, freeze_duration, freeze_logs, receipt_email_status, receipt_email_at, receipt_email_to)
   VALUES
-    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date, @email, @adresse, @ville, @is_archive, @bonus_3months, @inscription_id, @contract_number, @balance_deadline, @cheque_photo, @cheque_photo_back, @is_frozen, @frozen_at, @freeze_reason, @freeze_proof_url, @freeze_duration, @freeze_logs)
+    (@id, @gym_id, @full_name, @phone, @plan, @subscription_name, @expires_on, @period_from, @status, @birthday, @cin, @qr_token, @photo, @pdf_url, @synced_at, @balance, @created_at, @total_paid, @last_payment_date, @email, @adresse, @ville, @is_archive, @bonus_3months, @inscription_id, @contract_number, @balance_deadline, @cheque_photo, @cheque_photo_back, @is_frozen, @frozen_at, @freeze_reason, @freeze_proof_url, @freeze_duration, @freeze_logs, @receipt_email_status, @receipt_email_at, @receipt_email_to)
 `);
 
 function upsertMembers(gymId, membersArr) {
@@ -666,7 +672,26 @@ function upsertMembers(gymId, membersArr) {
     freeze_proof_url:  m.freezeProofUrl || m.freeze_proof_url || null,
     freeze_duration:   m.freezeDuration || m.freeze_duration || null,
     freeze_logs:       m.freezeLogs ? (typeof m.freezeLogs === 'string' ? m.freezeLogs : JSON.stringify(m.freezeLogs)) : (m.freeze_logs || null),
+    receipt_email_status: m.receiptEmailStatus || m.receipt_email_status || null,
+    receipt_email_at:     m.receiptEmailAt || m.receipt_email_at || null,
+    receipt_email_to:     m.receiptEmailTo || m.receipt_email_to || null,
   })));
+}
+
+// Persist the billing-receipt email outcome to disk (sent / no_email / error / pending).
+function setMemberReceiptStatus(id, f = {}) {
+  if (!id) return;
+  try {
+    const sets = [], vals = [];
+    const put = (col, v) => { sets.push(`${col} = ?`); vals.push(v); };
+    if ('status' in f) put('receipt_email_status', f.status || null);
+    if ('at' in f)     put('receipt_email_at', f.at || null);
+    if ('to' in f)     put('receipt_email_to', f.to || null);
+    if (!sets.length) return;
+    db.prepare(`UPDATE members_cache SET ${sets.join(', ')} WHERE id = ?`).run(...vals, id);
+  } catch (err) {
+    console.error('SQLite setMemberReceiptStatus error:', err.message);
+  }
 }
 
 // Targeted freeze/unfreeze write to disk (all gym rows for this member id) so the
@@ -1444,7 +1469,7 @@ module.exports = {
   // daily stats
   upsertDailyStat, getDailyStats, getDailyStatsRange, getDailyStat,
   // members
-  upsertMembers, getMembers, getMemberById, pruneStaleMember, getDebtors, updateMemberChequePhotos, setMemberFreeze,
+  upsertMembers, getMembers, getMemberById, pruneStaleMember, getDebtors, updateMemberChequePhotos, setMemberFreeze, setMemberReceiptStatus,
   // register
   upsertRegister, getRegister, deleteRegisterEntry,
   // decaissements

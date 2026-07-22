@@ -89,13 +89,63 @@ function emailHtml(firstName, memberName, gymName, contractNumber) {
 </html>`;
 }
 
+function receiptHtml(firstName, memberName, gymName, contractNumber) {
+  return `
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="padding:32px 16px;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;border-radius:16px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,0.08);">
+        <tr>
+          <td style="background:#000;padding:28px 32px;text-align:center;">
+            <h1 style="color:#a3ff12;margin:0;font-size:30px;letter-spacing:4px;font-weight:900;">MegaFit</h1>
+            <p style="color:#94a3b8;margin:6px 0 0;font-size:13px;letter-spacing:1px;">${gymName}</p>
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#ffffff;padding:36px 32px;">
+            <h2 style="color:#1e293b;margin:0 0 20px;font-size:20px;">Bonjour ${firstName}</h2>
+            <p style="color:#475569;line-height:1.8;margin:0 0 16px;font-size:15px;">
+              Merci pour votre confiance. Veuillez trouver votre <strong>reçu de paiement</strong> en pièce jointe (PDF).
+            </p>
+            <p style="color:#475569;line-height:1.8;margin:0 0 24px;font-size:15px;">
+              Ce document récapitule votre règlement. Conservez-le comme justificatif.
+            </p>
+            <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:28px;">
+              <tr><td style="padding:18px 20px;">
+                <p style="margin:0 0 8px;color:#64748b;font-size:13px;">Contrat N° <strong style="color:#1e293b;">${contractNumber}</strong></p>
+                <p style="margin:0;color:#64748b;font-size:13px;">Membre : <strong style="color:#1e293b;">${memberName}</strong></p>
+              </td></tr>
+            </table>
+            <hr style="border:none;border-top:1px solid #f1f5f9;margin:0 0 24px;">
+            <p style="color:#94a3b8;font-size:13px;margin:0;text-align:center;line-height:1.7;">
+              À bientôt en salle !<br>
+              <strong style="color:#475569;">L'équipe MegaFit ${gymName}</strong>
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#f8fafc;padding:16px 32px;text-align:center;border-top:1px solid #e2e8f0;">
+            <p style="color:#94a3b8;font-size:11px;margin:0;">Cet email a été envoyé automatiquement. Merci de ne pas y répondre directement.</p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
 module.exports = function router(deps = {}) {
   const r  = express.Router();
   const db = deps.db || null;
 
   // ── POST /api/send-contract-email ───────────────────────────────────────────
   r.post('/api/send-contract-email', express.json({ limit: '25mb' }), async (req, res) => {
-    const { to, memberName, gymId, contractNumber, pdfBase64, inscriptionId } = req.body;
+    const { to, memberName, gymId, contractNumber, pdfBase64, inscriptionId, docType } = req.body;
+    const isReceipt = docType === 'billing' || docType === 'receipt';
 
     // Basic validation
     if (!to || !pdfBase64) {
@@ -111,9 +161,15 @@ module.exports = function router(deps = {}) {
 
     try {
       const recipientEmail = to.trim();
-      const subject = `Votre contrat MegaFit — ${gymName}`;
-      const html = emailHtml(firstName, memberName, gymName, contractNumber || '');
-      const filename = `Contrat_${safeName}_${contractNumber || ''}.pdf`;
+      const subject  = isReceipt
+        ? `Votre reçu de paiement MegaFit — ${gymName}`
+        : `Votre contrat MegaFit — ${gymName}`;
+      const html     = isReceipt
+        ? receiptHtml(firstName, memberName, gymName, contractNumber || '')
+        : emailHtml(firstName, memberName, gymName, contractNumber || '');
+      const filename = isReceipt
+        ? `Recu_Paiement_${safeName}_${contractNumber || ''}.pdf`
+        : `Contrat_${safeName}_${contractNumber || ''}.pdf`;
 
       if (process.env.BREVO_API_KEY) {
         const senderEmail = process.env.SMTP_FROM_INSCRIPTION || 'inscription@megafit.ma';

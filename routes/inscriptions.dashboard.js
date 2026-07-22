@@ -411,6 +411,34 @@ module.exports = function inscriptionsDashboardRouter({ db, admin, lc, apiCache,
         console.warn('⚠️ SQLite member cache update failed (non-blocking):', cacheErr.message);
       }
 
+      // 🧾 Billing-receipt email status (reliable, server-side). If the member has NO
+      // email, the receipt can't be auto-sent → flag it red in Paiements + raise a red
+      // notification. If they DO have an email, mark 'pending' — the dashboard then
+      // generates the receipt PDF and sends it, updating the status to sent/error.
+      try {
+        const hasEmail = !!(member.email && /\S+@\S+\.\S+/.test(String(member.email)));
+        const receiptStatus = hasEmail ? 'pending' : 'no_email';
+        member.receiptEmailStatus = receiptStatus;
+        await db.collection('members').doc(member.id).update({
+          receiptEmailStatus: receiptStatus,
+          receiptEmailTo: hasEmail ? member.email : null,
+          receiptEmailAt: null,
+        }).catch(() => {});
+        try { lc.setMemberReceiptStatus?.(member.id, { status: receiptStatus, to: hasEmail ? member.email : null, at: null }); } catch (_) {}
+        if (!hasEmail) {
+          lc.addNotification({
+            type: 'receipt_email_missing',
+            gymId: member.location || insData?.gymId || '',
+            title: `🧾 Reçu non envoyé — ${member.fullName}`,
+            message: `Email manquant — le reçu de paiement n'a pas pu être envoyé. Ajoutez un email dans Paiements puis renvoyez-le.`,
+            severity: 'critical',
+            route: '/payments',
+            icon: '🧾',
+            refId: `receipt_missing_${member.id}`,
+          });
+        }
+      } catch (rcErr) { console.warn('⚠️ Receipt status init failed (non-blocking):', rcErr.message); }
+
       // ✅ Auto-register: if paid at inscription, write to daily register immediately
         try {
           const espece   = Number(insData?.payments?.espece   || 0);

@@ -263,6 +263,8 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
         commercial:       m.commercial       || null,
         isFrozen:         m.isFrozen         || !!m.is_frozen       || false,
         frozenAt:         m.frozenAt         || m.frozen_at         || null,
+        receiptEmailStatus: m.receiptEmailStatus || m.receipt_email_status || null,
+        receiptEmailTo:     m.receiptEmailTo     || m.receipt_email_to     || null,
       }));
 
       // 5️⃣ Restrict fields for non-admin users
@@ -282,6 +284,7 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           isArchive: m.isArchive || false,
           isFrozen: m.isFrozen || !!m.is_frozen || false,
           frozenAt: m.frozenAt || m.frozen_at || null,
+          receiptEmailStatus: m.receiptEmailStatus || m.receipt_email_status || null,
         }));
       }
 
@@ -463,6 +466,9 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
           freezeProofUrl:  member.freezeProofUrl  || member.freeze_proof_url || null,
           freezeDuration:  member.freezeDuration  || member.freeze_duration  || null,
           freezeLogs:      (() => { const fl = member.freezeLogs || member.freeze_logs; if (!fl) return []; if (Array.isArray(fl)) return fl; try { return JSON.parse(fl); } catch { return []; } })(),
+          receiptEmailStatus: member.receiptEmailStatus || member.receipt_email_status || null,
+          receiptEmailAt:     member.receiptEmailAt     || member.receipt_email_at     || null,
+          receiptEmailTo:     member.receiptEmailTo     || member.receipt_email_to     || null,
           inscriptionId:   member.inscriptionId   || member.inscription_id   || null,
           subscriptionName:member.subscriptionName|| member.subscription_name|| member.plan || null,
           periodFrom:      member.periodFrom      || member.period_from      || null,
@@ -798,6 +804,50 @@ module.exports = function membersRouter({ db, lc, admin, bucket, apiCache, isQuo
     } catch (err) {
       console.error('Unfreeze Error:', err);
       res.status(500).json({ error: 'Failed to unfreeze subscription' });
+    }
+  });
+
+  // ── POST /api/members/:id/receipt-status ──────────────────────────────────
+  // Records the outcome of the auto-emailed billing receipt (Reçu de paiement).
+  // 'sent' | 'no_email' | 'error' | 'pending'. Failures raise a red notification
+  // and the Payments page flags the member red.
+  router.post('/:id/receipt-status', verifyAzureToken, async (req, res) => {
+    try {
+      const { status, to } = req.body || {};
+      const allowed = ['sent', 'no_email', 'error', 'pending'];
+      if (!allowed.includes(status)) return res.status(400).json({ error: 'invalid status' });
+
+      const at = status === 'sent' ? new Date().toISOString() : null;
+      await db.collection('members').doc(req.params.id).update({
+        receiptEmailStatus: status,
+        receiptEmailAt: at,
+        receiptEmailTo: to || null,
+      }).catch(() => {});
+      try { lc.setMemberReceiptStatus?.(req.params.id, { status, to: to || null, at }); } catch (_) {}
+      delete apiCache.profiles[req.params.id];
+
+      if (status === 'error' || status === 'no_email') {
+        try {
+          const snap = await db.collection('members').doc(req.params.id).get();
+          const m = snap.exists ? snap.data() : {};
+          lc.addNotification?.({
+            type: 'receipt_email_failed',
+            gymId: m.location || '',
+            title: `🧾 Reçu non envoyé — ${m.fullName || ''}`,
+            message: status === 'no_email'
+              ? `Email manquant — reçu de paiement non envoyé. Ajoutez un email puis renvoyez-le.`
+              : `Échec de l'envoi du reçu de paiement par email. Réessayez depuis Paiements.`,
+            severity: 'critical',
+            route: '/payments',
+            icon: '🧾',
+            refId: `receipt_fail_${req.params.id}`,
+          });
+        } catch (_) {}
+      }
+      res.json({ ok: true, status });
+    } catch (e) {
+      console.error('Receipt status error:', e.message);
+      res.status(500).json({ error: e.message });
     }
   });
 
