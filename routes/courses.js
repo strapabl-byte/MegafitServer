@@ -171,7 +171,8 @@ module.exports = function coursesRouter({ db, admin }) {
 
   router.post('/api/coaches', verifyAzureToken, async (req, res) => {
     try {
-      const { name, surname, specialty, phone, email, hireDate, bio, photo, gymId } = req.body;
+      const { name, surname, specialty, phone, email, hireDate, bio, photo, gymId,
+              expertise, personality, experienceYears, certifications, instagram } = req.body;
       if (!name || !surname || !specialty || !gymId) return res.status(400).json({ error: 'name, surname, specialty and gymId required' });
 
       if (!req.hasAccessToGym(gymId)) return res.status(403).json({ error: 'Unauthorized for this gym' });
@@ -180,6 +181,12 @@ module.exports = function coursesRouter({ db, admin }) {
       const docRef = await db.collection('coaches').add({
         name, surname, specialty, phone: phone || null, email: email || null,
         hireDate: hireDate || null, bio: bio || null, photo: photo || null,
+        // Rich profile — what each club's coach is experienced in + their character
+        expertise: expertise || null,               // "ce dans quoi il est expérimenté"
+        personality: personality || null,           // traits / caractère
+        experienceYears: experienceYears != null ? Number(experienceYears) : null,
+        certifications: certifications || null,
+        instagram: instagram || null,
         gymId,
         qrToken,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -192,7 +199,8 @@ module.exports = function coursesRouter({ db, admin }) {
 
   router.put('/api/coaches/:id', verifyAzureToken, async (req, res) => {
     try {
-      const allowed = ['name', 'surname', 'specialty', 'phone', 'email', 'hireDate', 'bio', 'photo'];
+      const allowed = ['name', 'surname', 'specialty', 'phone', 'email', 'hireDate', 'bio', 'photo',
+                       'expertise', 'personality', 'experienceYears', 'certifications', 'instagram'];
       const update = Object.fromEntries(allowed.filter(k => req.body[k] !== undefined).map(k => [k, req.body[k]]));
       update.updatedAt = admin.firestore.FieldValue.serverTimestamp();
       const ref = db.collection('coaches').doc(req.params.id);
