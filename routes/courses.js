@@ -171,6 +171,9 @@ module.exports = function coursesRouter({ db, admin }) {
 
   router.post('/api/coaches', verifyAzureToken, async (req, res) => {
     try {
+      // 🔒 Only super admin + RH may create coaches (plain managers are view-only)
+      if (!(req.isAdmin || req.isRH || req.isPerfManager)) return res.status(403).json({ error: 'Seuls le super admin et le RH peuvent ajouter un coach.' });
+
       const { name, surname, specialty, phone, email, hireDate, bio, photo, gymId,
               expertise, personality, experienceYears, certifications, instagram } = req.body;
       if (!name || !surname || !specialty || !gymId) return res.status(400).json({ error: 'name, surname, specialty and gymId required' });
@@ -199,6 +202,8 @@ module.exports = function coursesRouter({ db, admin }) {
 
   router.put('/api/coaches/:id', verifyAzureToken, async (req, res) => {
     try {
+      // 🔒 Only super admin + RH may edit coaches (plain managers are view-only)
+      if (!(req.isAdmin || req.isRH || req.isPerfManager)) return res.status(403).json({ error: 'Seuls le super admin et le RH peuvent modifier un coach.' });
       const allowed = ['name', 'surname', 'specialty', 'phone', 'email', 'hireDate', 'bio', 'photo',
                        'expertise', 'personality', 'experienceYears', 'certifications', 'instagram'];
       const update = Object.fromEntries(allowed.filter(k => req.body[k] !== undefined).map(k => [k, req.body[k]]));
@@ -211,6 +216,8 @@ module.exports = function coursesRouter({ db, admin }) {
   });
 
   router.delete('/api/coaches/:id', verifyAzureToken, async (req, res) => {
+    // 🔒 Only the super admin may delete a coach (RH + managers cannot)
+    if (!req.isAdmin) return res.status(403).json({ error: 'Seul le super admin peut supprimer un coach.' });
     try { await db.collection('coaches').doc(req.params.id).delete(); res.json({ ok: true }); }
     catch (err) { res.status(500).json({ error: 'Failed to delete coach' }); }
   });
