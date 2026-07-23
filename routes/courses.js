@@ -265,7 +265,9 @@ module.exports = function coursesRouter({ db, admin }) {
   let _pcCache = { ts: 0, rows: null };
   router.get('/api/coaches/private-clients', verifyAzureToken, async (req, res) => {
     try {
-      const minSessions = parseInt(req.query.min) || 10;
+      const minSessions = parseInt(req.query.min) || 1;
+      // Exact séance-pack filter: ?exact=50 → only 50-séance packs. 0/absent → all.
+      const exact = parseInt(req.query.exact) || 0;
       const gymScope = (req.query.gymId || 'all').toLowerCase();
       const GYM_NAMES = { dokarat: 'Fès Dokkarat', marjane: 'Fès Saïss', casa1: 'Casa Anfa', casa2: 'Casa Lady' };
       const canSee = (g) => req.isAdmin || (typeof req.hasAccessToGym === 'function' ? req.hasAccessToGym(g) : true);
@@ -342,8 +344,14 @@ module.exports = function coursesRouter({ db, admin }) {
       //    only appears at the base level (10+ / Tous), not at 20+/50+/100+. ──
       const clubs = {};
       accessible.forEach(r => {
-        if (r.included) { if (minSessions > 10) return; }
-        else if (r.sessions < minSessions) return;
+        if (exact > 0) {
+          // Exact pack size only (bundled coaching has no explicit count → excluded)
+          if (r.included || r.sessions !== exact) return;
+        } else {
+          // "Tous": every coaching client (threshold behaviour kept for min)
+          if (r.included) { if (minSessions > 10) return; }
+          else if (r.sessions < minSessions) return;
+        }
         (clubs[r.gymId] = clubs[r.gymId] || []).push(r);
       });
       Object.values(clubs).forEach(arr => arr.sort((a, b) => b.sessions - a.sessions || (b.createdAt || '').localeCompare(a.createdAt || '')));
