@@ -352,7 +352,19 @@ module.exports = function coursesRouter({ db, admin }) {
       order.forEach(g => { if (clubs[g]?.length) result.push(build(g)); });
       Object.keys(clubs).forEach(g => { if (!order.includes(g)) result.push(build(g)); });
 
-      res.json({ total: result.reduce((s, c) => s + c.count, 0), minSessions, stats: { byClub, totals }, clubs: result });
+      // 🔒 Money is super-admin only. Managers get the counts but NO revenue/prices.
+      const showMoney = !!req.isAdmin;
+      let statsOut = { byClub, totals };
+      let clubsOut = result;
+      if (!showMoney) {
+        statsOut = {
+          byClub: byClub.map(s => ({ ...s, revenue: 0 })),
+          totals: { ...totals, revenue: 0 },
+        };
+        clubsOut = result.map(c => ({ ...c, clients: c.clients.map(cl => ({ ...cl, price: 0 })) }));
+      }
+
+      res.json({ total: result.reduce((s, c) => s + c.count, 0), minSessions, stats: statsOut, clubs: clubsOut });
     } catch (err) {
       console.error('[private-clients]', err.message);
       res.status(500).json({ error: 'Failed to fetch private coaching clients' });
