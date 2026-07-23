@@ -164,9 +164,22 @@ module.exports = function coursesRouter({ db, admin }) {
       let query = db.collection('coaches');
       if (gymId && gymId !== 'all') query = query.where('gymId', '==', gymId);
 
-      const snap = await query.orderBy('createdAt', 'desc').get();
-      res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    } catch (err) { res.status(500).json({ error: 'Failed to fetch coaches' }); }
+      // ⚠️ No .orderBy() on the query: `where(gymId).orderBy(createdAt)` needs a COMPOSITE
+      // index (and drops coaches without a createdAt). Fetch the filtered set — a plain
+      // single-field query that always works — then sort newest-first in memory.
+      const snap = await query.get();
+      const ts = (c) => {
+        const v = c.createdAt;
+        if (!v) return 0;
+        if (typeof v === 'string') return new Date(v).getTime() || 0;
+        if (v._seconds != null) return v._seconds * 1000;
+        if (v.seconds != null) return v.seconds * 1000;
+        if (typeof v.toDate === 'function') { try { return v.toDate().getTime(); } catch { return 0; } }
+        return 0;
+      };
+      const coaches = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => ts(b) - ts(a));
+      res.json(coaches);
+    } catch (err) { console.error('[coaches] fetch failed:', err.message); res.status(500).json({ error: 'Failed to fetch coaches' }); }
   });
 
   router.post('/api/coaches', verifyAzureToken, async (req, res) => {
